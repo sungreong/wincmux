@@ -37,8 +37,17 @@ The screenshot above shows two active workspaces:
 | Named-pipe JSON-RPC server (`\\.\pipe\wincmux-rpc`) | Done |
 | SQLite-backed workspace/session/notification/layout storage | Done |
 | Notification ingest (`notify.push`) + unread tracking | Done |
+| Notification delivery ACK + suppression tracking | Done |
+| Notification dedup via `dedup_key` + schema migration (v2) | Done |
+| Pattern-based terminal output detection (NotifyDetector) | Done |
 | Basic pane split/focus + snapshot persistence | Done |
 | Git branch/dirty-flag polling (3s interval) | Done |
+| Stream topic filtering (`session` \| `notify`) | Done |
+| Core auto-respawn on runtime crash + pipe ENOENT retry | Done |
+| Notify stream auto-reconnect after pipe recovery | Done |
+| Native toast delivery via Electron Notification API | Done |
+| Unread badge overlay icon on taskbar | Done |
+| Notification center UI (panel, unread count, mark/clear) | Done |
 | PTY output streaming to renderer pane (real-time) | In Progress |
 | Workspace rename/pin/reorder UI controls | In Progress |
 | Notification center filter (level/workspace) + Jump-to-unread | In Progress |
@@ -121,14 +130,17 @@ npm run package:win
 Electron Renderer (UI)
     └── IPC (contextBridge)
 Electron Main Process
-    └── Named Pipe JSON-RPC client
+    ├── Named Pipe JSON-RPC client (auto-retry + core respawn on ENOENT)
+    ├── Persistent stream sockets (session events / notify events)
+    └── Native Toast + Taskbar Badge (Electron Notification API)
 @wincmux/core (Node.js)
     ├── Workspace Manager
     ├── Session Runner (node-pty / ConPTY)
-    ├── Notification Ingest
+    ├── Notification Ingest (dedup, delivery ACK, suppression)
+    ├── NotifyDetector (pattern-based terminal output detection)
     ├── Layout Snapshot Engine
     ├── Git Metadata Poller
-    └── SQLite Storage
+    └── SQLite Storage (schema v2 with auto-migration)
 ```
 
 ---
