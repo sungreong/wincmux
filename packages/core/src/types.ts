@@ -20,6 +20,10 @@ export interface JsonRpcResponse {
 }
 
 export type SessionStatus = "running" | "exited" | "failed";
+export type NotificationLevel = "info" | "success" | "warning" | "error";
+export type NotificationKind = "assistant_prompt" | "task_done" | "task_error" | "system";
+export type NotificationSourceKind = "hook" | "osc" | "pattern" | "cli" | "system";
+export type StreamTopic = "session" | "notify";
 
 export interface WorkspaceRow {
   id: string;
@@ -46,11 +50,19 @@ export interface SessionRow {
 export interface NotificationRow {
   id: string;
   workspace_id: string;
+  session_id: string | null;
+  pane_id: string | null;
+  kind: NotificationKind;
+  source_kind: NotificationSourceKind;
   title: string;
   body: string;
-  level: string;
+  level: NotificationLevel;
   created_at: string;
+  delivered_at: string | null;
   read_at: string | null;
+  suppressed: number;
+  dedup_key: string | null;
+  signature_hash: string | null;
   source: string;
 }
 

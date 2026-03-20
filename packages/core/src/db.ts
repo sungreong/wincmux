@@ -1,7 +1,7 @@
-﻿import fs from "node:fs";
+import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { SCHEMA_SQL } from "./schema";
+import { BASE_SCHEMA_SQL, MIGRATIONS } from "./schema";
 import type { NotificationRow, SessionRow, SessionStatus, WorkspaceRow } from "./types";
 
 export class DbStore {
@@ -11,7 +11,8 @@ export class DbStore {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
-    this.db.exec(SCHEMA_SQL);
+    this.db.exec(BASE_SCHEMA_SQL);
+    this.applyMigrations();
   }
 
   close(): void {
@@ -91,10 +92,35 @@ export class DbStore {
   insertNotification(row: NotificationRow): void {
     this.db
       .prepare(
-        `INSERT INTO notifications (id, workspace_id, title, body, level, created_at, read_at, source)
-         VALUES (@id, @workspace_id, @title, @body, @level, @created_at, @read_at, @source)`
+        `INSERT INTO notifications (
+          id, workspace_id, session_id, pane_id,
+          kind, source_kind, title, body, level,
+          created_at, delivered_at, read_at,
+          suppressed, dedup_key, signature_hash, source
+        )
+        VALUES (
+          @id, @workspace_id, @session_id, @pane_id,
+          @kind, @source_kind, @title, @body, @level,
+          @created_at, @delivered_at, @read_at,
+          @suppressed, @dedup_key, @signature_hash, @source
+        )`
       )
       .run(row);
+  }
+
+  findRecentDuplicate(workspaceId: string, dedupKey: string, windowStartIso: string): NotificationRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT *
+         FROM notifications
+         WHERE workspace_id = ?
+           AND dedup_key = ?
+           AND created_at >= ?
+         ORDER BY created_at DESC
+         LIMIT 1`
+      )
+      .get(workspaceId, dedupKey, windowStartIso) as NotificationRow | undefined;
+    return row ?? null;
   }
 
   unreadNotifications(workspaceId?: string): NotificationRow[] {
@@ -110,6 +136,14 @@ export class DbStore {
 
   markNotificationRead(id: string, readAt: string): void {
     this.db.prepare("UPDATE notifications SET read_at = ? WHERE id = ?").run(readAt, id);
+  }
+
+  markNotificationDelivered(id: string, deliveredAt: string): void {
+    this.db.prepare("UPDATE notifications SET delivered_at = ?, suppressed = 0 WHERE id = ?").run(deliveredAt, id);
+  }
+
+  markNotificationSuppressed(id: string): void {
+    this.db.prepare("UPDATE notifications SET suppressed = 1 WHERE id = ?").run(id);
   }
 
   clearNotifications(workspaceId?: string): void {
@@ -135,5 +169,50 @@ export class DbStore {
       .prepare("SELECT payload FROM layout_snapshots WHERE workspace_id = ?")
       .get(workspaceId) as { payload: string } | undefined;
     return row?.payload ?? null;
+  }
+
+  private currentSchemaVersion(): number {
+    const row = this.db
+      .prepare("SELECT COALESCE(MAX(version), 1) AS version FROM schema_versions")
+      .get() as { version: number };
+    return row?.version ?? 1;
+  }
+
+  private applyMigrations(): void {
+    const current = this.currentSchemaVersion();
+    const nextVersions = Object.keys(MIGRATIONS)
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value))
+      .sort((a, b) => a - b);
+
+    for (const version of nextVersions) {
+      if (version <= current) {
+        continue;
+      }
+
+      const statements = MIGRATIONS[version] ?? [];
+      const tx = this.db.transaction(() => {
+        for (const statement of statements) {
+          this.execMigrationStatement(statement);
+        }
+        this.db.prepare("INSERT OR IGNORE INTO schema_versions(version, applied_at) VALUES (?, ?)").run(version, new Date().toISOString());
+      });
+      tx();
+    }
+  }
+
+  private execMigrationStatement(sql: string): void {
+    try {
+      this.db.exec(sql);
+    } catch (err) {
+      const message = String((err as Error)?.message ?? err).toLowerCase();
+      if (message.includes("duplicate column name")) {
+        return;
+      }
+      if (message.includes("already exists")) {
+        return;
+      }
+      throw err;
+    }
   }
 }
