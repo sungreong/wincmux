@@ -42,13 +42,21 @@ export const sessionReadSchema = z.object({
   max_bytes: z.number().int().positive().optional()
 });
 
+export const streamTopicSchema = z.enum(["session", "notify"]);
+
 export const sessionStreamSubscribeSchema = z
   .object({
     workspace_id: z.string().uuid().optional(),
-    session_id: z.string().uuid().optional()
+    session_id: z.string().uuid().optional(),
+    topics: z.array(streamTopicSchema).default(["session"])
   })
-  .refine((value) => Boolean(value.workspace_id || value.session_id), {
-    message: "workspace_id or session_id is required"
+  .refine((value) => {
+    if (value.topics.includes("notify")) {
+      return true;
+    }
+    return Boolean(value.workspace_id || value.session_id);
+  }, {
+    message: "workspace_id or session_id is required unless topics includes notify"
   });
 
 export const sessionStreamUnsubscribeSchema = z.object({
@@ -69,12 +77,38 @@ export const sessionResizeSchema = z.object({
   rows: z.number().int().positive()
 });
 
+export const notifyLevelSchema = z.enum(["info", "success", "warning", "error"]);
+export const notificationKindSchema = z.enum([
+  "assistant_prompt",
+  "task_done",
+  "task_error",
+  "system"
+]);
+export const notificationSourceKindSchema = z.enum([
+  "hook",
+  "osc",
+  "pattern",
+  "cli",
+  "system"
+]);
+
 export const notifyPushSchema = z.object({
   workspace_id: z.string().uuid(),
+  session_id: z.string().uuid().nullable().optional(),
+  pane_id: z.string().uuid().nullable().optional(),
+  kind: notificationKindSchema.default("system"),
+  source_kind: notificationSourceKindSchema.default("cli"),
   title: z.string().min(1),
-  body: z.string(),
-  level: z.string().min(1),
-  source: z.string().min(1).optional()
+  body: z.string().default(""),
+  level: notifyLevelSchema.default("info"),
+  source: z.string().min(1).optional(),
+  dedup_key: z.string().min(1).max(200).optional()
+});
+
+export const notifyDeliveryAckSchema = z.object({
+  notification_id: z.string().uuid(),
+  delivered: z.boolean().default(false),
+  suppressed: z.boolean().default(false)
 });
 
 export const notifyUnreadSchema = z

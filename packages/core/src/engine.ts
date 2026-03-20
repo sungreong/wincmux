@@ -6,14 +6,24 @@ import { spawnSync } from "node:child_process";
 import { z } from "zod";
 import { DbStore } from "./db";
 import { LayoutStore } from "./layout";
+import {
+  computeCompletionDedupKey,
+  computePromptDedupKey,
+  extractAssistantReadyMarker,
+  extractPromptMarker,
+  hasAssistantPromptContext,
+  hasAssistantResponseActivity,
+  normalizePromptText
+} from "./notify-detector";
 import { PtyManager } from "./pty";
-import type { JsonRpcRequest, JsonRpcResponse, NotificationRow, SessionRow, WorkspaceRow } from "./types";
+import type { JsonRpcRequest, JsonRpcResponse, NotificationRow, SessionRow, StreamTopic, WorkspaceRow } from "./types";
 import {
   layoutCloseSchema,
   layoutFocusSchema,
   layoutListSchema,
   layoutSplitSchema,
   notifyClearSchema,
+  notifyDeliveryAckSchema,
   notifyUnreadSchema,
   notificationReadSchema,
   notifyPushSchema,
@@ -44,6 +54,7 @@ interface StreamSubscription {
   socket: net.Socket;
   workspace_id?: string;
   session_id?: string;
+  topics: StreamTopic[];
 }
 
 export class CoreEngine {
@@ -54,6 +65,15 @@ export class CoreEngine {
   private readonly sessionWorkspace = new Map<string, string>();
   private readonly streamSubscriptions = new Map<string, StreamSubscription>();
   private readonly socketSubscriptions = new Map<net.Socket, Set<string>>();
+  private readonly promptDetector = new Map<string, {
+    buffer: string;
+    last_notified_at: number;
+    last_signature: string;
+    response_active: boolean;
+    last_completion_notified_at: number;
+    ready_visible: boolean;
+    bootstrapped_ready: boolean;
+  }>();
   private readonly server: net.Server;
   private gitTimer?: NodeJS.Timeout;
 
@@ -80,6 +100,7 @@ export class CoreEngine {
     this.pty.closeAll();
     this.outputBuffers.clear();
     this.sessionWorkspace.clear();
+    this.promptDetector.clear();
     this.streamSubscriptions.clear();
     this.socketSubscriptions.clear();
     this.server.close();
@@ -137,6 +158,8 @@ export class CoreEngine {
           return this.ok(req.id, this.notifyMarkRead(req.params));
         case "notify.clear":
           return this.ok(req.id, this.notifyClear(req.params));
+        case "notify.delivery_ack":
+          return this.ok(req.id, this.notifyDeliveryAck(req.params));
         case "layout.split":
           return this.ok(req.id, this.layoutSplit(req.params));
         case "layout.focus":
@@ -192,6 +215,7 @@ export class CoreEngine {
     for (const s of sessions) {
       this.pty.close(s.id);
       this.outputBuffers.delete(s.id);
+      this.promptDetector.delete(s.id);
     }
     this.db.deleteWorkspace(p.id);
     return { ok: true };
@@ -231,6 +255,15 @@ export class CoreEngine {
     this.db.insertSession(row);
     this.sessionWorkspace.set(sessionId, p.workspace_id);
     this.outputBuffers.set(sessionId, "");
+    this.promptDetector.set(sessionId, {
+      buffer: "",
+      last_notified_at: 0,
+      last_signature: "",
+      response_active: false,
+      last_completion_notified_at: 0,
+      ready_visible: false,
+      bootstrapped_ready: false
+    });
     this.emitStreamEvent("session.state_changed", {
       session_id: sessionId,
       workspace_id: p.workspace_id,
@@ -246,11 +279,17 @@ export class CoreEngine {
         workspace_id: p.workspace_id,
         output: chunk
       });
+      this.maybeIngestPromptPattern({
+        workspace_id: p.workspace_id,
+        session_id: sessionId,
+        output_chunk: chunk
+      });
     });
     pty.onExit(({ exitCode }) => {
       this.db.updateSessionResult(sessionId, exitCode === 0 ? "exited" : "failed", new Date().toISOString(), exitCode);
       this.pty.close(sessionId);
       this.outputBuffers.delete(sessionId);
+      this.promptDetector.delete(sessionId);
       this.emitStreamEvent("session.exit", {
         session_id: sessionId,
         workspace_id: p.workspace_id,
@@ -278,6 +317,7 @@ export class CoreEngine {
     const workspaceId = this.sessionWorkspace.get(p.session_id) ?? null;
     this.pty.close(p.session_id);
     this.outputBuffers.delete(p.session_id);
+    this.promptDetector.delete(p.session_id);
     this.db.updateSessionResult(p.session_id, "exited", new Date().toISOString(), 0);
     this.emitStreamEvent("session.state_changed", {
       session_id: p.session_id,
@@ -333,7 +373,8 @@ export class CoreEngine {
       id: subscriptionId,
       socket,
       workspace_id: p.workspace_id,
-      session_id: p.session_id
+      session_id: p.session_id,
+      topics: p.topics
     };
 
     this.streamSubscriptions.set(subscriptionId, subscription);
@@ -353,20 +394,44 @@ export class CoreEngine {
     return { ok: true };
   }
 
-  private notifyPush(params: unknown): { notification: NotificationRow } {
+  private notifyPush(params: unknown): { notification: NotificationRow; deduped: boolean } {
     const p = notifyPushSchema.parse(params ?? {});
+    const now = new Date().toISOString();
+    const dedupKey = (
+      p.dedup_key ??
+      [p.workspace_id, p.session_id ?? "", p.kind, p.title, p.body].join("|").toLowerCase()
+    ).slice(0, 200);
+    const windowStart = new Date(Date.now() - 30_000).toISOString();
+    const duplicate = this.db.findRecentDuplicate(p.workspace_id, dedupKey, windowStart);
+    if (duplicate) {
+      return { notification: duplicate, deduped: true };
+    }
+
     const row: NotificationRow = {
       id: randomUUID(),
       workspace_id: p.workspace_id,
+      session_id: p.session_id ?? null,
+      pane_id: p.pane_id ?? null,
+      kind: p.kind,
+      source_kind: p.source_kind,
       title: p.title,
       body: p.body,
       level: p.level,
-      created_at: new Date().toISOString(),
+      created_at: now,
+      delivered_at: null,
       read_at: null,
+      suppressed: 0,
+      dedup_key: dedupKey,
+      signature_hash: dedupKey,
       source: p.source ?? "cli"
     };
     this.db.insertNotification(row);
-    return { notification: row };
+    this.emitStreamEvent("notify.created", {
+      workspace_id: row.workspace_id,
+      session_id: row.session_id ?? undefined,
+      notification: row
+    });
+    return { notification: row, deduped: false };
   }
 
   private notifyUnread(params: unknown): { items: NotificationRow[]; count: number } {
@@ -385,6 +450,101 @@ export class CoreEngine {
     const p = notifyClearSchema?.parse(params ?? {}) ?? {};
     this.db.clearNotifications(p?.workspace_id);
     return { ok: true };
+  }
+
+  private notifyDeliveryAck(params: unknown): { ok: true } {
+    const p = notifyDeliveryAckSchema.parse(params ?? {});
+    if (p.delivered) {
+      this.db.markNotificationDelivered(p.notification_id, new Date().toISOString());
+    }
+    if (p.suppressed) {
+      this.db.markNotificationSuppressed(p.notification_id);
+    }
+    return { ok: true };
+  }
+
+  private maybeIngestPromptPattern(input: {
+    workspace_id: string;
+    session_id: string;
+    output_chunk: string;
+  }): void {
+    const detectorState = this.promptDetector.get(input.session_id);
+    if (!detectorState) {
+      return;
+    }
+
+    const text = normalizePromptText(input.output_chunk);
+    if (!text) {
+      return;
+    }
+
+    detectorState.buffer = `${detectorState.buffer} ${text}`.slice(-5000);
+    if (!hasAssistantPromptContext(detectorState.buffer)) {
+      return;
+    }
+    if (hasAssistantResponseActivity(text)) {
+      detectorState.response_active = true;
+    }
+
+    const marker = extractPromptMarker(detectorState.buffer);
+    if (marker) {
+      const signature = marker.snippet.toLowerCase();
+      const nowMs = Date.now();
+      if (nowMs - detectorState.last_notified_at >= 30_000 || detectorState.last_signature !== signature) {
+        detectorState.last_notified_at = nowMs;
+        detectorState.last_signature = signature;
+        const shortSession = input.session_id.slice(0, 8);
+        this.notifyPush({
+          workspace_id: input.workspace_id,
+          session_id: input.session_id,
+          pane_id: null,
+          kind: "assistant_prompt",
+          source_kind: "pattern",
+          title: "Assistant input requested",
+          body: `session ${shortSession}: ${marker.snippet}`,
+          level: "info",
+          source: "core-pattern-detector",
+          dedup_key: computePromptDedupKey(input.session_id, marker.snippet)
+        });
+      }
+    }
+
+    const readyMarker = extractAssistantReadyMarker(detectorState.buffer);
+    const nowMs = Date.now();
+    if (!readyMarker) {
+      detectorState.ready_visible = false;
+      return;
+    }
+    if (detectorState.ready_visible) {
+      return;
+    }
+    detectorState.ready_visible = true;
+    if (!detectorState.bootstrapped_ready) {
+      detectorState.bootstrapped_ready = true;
+      detectorState.response_active = false;
+      return;
+    }
+    if (!detectorState.response_active) {
+      return;
+    }
+    if (nowMs - detectorState.last_completion_notified_at < 20_000) {
+      return;
+    }
+    detectorState.last_completion_notified_at = nowMs;
+    detectorState.response_active = false;
+    const shortSession = input.session_id.slice(0, 8);
+    this.notifyPush({
+      workspace_id: input.workspace_id,
+      session_id: input.session_id,
+      pane_id: null,
+      kind: "task_done",
+      source_kind: "pattern",
+      title: "Assistant response completed",
+      body: `session ${shortSession}: response is ready`,
+      level: "success",
+      source: "core-pattern-detector",
+      dedup_key: computeCompletionDedupKey(input.session_id, readyMarker)
+    });
   }
 
   private layoutSplit(params: unknown): { pane_ids: [string, string] } {
@@ -469,7 +629,11 @@ export class CoreEngine {
   }
 
   private emitStreamEvent(method: string, params: Record<string, unknown>): void {
+    const topic = this.eventTopic(method);
     for (const subscription of this.streamSubscriptions.values()) {
+      if (!subscription.topics.includes(topic)) {
+        continue;
+      }
       if (!this.matchesStreamSubscription(subscription, params)) {
         continue;
       }
@@ -485,6 +649,13 @@ export class CoreEngine {
         this.removeSubscription(subscription.id);
       }
     }
+  }
+
+  private eventTopic(method: string): StreamTopic {
+    if (method.startsWith("notify.")) {
+      return "notify";
+    }
+    return "session";
   }
 
   private matchesStreamSubscription(subscription: StreamSubscription, params: Record<string, unknown>): boolean {
