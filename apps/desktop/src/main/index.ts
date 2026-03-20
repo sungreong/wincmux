@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import { pathToFileURL } from "node:url";
 import { spawn, type ChildProcess } from "node:child_process";
-import { app, BrowserWindow, ipcMain, dialog, clipboard, Menu, shell, nativeImage, type NativeImage, type OpenDialogOptions, type WebContents } from "electron";
+import { app, BrowserWindow, ipcMain, dialog, clipboard, Menu, shell, nativeImage, Notification as ElectronNotification, type NativeImage, type OpenDialogOptions, type WebContents } from "electron";
 
 type RpcPayload = {
   method: string;
@@ -14,6 +14,17 @@ type RpcPayload = {
 type StreamFilter = {
   workspace_id?: string;
   session_id?: string;
+  topics?: Array<"session" | "notify">;
+};
+
+type NotificationRecord = {
+  id: string;
+  workspace_id: string;
+  session_id?: string | null;
+  pane_id?: string | null;
+  title: string;
+  body?: string;
+  level?: string;
 };
 
 type StreamEvent = {
@@ -38,6 +49,21 @@ const streamConnections = new Map<string, { socket: net.Socket; subscriptionId: 
 let streamRequestSeq = 1;
 let unreadBadgeCount = 0;
 const badgeIconCache = new Map<string, NativeImage>();
+let notifyStreamSocket: net.Socket | null = null;
+let notifyStreamSubscriptionId: string | null = null;
+let appIsQuitting = false;
+let coreRespawnPromise: Promise<void> | null = null;
+let activeContext: {
+  workspace_id: string | null;
+  pane_id: string | null;
+  session_id: string | null;
+  app_focused: boolean;
+} = {
+  workspace_id: null,
+  pane_id: null,
+  session_id: null,
+  app_focused: false
+};
 
 function perfLogPath(): string {
   const localAppData = process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local");
@@ -100,6 +126,14 @@ function overlayIconForCount(count: number): NativeImage | null {
   return icon;
 }
 
+function broadcastToAllWindows(channel: string, payload: unknown): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send(channel, payload);
+    }
+  }
+}
+
 function applyUnreadBadge(count: number): void {
   unreadBadgeCount = normalizeUnreadCount(count);
 
@@ -130,6 +164,12 @@ function createWindow(): void {
   });
 
   win.loadFile(path.join(__dirname, "..", "renderer", "index.html"));
+  win.on("focus", () => {
+    activeContext.app_focused = true;
+  });
+  win.on("blur", () => {
+    activeContext.app_focused = false;
+  });
   applyUnreadBadge(unreadBadgeCount);
 }
 
@@ -142,7 +182,7 @@ function toIpcEnvelope<T>(fn: () => Promise<T>): Promise<IpcEnvelope<T>> {
     }));
 }
 
-function pipeCall(payload: RpcPayload): Promise<unknown> {
+function pipeCallOnce(payload: RpcPayload): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const client = net.createConnection(PIPE_NAME);
     let buffer = "";
@@ -178,6 +218,20 @@ function pipeCall(payload: RpcPayload): Promise<unknown> {
       client.write(`${JSON.stringify(request)}\n`);
     });
   });
+}
+
+async function pipeCall(payload: RpcPayload, attempt = 0): Promise<unknown> {
+  try {
+    return await pipeCallOnce(payload);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" && attempt < 3) {
+      await respawnCore().catch(() => {});
+      await new Promise<void>((r) => setTimeout(r, 150 * (attempt + 1)));
+      return pipeCall(payload, attempt + 1);
+    }
+    throw err;
+  }
 }
 
 function createPersistentStream(webContents: WebContents, filter: StreamFilter): Promise<string> {
@@ -267,6 +321,160 @@ async function closeStream(subscriptionId: string): Promise<void> {
   conn.socket.write(`${JSON.stringify(request)}\n`);
   conn.socket.end();
   streamConnections.delete(subscriptionId);
+}
+
+function shouldSuppressNativeToast(notification: NotificationRecord): boolean {
+  if (!activeContext.app_focused) {
+    return false;
+  }
+  if (!notification.session_id) {
+    return false;
+  }
+  return activeContext.session_id === notification.session_id;
+}
+
+async function ackNotificationDelivery(notificationId: string, delivered: boolean, suppressed: boolean): Promise<void> {
+  await pipeCall({
+    method: "notify.delivery_ack",
+    params: {
+      notification_id: notificationId,
+      delivered,
+      suppressed
+    }
+  }).catch(() => {});
+}
+
+async function handleNotifyCreated(notification: NotificationRecord): Promise<void> {
+  if (!notification?.id) {
+    return;
+  }
+
+  const suppressed = shouldSuppressNativeToast(notification);
+  if (suppressed) {
+    await ackNotificationDelivery(notification.id, false, true);
+  } else if (ElectronNotification.isSupported()) {
+    const toast = new ElectronNotification({
+      title: notification.title,
+      body: notification.body ?? "",
+      silent: false,
+      timeoutType: "default"
+    });
+    toast.on("show", () => {
+      void ackNotificationDelivery(notification.id, true, false);
+    });
+    toast.on("click", () => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (win.isDestroyed()) {
+          continue;
+        }
+        if (win.isMinimized()) {
+          win.restore();
+        }
+        win.show();
+        win.focus();
+        win.webContents.send("wincmux:notification-open", {
+          notification_id: notification.id
+        });
+      }
+    });
+    toast.show();
+  }
+
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) {
+      continue;
+    }
+    win.webContents.send("wincmux:stream-event", {
+      method: "notify.created",
+      params: { notification }
+    });
+  }
+}
+
+async function startNotifyStream(): Promise<void> {
+  if (notifyStreamSocket && !notifyStreamSocket.destroyed) {
+    return;
+  }
+
+  await stopNotifyStream();
+  const socket = net.createConnection(PIPE_NAME);
+  notifyStreamSocket = socket;
+  let buffer = "";
+  const requestId = streamRequestSeq++;
+
+  socket.once("error", () => {
+    // close event always fires after error — reconnect is handled there
+  });
+
+  socket.on("close", () => {
+    notifyStreamSocket = null;
+    notifyStreamSubscriptionId = null;
+    if (!appIsQuitting) {
+      setTimeout(() => { void startNotifyStream().catch(() => {}); }, 2000);
+    }
+  });
+
+  socket.on("data", (chunk: Buffer) => {
+    buffer += chunk.toString("utf8");
+    let index = buffer.indexOf("\n");
+    while (index >= 0) {
+      const line = buffer.slice(0, index).trim();
+      buffer = buffer.slice(index + 1);
+      if (line.length > 0) {
+        let parsed: StreamEvent;
+        try {
+          parsed = JSON.parse(line) as StreamEvent;
+        } catch {
+          index = buffer.indexOf("\n");
+          continue;
+        }
+        if (parsed.id === requestId) {
+          if (parsed.error) {
+            socket.destroy();
+            return;
+          }
+          const subscriptionId = (parsed.result as { subscription_id?: string } | undefined)?.subscription_id;
+          notifyStreamSubscriptionId = subscriptionId ?? null;
+          continue;
+        }
+        if (parsed.method === "notify.created" && !parsed.id) {
+          const notification = (parsed.params as { notification?: NotificationRecord } | undefined)?.notification;
+          if (notification) {
+            void handleNotifyCreated(notification);
+          }
+        }
+      }
+      index = buffer.indexOf("\n");
+    }
+  });
+
+  socket.on("connect", () => {
+    socket.write(`${JSON.stringify({
+      jsonrpc: "2.0",
+      id: requestId,
+      method: "session.stream.subscribe",
+      params: { topics: ["notify"] }
+    })}\n`);
+  });
+}
+
+async function stopNotifyStream(): Promise<void> {
+  if (!notifyStreamSocket) {
+    return;
+  }
+  if (notifyStreamSubscriptionId) {
+    const requestId = streamRequestSeq++;
+    notifyStreamSocket.write(`${JSON.stringify({
+      jsonrpc: "2.0",
+      id: requestId,
+      method: "session.stream.unsubscribe",
+      params: { subscription_id: notifyStreamSubscriptionId }
+    })}\n`);
+  }
+  notifyStreamSubscriptionId = null;
+  notifyStreamSocket.end();
+  notifyStreamSocket.destroy();
+  notifyStreamSocket = null;
 }
 
 function resolveCoreEntrypoint(): string | null {
@@ -388,10 +596,45 @@ function startCoreProcess(entry: string, runtime: { command: string; env: NodeJS
   });
   coreProc.once("exit", (code, signal) => {
     coreExitReason = `core exited code=${code ?? "null"} signal=${signal ?? "null"}`;
+    if (process.env.WINCMUX_SPAWN_CORE === "1" && !appIsQuitting) {
+      setTimeout(() => { void respawnCore().catch(() => {}); }, 500);
+    }
   });
   coreProc.once("error", (err) => {
     coreExitReason = `core spawn error: ${err.message}`;
   });
+}
+
+function respawnCore(): Promise<void> {
+  if (process.env.WINCMUX_SPAWN_CORE !== "1") {
+    return Promise.resolve();
+  }
+
+  if (coreRespawnPromise) {
+    return coreRespawnPromise;
+  }
+
+  coreRespawnPromise = (async () => {
+    broadcastToAllWindows("wincmux:core-status", { status: "respawning" });
+    try {
+      const entry = resolveCoreEntrypoint();
+      if (!entry) {
+        throw new Error("Unable to locate core dist/index.js for respawn");
+      }
+      startCoreProcess(entry, resolveCoreRuntime());
+      await waitForPipeReady(10_000);
+      void startNotifyStream().catch(() => {});
+      broadcastToAllWindows("wincmux:core-status", { status: "ready" });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      broadcastToAllWindows("wincmux:core-status", { status: "dead", error: message });
+      throw err;
+    } finally {
+      coreRespawnPromise = null;
+    }
+  })();
+
+  return coreRespawnPromise;
 }
 
 function validateWorkspacePath(workspacePath: string): string {
@@ -530,10 +773,25 @@ function registerIpcHandlers(): void {
     applyUnreadBadge(payload?.count ?? 0);
     return { ok: true };
   });
+  ipcMain.handle("wincmux:update-active-context", async (_event, payload: {
+    workspace_id?: string | null;
+    pane_id?: string | null;
+    session_id?: string | null;
+    app_focused?: boolean;
+  }) => {
+    activeContext = {
+      workspace_id: payload?.workspace_id ?? null,
+      pane_id: payload?.pane_id ?? null,
+      session_id: payload?.session_id ?? null,
+      app_focused: Boolean(payload?.app_focused)
+    };
+    return { ok: true };
+  });
 }
 
 app.whenReady()
   .then(async () => {
+    app.setAppUserModelId("wincmux.dev");
     try {
       await ensureCoreReady();
     } catch (err) {
@@ -545,6 +803,9 @@ app.whenReady()
     }
 
     registerIpcHandlers();
+    await startNotifyStream().catch((err) => {
+      console.error("[WinCMux] Notify stream startup failed:", err);
+    });
     createWindow();
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) {
@@ -571,9 +832,11 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  appIsQuitting = true;
   for (const subscriptionId of [...streamConnections.keys()]) {
     void closeStream(subscriptionId);
   }
+  void stopNotifyStream();
   if (coreProc && !coreProc.killed) {
     coreProc.kill();
   }

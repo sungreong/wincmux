@@ -5,7 +5,8 @@ const paneHandlers = {
   closePane: async () => {},
   hidePane: async () => {},
   adjustPaneFont: async () => {},
-  insertQuickCommand: async () => {}
+  insertQuickCommand: async () => {},
+  markPaneNotificationsRead: async () => {}
 };
 
 function bindQuickCommandPanelSafe(paneId, quickPanel, quickBtn) {
@@ -66,6 +67,9 @@ function setPaneHandlers(handlers = {}) {
   }
   if (typeof handlers.insertQuickCommand === "function") {
     paneHandlers.insertQuickCommand = handlers.insertQuickCommand;
+  }
+  if (typeof handlers.markPaneNotificationsRead === "function") {
+    paneHandlers.markPaneNotificationsRead = handlers.markPaneNotificationsRead;
   }
 }
 
@@ -169,6 +173,28 @@ function applyPaneSelectionStyles() {
   selectedPaneLabel.textContent = `Selected Pane: ${state.selectedPaneId ? state.selectedPaneId.slice(0, 8) : "-"}`;
 }
 
+function unreadRowsForPane(paneId, sessionId) {
+  const workspaceId = selectedWorkspace()?.id ?? null;
+  if (!workspaceId) {
+    return [];
+  }
+
+  return state.notifications.filter((row) => {
+    const target = normalizeNotificationTarget(row);
+    const targetWorkspaceId = target.workspaceId ?? row.workspace_id ?? null;
+    if (targetWorkspaceId !== workspaceId) {
+      return false;
+    }
+    if (target.paneId) {
+      return target.paneId === paneId;
+    }
+    if (sessionId && target.sessionId) {
+      return target.sessionId === sessionId;
+    }
+    return false;
+  });
+}
+
 async function selectPane(paneId, options = {}) {
   const { persist = true, focusTerm = true } = options;
   if (!paneId || !leafPanes().some((p) => p.pane_id === paneId)) {
@@ -184,6 +210,7 @@ async function selectPane(paneId, options = {}) {
       await rpc("layout.focus", { workspace_id: ws.id, pane_id: paneId });
     }
   }
+  await paneHandlers.markPaneNotificationsRead(paneId).catch(() => {});
 
   if (focusTerm) {
     window.requestAnimationFrame(() => {
@@ -291,7 +318,14 @@ function queuePaneInput(view, data) {
   }
 
   view.flushTimer = setTimeout(() => {
-    flushPaneInput(view).catch((err) => setStatus(`Terminal input error: ${err.message ?? err}`, true));
+    flushPaneInput(view).catch((err) => {
+      const msg = err?.message ?? String(err);
+      if (msg.includes("ENOENT") || msg.includes("pipe")) {
+        setStatus("Core reconnecting, retrying input...", true);
+      } else {
+        setStatus(`Terminal input error: ${msg}`, true);
+      }
+    });
   }, 12);
 }
 
@@ -302,9 +336,9 @@ async function flushPaneInput(view) {
   }
 
   const payload = view.pendingInput;
-  view.pendingInput = "";
   const started = performance.now();
   await rpc("session.write", { session_id: view.sessionId, data: payload });
+  view.pendingInput = view.pendingInput.slice(payload.length);
   const latency = performance.now() - started;
   state.metrics.input_latency_ms.push(latency);
   if (state.metrics.input_latency_ms.length > 50) {
@@ -314,7 +348,14 @@ async function flushPaneInput(view) {
 
   if (view.pendingInput) {
     view.flushTimer = setTimeout(() => {
-      flushPaneInput(view).catch((err) => setStatus(`Terminal input error: ${err.message ?? err}`, true));
+      flushPaneInput(view).catch((err) => {
+        const msg = err?.message ?? String(err);
+        if (msg.includes("ENOENT") || msg.includes("pipe")) {
+          setStatus("Core reconnecting, retrying input...", true);
+        } else {
+          setStatus(`Terminal input error: ${msg}`, true);
+        }
+      });
     }, 12);
   }
 }
@@ -445,6 +486,14 @@ function createPaneLeaf(node, hosts) {
   idEl.className = "pane-id";
   idEl.textContent = paneId.slice(0, 8);
 
+  const unreadBadgeEl = document.createElement("span");
+  unreadBadgeEl.className = "pane-unread-badge";
+  unreadBadgeEl.hidden = true;
+
+  const idWrap = document.createElement("div");
+  idWrap.className = "pane-id-wrap";
+  idWrap.append(idEl, unreadBadgeEl);
+
   const statusEl = document.createElement("span");
   statusEl.className = "pane-session";
   statusEl.textContent = "No session";
@@ -516,7 +565,7 @@ function createPaneLeaf(node, hosts) {
   quickBtn.innerHTML = '<span class="quickcmd-icon" aria-hidden="true"></span>';
 
   actions.append(fontDownBtn, fontUpBtn, splitHBtn, splitVBtn, startBtn, closeBtn, hidePaneBtn, quickBtn, closePaneBtn);
-  header.append(idEl, statusEl, actions);
+  header.append(idWrap, statusEl, actions);
 
   const quickPanel = document.createElement("div");
   quickPanel.className = "quickcmd-popover";
@@ -557,7 +606,8 @@ function createPaneLeaf(node, hosts) {
     fontDownBtn,
     fontUpBtn,
     quickBtn,
-    quickPanel
+    quickPanel,
+    unreadBadgeEl
   });
   bindQuickCommandPanelSafe(paneId, quickPanel, quickBtn);
 
@@ -792,6 +842,7 @@ function refreshPaneBindings() {
 
     const meta = state.paneMeta.get(paneId);
     const fontSize = currentPaneFontSize(state.selectedWorkspaceId, paneId);
+    const unreadCount = unreadRowsForPane(paneId, sessionId).length;
     if (meta) {
       if (sessionId) {
         const session = runningMap.get(sessionId);
@@ -807,6 +858,12 @@ function refreshPaneBindings() {
       meta.fontUpBtn.disabled = fontSize >= PANE_FONT_LIMITS.max;
       meta.closePaneBtn.disabled = leafCount <= 1;
       meta.hidePaneBtn.disabled = leafCount <= 1;
+      meta.unreadBadgeEl.hidden = unreadCount <= 0;
+      meta.unreadBadgeEl.textContent = unreadCount > 99 ? "99+" : String(unreadCount);
+    }
+    const card = state.paneCards.get(paneId);
+    if (card) {
+      card.classList.toggle("pane-has-unread", unreadCount > 0);
     }
 
     const view = state.paneViews.get(paneId);
