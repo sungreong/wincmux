@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WinCMux</title>
+    <link rel="stylesheet" href="./vendor/xterm.css" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="appGrid" class="app-grid">
+      <aside class="panel panel-left">
+        <h2>Workspaces</h2>
+
+        <div class="workspace-form">
+          <input id="wsNameInput" placeholder="Workspace name" />
+          <div class="path-row">
+            <input id="wsPathInput" placeholder="C:\\project\\my-workspace" />
+            <button id="pickFolderBtn">Browse</button>
+          </div>
+          <div class="workspace-actions">
+            <button id="createWorkspaceBtn">Create</button>
+            <button id="deleteWorkspaceBtn">Delete</button>
+            <button id="openInVscodeBtn" class="icon-btn vscode-btn" title="Open selected workspace in VSCode" aria-label="Open selected workspace in VSCode">
+              <span class="vscode-icon" aria-hidden="true"></span>
+            </button>
+          </div>
+        </div>
+
+        <ul id="workspaceList"></ul>
+      </aside>
+
+      <div id="leftResizeHandle" class="resize-handle" title="Resize left panel"></div>
+
+      <main class="panel panel-center">
+        <div class="toolbar">
+          <button id="toggleWorkspacePanelBtn">Hide Workspaces</button>
+          <button id="toggleNotificationPanelBtn">Hide Notifications</button>
+          <button id="hiddenPanesBtn">Hidden Panes (0)</button>
+          <span id="selectedPaneLabel" class="muted">Selected Pane: -</span>
+          <div id="hiddenPanesPopover" class="hidden-panes-popover"></div>
+        </div>
+
+        <div id="paneSurface" class="pane-surface"></div>
+      </main>
+
+      <div id="rightResizeHandle" class="resize-handle" title="Resize right panel"></div>
+
+      <aside class="panel panel-right">
+        <h2 id="notifTitle">Notifications (0 unread)</h2>
+        <div class="notif-actions">
+          <button id="refreshUnreadBtn">Refresh</button>
+          <button id="markLatestReadBtn">Mark Latest</button>
+          <button id="clearUnreadBtn">Clear</button>
+        </div>
+        <ul id="notificationList"></ul>
+      </aside>
+    </div>
+
+    <footer id="statusBar">Ready</footer>
+
+    <script src="./vendor/xterm.js"></script>
+    <script src="./vendor/addon-fit.js"></script>
+    <script src="./vendor/addon-unicode11.js"></script>
+    <script src="./renderer.shared.js"></script>
+    <script src="./renderer.layout.js"></script>
+    <script src="./renderer.panes.js"></script>
+    <script src="./renderer.quickcmd.js"></script>
+    <script src="./renderer.hidden.js"></script>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

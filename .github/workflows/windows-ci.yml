@@ -1,0 +1,26 @@
+﻿name: windows-ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  node-build-test:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install
+        run: npm install
+      - name: Lint
+        run: npm run lint
+      - name: Core tests
+        run: npm --workspace @wincmux/core run test
+      - name: Desktop build
+        run: npm --workspace @wincmux/desktop run build

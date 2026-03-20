@@ -1,0 +1,12 @@
+﻿[terminal]
+shell = "pwsh"
+
+[storage]
+db_path = "%APPDATA%\\WinCMux\\wincmux.db"
+
+[logging]
+path = "%LOCALAPPDATA%\\WinCMux\\logs\\wincmux.log"
+level = "info"
+
+[rpc]
+pipe_name = "\\\\.\\pipe\\wincmux-rpc"

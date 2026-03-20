@@ -1,0 +1,31 @@
+{
+  "name": "wincmux",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WinCMux Electron + Node MVP",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm --workspace @wincmux/desktop run dev",
+    "dev:core": "npm --workspace @wincmux/core run dev",
+    "dev:desktop": "npm --workspace @wincmux/desktop run dev",
+    "build": "npm-run-all build:core build:desktop",
+    "build:core": "npm --workspace @wincmux/core run build",
+    "build:desktop": "npm --workspace @wincmux/desktop run build",
+    "test": "npm --workspace @wincmux/core run test",
+    "lint": "npm-run-all lint:*",
+    "lint:core": "npm --workspace @wincmux/core run lint",
+    "lint:desktop": "npm --workspace @wincmux/desktop run lint",
+    "package:win": "npm --workspace @wincmux/desktop run package:win"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.11",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

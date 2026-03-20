@@ -1,0 +1,50 @@
+﻿{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wincmux.dev/schemas/jsonrpc.request.schema.json",
+  "title": "WinCMux JSON-RPC Request",
+  "type": "object",
+  "required": ["jsonrpc", "id", "method"],
+  "properties": {
+    "jsonrpc": {
+      "type": "string",
+      "const": "2.0"
+    },
+    "id": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "integer" },
+        { "type": "number" },
+        { "type": "null" }
+      ]
+    },
+    "method": {
+      "type": "string",
+      "enum": [
+        "health.check",
+        "workspace.create",
+        "workspace.list",
+        "workspace.rename",
+        "workspace.delete",
+        "workspace.pin",
+        "workspace.reorder",
+        "session.run",
+        "session.list",
+        "session.close",
+        "session.resize",
+        "session.write",
+        "session.read",
+        "notify.push",
+        "notify.unread",
+        "notify.mark_read",
+        "notify.clear",
+        "layout.split",
+        "layout.focus",
+        "layout.list"
+      ]
+    },
+    "params": {
+      "type": ["object", "array", "null"]
+    }
+  },
+  "additionalProperties": true
+}

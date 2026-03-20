@@ -1,0 +1,43 @@
+{
+  "name": "@wincmux/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/main/index.js",
+  "scripts": {
+    "dev": "npm run build && npm --workspace @wincmux/core run build && cross-env WINCMUX_SPAWN_CORE=1 electron ./dist/main/index.js",
+    "build": "npm-run-all check:renderer build:main build:preload build:renderer",
+    "check:renderer": "node scripts/check-renderer-syntax.mjs",
+    "build:main": "tsup src/main/index.ts --format cjs --out-dir dist/main --external electron --clean",
+    "build:preload": "tsup src/preload/index.ts --format cjs --out-dir dist/preload --external electron",
+    "build:renderer": "node scripts/build-renderer.mjs",
+    "lint": "tsc --noEmit",
+    "package:win": "npm run build && npm --workspace @wincmux/core run build && cross-env WINCMUX_SPAWN_CORE=1 electron-builder --win portable"
+  },
+  "devDependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-unicode11": "^0.8.0",
+    "@xterm/xterm": "^5.5.0",
+    "cross-env": "^7.0.3",
+    "electron": "^35.0.2",
+    "electron-builder": "^25.1.8",
+    "npm-run-all": "^4.1.5",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.2"
+  },
+  "build": {
+    "appId": "ai.manaflow.wincmux",
+    "productName": "WinCMux",
+    "files": [
+      "dist/**/*",
+      "node_modules/**/*",
+      "../../packages/core/dist/**/*"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "artifactName": "WinCMux-${version}.exe"
+    }
+  }
+}

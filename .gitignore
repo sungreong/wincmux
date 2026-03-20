@@ -1,0 +1,29 @@
+﻿# General
+.DS_Store
+Thumbs.db
+
+# Node / JS
+node_modules/
+**/node_modules/
+**/dist/
+
+# Rust legacy
+legacy-dotnet/core/target/
+
+# .NET legacy
+legacy-dotnet/**/bin/
+legacy-dotnet/**/obj/
+*.user
+*.suo
+
+# Runtime
+*.db
+*.db-journal
+logs/
+
+# VS Code
+.vscode/
+
+# Keep upstream reference clone out of local source control
+upstream/cmux/
+legacy-dotnet

@@ -1,0 +1,904 @@
+const hiddenSetPaneHandlers =
+  typeof globalThis.setHiddenPaneHandlers === "function"
+    ? globalThis.setHiddenPaneHandlers.bind(globalThis)
+    : () => {};
+const hiddenBindPaneUi =
+  typeof globalThis.bindHiddenPaneUi === "function"
+    ? globalThis.bindHiddenPaneUi.bind(globalThis)
+    : () => {};
+const hiddenRefreshPanesUi =
+  typeof globalThis.refreshHiddenPanesUi === "function"
+    ? globalThis.refreshHiddenPanesUi.bind(globalThis)
+    : () => {};
+const hiddenPrunePanesForWorkspace =
+  typeof globalThis.pruneHiddenPanesForWorkspace === "function"
+    ? globalThis.pruneHiddenPanesForWorkspace.bind(globalThis)
+    : () => [];
+const hiddenClearPanesForWorkspace =
+  typeof globalThis.clearHiddenPanesForWorkspace === "function"
+    ? globalThis.clearHiddenPanesForWorkspace.bind(globalThis)
+    : () => {};
+const hiddenPushPaneItem =
+  typeof globalThis.pushHiddenPaneItem === "function"
+    ? globalThis.pushHiddenPaneItem.bind(globalThis)
+    : () => {};
+const hiddenFindPaneById =
+  typeof globalThis.findHiddenPaneById === "function"
+    ? globalThis.findHiddenPaneById.bind(globalThis)
+    : () => null;
+const hiddenRemovePaneById =
+  typeof globalThis.removeHiddenPaneById === "function"
+    ? globalThis.removeHiddenPaneById.bind(globalThis)
+    : () => null;
+const hiddenListPanesForWorkspace =
+  typeof globalThis.hiddenPanesForWorkspace === "function"
+    ? globalThis.hiddenPanesForWorkspace.bind(globalThis)
+    : () => [];
+
+const paneApi = {
+  paneForSession: (...args) =>
+    typeof globalThis.paneForSession === "function"
+      ? globalThis.paneForSession(...args)
+      : null,
+  enqueueStreamOutput: (...args) => {
+    if (typeof globalThis.enqueueStreamOutput === "function") {
+      globalThis.enqueueStreamOutput(...args);
+      return true;
+    }
+    return false;
+  },
+  normalizePaneSessions: () => {
+    if (typeof globalThis.normalizePaneSessions === "function") {
+      globalThis.normalizePaneSessions();
+      return true;
+    }
+    return false;
+  },
+  refreshPaneBindings: () => {
+    if (typeof globalThis.refreshPaneBindings === "function") {
+      globalThis.refreshPaneBindings();
+      return true;
+    }
+    return false;
+  },
+  renderPaneSurface: (force = false) => {
+    if (typeof globalThis.renderPaneSurface === "function") {
+      globalThis.renderPaneSurface(force);
+      return true;
+    }
+    return false;
+  },
+  setPaneHandlers: (handlers) => {
+    if (typeof globalThis.setPaneHandlers === "function") {
+      globalThis.setPaneHandlers(handlers);
+      return true;
+    }
+    return false;
+  },
+  selectPane: async (...args) => {
+    if (typeof globalThis.selectPane !== "function") {
+      return;
+    }
+    await globalThis.selectPane(...args);
+  },
+  fitAllPanes: () => {
+    if (typeof globalThis.fitAllPanes === "function") {
+      globalThis.fitAllPanes();
+    }
+  },
+  writeToPane: (...args) => {
+    if (typeof globalThis.writeToPane === "function") {
+      globalThis.writeToPane(...args);
+      return true;
+    }
+    return false;
+  }
+};
+
+function missingRendererContracts() {
+  const checks = [
+    ["hidden", "setHiddenPaneHandlers", typeof globalThis.setHiddenPaneHandlers === "function"],
+    ["hidden", "bindHiddenPaneUi", typeof globalThis.bindHiddenPaneUi === "function"],
+    ["panes", "setPaneHandlers", typeof globalThis.setPaneHandlers === "function"],
+    ["panes", "renderPaneSurface", typeof globalThis.renderPaneSurface === "function"],
+    ["quickcmd", "bindQuickCommandPanel", typeof globalThis.bindQuickCommandPanel === "function"],
+    ["layout", "makeSplitResizable", typeof globalThis.makeSplitResizable === "function"]
+  ];
+  return checks.filter(([, , ok]) => !ok).map(([module, key]) => `${module}.${key}`);
+}
+
+function assertRendererContracts() {
+  const missing = missingRendererContracts();
+  if (missing.length === 0) {
+    return;
+  }
+  const preview = missing.slice(0, 3).join(", ");
+  const suffix = missing.length > 3 ? ` +${missing.length - 3}` : "";
+  const msg = `Renderer module degraded: ${preview}${suffix}`;
+  setStatus(msg, true, { priority: 80, holdMs: 12000 });
+  console.warn("[renderer] Missing module contracts:", missing);
+}
+
+function bindRuntimeErrorHooks() {
+  window.addEventListener("error", (event) => {
+    const message = event?.error?.message ?? event?.message ?? "unknown";
+    setStatus(`Runtime error: ${message}`, true, { priority: 95, holdMs: 15000 });
+    console.error("[renderer] window.error", event?.error ?? event);
+  });
+
+  window.addEventListener("unhandledrejection", (event) => {
+    const reason = event?.reason;
+    const message = reason?.message ?? String(reason ?? "unknown");
+    setStatus(`Promise error: ${message}`, true, { priority: 95, holdMs: 15000 });
+    console.error("[renderer] unhandledrejection", reason);
+  });
+}
+async function unsubscribeStream() {
+  if (!state.streamSubscriptionId) {
+    return;
+  }
+  const subscriptionId = state.streamSubscriptionId;
+  state.streamSubscriptionId = null;
+  await window.wincmux.streamUnsubscribe(subscriptionId).catch(() => {});
+}
+async function subscribeWorkspaceStream(workspaceId) {
+  if (!state.useStream || !workspaceId) {
+    return;
+  }
+  if (state.streamSubscriptionId) {
+    await unsubscribeStream();
+  }
+  state.streamSubscriptionId = await window.wincmux.streamSubscribe({
+    workspace_id: workspaceId,
+  });
+}
+function scheduleSessionRefresh() {
+  if (state.streamRefreshTimer) {
+    clearTimeout(state.streamRefreshTimer);
+  }
+  state.streamRefreshTimer = setTimeout(async () => {
+    state.streamRefreshTimer = null;
+    await loadSessions();
+    cleanupHiddenSessionsForWorkspace(state.selectedWorkspaceId, true);
+    paneApi.normalizePaneSessions();
+    paneApi.refreshPaneBindings();
+    hiddenRefreshPanesUi();
+  }, 80);
+}
+function handleStreamEvent(event) {
+  if (!event?.method) {
+    return;
+  }
+  const params = event.params ?? {};
+  if (event.method === "session.output") {
+    void maybeNotifyPromptFromOutput(
+      params.session_id,
+      params.output ?? "",
+      params.workspace_id ?? null,
+    );
+    const paneId = paneApi.paneForSession(params.session_id);
+    if (paneId) {
+      paneApi.enqueueStreamOutput(paneId, params.output ?? "");
+    }
+    return;
+  }
+  if (
+    event.method === "session.exit" ||
+    event.method === "session.state_changed"
+  ) {
+    if (params?.session_id) {
+      const status = typeof params.status === "string" ? params.status : "";
+      if (event.method === "session.exit" || (status && status !== "running")) {
+        clearPromptDetectorSession(params.session_id);
+      }
+    }
+    scheduleSessionRefresh();
+  }
+}
+function handleContextAction(event) {
+  const paneId = state.selectedPaneId;
+  if (!paneId) {
+    return;
+  }
+  if (event.action === "copy") {
+    const view = state.paneViews.get(paneId);
+    const text = view?.term.getSelection?.() ?? "";
+    if (text) {
+      void window.wincmux.clipboardWrite(text);
+    }
+    return;
+  }
+  if (event.action === "paste") {
+    void window.wincmux.clipboardRead().then((text) => {
+      if (text) {
+        paneApi.writeToPane(paneId, text);
+      }
+    });
+    return;
+  }
+  if (event.action === "clear-selection") {
+    state.paneViews.get(paneId)?.term.clearSelection?.();
+  }
+}
+async function loadWorkspaces() {
+  const res = await rpc("workspace.list", {});
+  state.workspaces = res.workspaces ?? [];
+  if (
+    !state.selectedWorkspaceId ||
+    !state.workspaces.some((w) => w.id === state.selectedWorkspaceId)
+  ) {
+    state.selectedWorkspaceId = state.workspaces[0]?.id ?? null;
+  }
+  renderWorkspaces();
+}
+async function loadSessions() {
+  const ws = selectedWorkspace();
+  if (!ws) {
+    state.sessions = [];
+    cleanupPromptDetectorSessions([]);
+    return;
+  }
+  const res = await rpc("session.list", { workspace_id: ws.id });
+  state.sessions = res.sessions ?? [];
+  cleanupPromptDetectorSessions(
+    state.sessions.filter((s) => s.status === "running").map((s) => s.id),
+  );
+}
+function cleanupHiddenSessionsForWorkspace(workspaceId, showStatus = false) {
+  if (!workspaceId) {
+    return [];
+  }
+  const runningIds = new Set(runningSessions().map((session) => session.id));
+  const removed = hiddenPrunePanesForWorkspace(workspaceId, runningIds);
+  if (showStatus && removed.length > 0) {
+    setStatus(`Hidden session ended: ${removed[0].session_id.slice(0, 8)}`);
+  }
+  return removed;
+}
+async function loadPanes() {
+  const ws = selectedWorkspace();
+  if (!ws) {
+    state.panes = [];
+    return;
+  }
+  const res = await rpc("layout.list", { workspace_id: ws.id });
+  state.panes = res.panes ?? [];
+}
+async function loadUnread() {
+  const res = await rpc("notify.unread", {});
+  state.notifications = res.items ?? [];
+  renderNotifications();
+  await updateUnreadBadge(state.notifications.length);
+}
+async function runShellSession(workspaceId, cwd) {
+  const preferred = (state.terminal.default_shell || "pwsh.exe")
+    .toLowerCase()
+    .includes("pwsh")
+    ? "pwsh.exe"
+    : state.terminal.default_shell || "pwsh.exe";
+  const fallback = preferred.toLowerCase().includes("pwsh")
+    ? "powershell.exe"
+    : "pwsh.exe";
+  const argsFor = (cmd) =>
+    cmd.toLowerCase().includes("powershell.exe")
+      ? [
+          "-NoLogo",
+          "-NoExit",
+          "-Command",
+          "chcp.com 65001 > $null; [Console]::InputEncoding=[Text.UTF8Encoding]::new(); [Console]::OutputEncoding=[Text.UTF8Encoding]::new()",
+        ]
+      : [
+          "-NoLogo",
+          "-NoExit",
+          "-Command",
+          "$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); [Console]::InputEncoding=[Text.UTF8Encoding]::new(); if (Get-Variable PSStyle -ErrorAction SilentlyContinue) { $PSStyle.OutputRendering = 'Ansi' }",
+        ];
+  try {
+    const result = await rpc("session.run", {
+      workspace_id: workspaceId,
+      cmd: preferred,
+      args: argsFor(preferred),
+      cwd,
+    });
+    rememberShellCommand(preferred);
+    return result;
+  } catch (primaryErr) {
+    try {
+      const fallbackResult = await rpc("session.run", {
+        workspace_id: workspaceId,
+        cmd: fallback,
+        args: argsFor(fallback),
+        cwd,
+      });
+      setStatus(`Shell fallback: ${preferred} -> ${fallback}`);
+      return fallbackResult;
+    } catch {
+      throw primaryErr ?? new Error("failed to launch shell session");
+    }
+  }
+}
+async function startSessionForPane(paneId, options = {}) {
+  const { force = false, silent = false } = options;
+  const ws = selectedWorkspace();
+  if (!ws) {
+    throw new Error("Select a workspace first.");
+  }
+  const existing = state.paneSessions[paneId] ?? null;
+  if (existing && !force) {
+    const alive = runningSessions().some((s) => s.id === existing);
+    if (alive) {
+      return existing;
+    }
+    delete state.paneSessions[paneId];
+  }
+  if (existing && force) {
+    await rpc("session.close", { session_id: existing }).catch(() => {});
+    delete state.paneSessions[paneId];
+  }
+  let created;
+  try {
+    created = await runShellSession(ws.id, ws.path);
+  } catch (err) {
+    const message = String(err?.message ?? err);
+    if (message.includes("File not found")) {
+      throw new Error(`Shell start failed. Check workspace path: ${ws.path}`);
+    }
+    throw err;
+  }
+  const sid = created?.session?.session_id;
+  if (!sid) {
+    throw new Error("session.run returned no session_id");
+  }
+  state.paneSessions[paneId] = sid;
+  await loadSessions();
+  paneApi.normalizePaneSessions();
+  paneApi.refreshPaneBindings();
+  if (!silent) {
+    setStatus(`Session started: ${sid.slice(0, 8)}`);
+  }
+  window.requestAnimationFrame(() => {
+    state.paneViews.get(paneId)?.term.focus();
+  });
+  return sid;
+}
+async function ensurePaneSessionReady(paneId) {
+  if (!paneId) {
+    return;
+  }
+  const sid = state.paneSessions[paneId] ?? null;
+  const alive = sid ? runningSessions().some((s) => s.id === sid) : false;
+  if (!alive) {
+    await startSessionForPane(paneId, { silent: true });
+  }
+  await paneApi.selectPane(paneId, { persist: true, focusTerm: true });
+}
+async function closeSessionForPane(paneId) {
+  const sid = state.paneSessions[paneId];
+  if (!sid) {
+    setStatus("No running session in selected pane.", true);
+    return;
+  }
+  await rpc("session.close", { session_id: sid });
+  clearPromptDetectorSession(sid);
+  delete state.paneSessions[paneId];
+  await loadSessions();
+  paneApi.normalizePaneSessions();
+  paneApi.refreshPaneBindings();
+  const fallback = state.selectedPaneId ?? leafPanes()[0]?.pane_id ?? null;
+  if (fallback) {
+    await paneApi.selectPane(fallback, { persist: true, focusTerm: true });
+  }
+  setStatus(`Session closed: ${sid.slice(0, 8)}`);
+}
+async function refreshWorkspaceState(options = {}) {
+  const { forceLayout = false, autoSession = true } = options;
+  await Promise.all([loadSessions(), loadPanes(), loadUnread()]);
+  if (state.useStream) {
+    const ws = selectedWorkspace();
+    await subscribeWorkspaceStream(ws?.id ?? null);
+  }
+  cleanupHiddenSessionsForWorkspace(state.selectedWorkspaceId, false);
+  paneApi.normalizePaneSessions();
+  paneApi.renderPaneSurface(forceLayout);
+  paneApi.refreshPaneBindings();
+  hiddenRefreshPanesUi();
+  if (autoSession) {
+    await ensurePaneSessionReady(state.selectedPaneId);
+  }
+}
+async function switchWorkspace(workspaceId) {
+  if (!workspaceId) {
+    return;
+  }
+  state.selectedWorkspaceId = workspaceId;
+  renderWorkspaces();
+  await refreshWorkspaceState({ forceLayout: true, autoSession: true });
+}
+async function onCreateWorkspace() {
+  const defaultPath =
+    localStorage.getItem(STORAGE_KEYS.lastWorkspacePath) ?? "C:\\";
+  const name =
+    wsNameInput.value.trim() || `workspace-${Date.now().toString().slice(-6)}`;
+  const pathValue = wsPathInput.value.trim() || defaultPath;
+  const created = await rpc("workspace.create", {
+    name,
+    path: pathValue,
+    backend: "codex",
+  });
+  rememberWorkspacePath(pathValue);
+  state.selectedWorkspaceId = created?.workspace?.id ?? null;
+  await loadWorkspaces();
+  if (state.selectedWorkspaceId) {
+    await switchWorkspace(state.selectedWorkspaceId);
+  }
+  wsNameInput.value = "";
+  wsPathInput.value = pathValue;
+  setStatus(`Workspace created: ${name}`);
+}
+async function onDeleteWorkspace() {
+  const ws = selectedWorkspace();
+  if (!ws) {
+    return;
+  }
+  await rpc("workspace.delete", { id: ws.id });
+  removeWorkspacePaneFonts(ws.id);
+  hiddenClearPanesForWorkspace(ws.id);
+  disposeAllViews();
+  state.paneCards.clear();
+  state.paneMeta.clear();
+  state.layoutHash = "";
+  state.paneSessions = {};
+  state.panes = [];
+  state.sessions = [];
+  clearPromptDetectorAll();
+  state.selectedPaneId = null;
+  await unsubscribeStream();
+  await loadWorkspaces();
+  if (state.selectedWorkspaceId) {
+    await switchWorkspace(state.selectedWorkspaceId);
+  } else {
+    paneSurface.innerHTML = "";
+    notificationList.innerHTML = "";
+  }
+  setStatus(`Workspace deleted: ${ws.name}`);
+}
+async function onPickFolder() {
+  if (typeof window.wincmux?.pickFolder !== "function") {
+    setStatus("Folder picker unavailable in preload bridge.", true, { priority: 85, holdMs: 12000 });
+    return;
+  }
+  const selected = await window.wincmux.pickFolder();
+  if (!selected) {
+    return;
+  }
+  wsPathInput.value = selected;
+  rememberWorkspacePath(selected);
+}
+async function onOpenInVscode() {
+  const ws = selectedWorkspace();
+  if (!ws) {
+    setStatus("Select a workspace first.", true);
+    return;
+  }
+  const result = await window.wincmux.openInVscode(ws.path);
+  setStatus(`Opened in VSCode via ${result.method}`);
+}
+async function onClosePane(paneId) {
+  const ws = selectedWorkspace();
+  if (!ws) {
+    return;
+  }
+  if (!paneId || !leafPanes().some((p) => p.pane_id === paneId)) {
+    setStatus("Pane not found.", true);
+    return;
+  }
+  if (leafPanes().length <= 1) {
+    setStatus("At least one pane must remain open.", true);
+    return;
+  }
+  const sessionId = state.paneSessions[paneId];
+  if (sessionId) {
+    await rpc("session.close", { session_id: sessionId }).catch(() => {});
+    delete state.paneSessions[paneId];
+    await loadSessions();
+  }
+  removePaneFontSize(ws.id, paneId);
+  const res = await rpc("layout.close", {
+    workspace_id: ws.id,
+    pane_id: paneId,
+  });
+  await loadPanes();
+  paneApi.normalizePaneSessions();
+  paneApi.renderPaneSurface(true);
+  paneApi.refreshPaneBindings();
+  const nextPaneId = res?.focus_pane_id ?? leafPanes()[0]?.pane_id ?? null;
+  if (nextPaneId) {
+    state.selectedPaneId = nextPaneId;
+    await ensurePaneSessionReady(nextPaneId);
+  }
+  setStatus("Pane closed");
+}
+async function splitPaneInternal(paneId, direction, options = {}) {
+  const { newPaneSessionId = null, autoStartIfMissing = true } = options;
+  const ws = selectedWorkspace();
+  if (!ws) {
+    return null;
+  }
+  if (!paneId || !leafPanes().some((p) => p.pane_id === paneId)) {
+    setStatus("Pane not found.", true);
+    return null;
+  }
+  const previousPaneId = paneId;
+  const previousSession = state.paneSessions[previousPaneId] ?? null;
+  const inheritedFontSize = currentPaneFontSize(ws.id, previousPaneId);
+  const res = await rpc("layout.split", {
+    workspace_id: ws.id,
+    pane_id: previousPaneId,
+    direction,
+  });
+  const first = res?.pane_ids?.[0] ?? null;
+  const second = res?.pane_ids?.[1] ?? null;
+  delete state.paneSessions[previousPaneId];
+  removePaneFontSize(ws.id, previousPaneId);
+  if (previousSession && first) {
+    state.paneSessions[first] = previousSession;
+  }
+  if (first) {
+    setPaneFontSize(ws.id, first, inheritedFontSize);
+  }
+  if (second) {
+    setPaneFontSize(ws.id, second, inheritedFontSize);
+  }
+  if (newPaneSessionId && second) {
+    state.paneSessions[second] = newPaneSessionId;
+  }
+  state.selectedPaneId = second ?? first;
+  await loadPanes();
+  await loadSessions();
+  paneApi.normalizePaneSessions();
+  paneApi.renderPaneSurface(true);
+  paneApi.refreshPaneBindings();
+  hiddenRefreshPanesUi();
+  if (state.selectedPaneId) {
+    await paneApi.selectPane(state.selectedPaneId, { persist: true, focusTerm: true });
+    if (autoStartIfMissing) {
+      await ensurePaneSessionReady(state.selectedPaneId);
+    }
+  }
+  return { first, second };
+}
+async function onSplit(paneId, direction) {
+  const result = await splitPaneInternal(paneId, direction, {
+    autoStartIfMissing: true,
+  });
+  if (result) {
+    setStatus(`Split applied: ${direction}`);
+  }
+}
+async function onHidePane(paneId) {
+  const ws = selectedWorkspace();
+  if (!ws) {
+    return;
+  }
+  if (!paneId || !leafPanes().some((p) => p.pane_id === paneId)) {
+    setStatus("Pane not found.", true);
+    return;
+  }
+  if (leafPanes().length <= 1) {
+    setStatus("At least one pane must remain open.", true);
+    return;
+  }
+  const sessionId = state.paneSessions[paneId] ?? null;
+  if (sessionId) {
+    const session = state.sessions.find((row) => row.id === sessionId);
+    const label = session
+      ? `pane ${paneId.slice(0, 8)} - pid ${session.pid}`
+      : `pane ${paneId.slice(0, 8)}`;
+    hiddenPushPaneItem({
+      id: crypto.randomUUID(),
+      workspace_id: ws.id,
+      session_id: sessionId,
+      source_pane_id: paneId,
+      hidden_at: new Date().toISOString(),
+      label,
+    });
+  }
+  delete state.paneSessions[paneId];
+  removePaneFontSize(ws.id, paneId);
+  const res = await rpc("layout.close", {
+    workspace_id: ws.id,
+    pane_id: paneId,
+  });
+  await loadPanes();
+  await loadSessions();
+  paneApi.normalizePaneSessions();
+  paneApi.renderPaneSurface(true);
+  paneApi.refreshPaneBindings();
+  hiddenRefreshPanesUi();
+  const nextPaneId = res?.focus_pane_id ?? leafPanes()[0]?.pane_id ?? null;
+  if (nextPaneId) {
+    state.selectedPaneId = nextPaneId;
+    await ensurePaneSessionReady(nextPaneId);
+  }
+  setStatus(
+    sessionId ? `Pane hidden: ${sessionId.slice(0, 8)}` : "Pane hidden",
+  );
+}
+async function onRestoreHiddenPane(hiddenId, direction) {
+  const ws = selectedWorkspace();
+  if (!ws) {
+    return;
+  }
+  const hidden = hiddenFindPaneById(ws.id, hiddenId);
+  if (!hidden) {
+    setStatus("Hidden pane not found.", true);
+    hiddenRefreshPanesUi();
+    return;
+  }
+  const targetPaneId = leafPanes().some(
+    (pane) => pane.pane_id === state.selectedPaneId,
+  )
+    ? state.selectedPaneId
+    : (leafPanes()[0]?.pane_id ?? null);
+  if (!targetPaneId) {
+    setStatus("No pane available to restore into.", true);
+    return;
+  }
+  const alive = runningSessions().some(
+    (session) => session.id === hidden.session_id,
+  );
+  if (!alive) {
+    hiddenRemovePaneById(ws.id, hidden.id);
+    setStatus(`Hidden session already ended: ${hidden.session_id.slice(0, 8)}`);
+    return;
+  }
+  hiddenRemovePaneById(ws.id, hidden.id);
+  try {
+    const result = await splitPaneInternal(targetPaneId, direction, {
+      newPaneSessionId: hidden.session_id,
+      autoStartIfMissing: false,
+    });
+    if (!result) {
+      hiddenPushPaneItem(hidden);
+      return;
+    }
+    await paneApi.selectPane(result.second ?? result.first, {
+      persist: true,
+      focusTerm: true,
+    });
+    closeHiddenPanesPopover();
+    setStatus(`Hidden pane restored: ${hidden.session_id.slice(0, 8)}`);
+  } catch (err) {
+    hiddenPushPaneItem(hidden);
+    throw err;
+  }
+}
+async function onTerminateHiddenPane(hiddenId) {
+  const ws = selectedWorkspace();
+  if (!ws) {
+    return;
+  }
+  const hidden = hiddenRemovePaneById(ws.id, hiddenId);
+  if (!hidden) {
+    setStatus("Hidden pane not found.", true);
+    return;
+  }
+  await rpc("session.close", { session_id: hidden.session_id }).catch(() => {});
+  clearPromptDetectorSession(hidden.session_id);
+  await loadSessions();
+  paneApi.normalizePaneSessions();
+  paneApi.refreshPaneBindings();
+  hiddenRefreshPanesUi();
+  closeHiddenPanesPopover();
+  setStatus(`Hidden session terminated: ${hidden.session_id.slice(0, 8)}`);
+}
+async function onAdjustPaneFont(paneId, delta) {
+  const ws = selectedWorkspace();
+  if (!ws || !paneId) {
+    return;
+  }
+  const nextSize = adjustPaneFontSize(ws.id, paneId, delta);
+  applyPaneFontToView(paneId, nextSize);
+  paneApi.refreshPaneBindings();
+}
+async function onInsertQuickCommand(paneId, text) {
+  if (!paneId || typeof text !== "string" || !text) {
+    return;
+  }
+  if (!leafPanes().some((p) => p.pane_id === paneId)) {
+    setStatus("Pane not found.", true);
+    return;
+  }
+  await ensurePaneSessionReady(paneId);
+  paneApi.writeToPane(paneId, text);
+  setStatus("Quick command inserted");
+}
+async function onMarkLatestRead() {
+  if (state.notifications.length === 0) {
+    return;
+  }
+  await rpc("notify.mark_read", { notification_id: state.notifications[0].id });
+  await loadUnread();
+}
+async function onClearUnread() {
+  await rpc("notify.clear", {});
+  await loadUnread();
+  setStatus("Unread notifications cleared");
+}
+async function onNotificationClick(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) {
+    return;
+  }
+  const item = target.closest("li[data-notification-id]");
+  if (!item || state.notificationActionBusy) {
+    return;
+  }
+  const notificationId = item.dataset.notificationId;
+  if (!notificationId) {
+    return;
+  }
+  const notification = state.notifications.find(
+    (row) => row.id === notificationId,
+  );
+  if (!notification) {
+    return;
+  }
+  state.notificationActionBusy = true;
+  try {
+    await rpc("notify.mark_read", { notification_id: notificationId });
+    const source = parseNotificationSource(notification.source);
+    const workspaceId = source.workspaceId ?? notification.workspace_id ?? null;
+    if (workspaceId && workspaceId !== state.selectedWorkspaceId) {
+      if (!state.workspaces.some((ws) => ws.id === workspaceId)) {
+        await loadWorkspaces();
+      }
+      if (state.workspaces.some((ws) => ws.id === workspaceId)) {
+        await switchWorkspace(workspaceId);
+      }
+    }
+    let targetPaneId = source.paneId;
+    if (
+      (!targetPaneId ||
+        !leafPanes().some((pane) => pane.pane_id === targetPaneId)) &&
+      source.sessionId
+    ) {
+      targetPaneId = paneApi.paneForSession(source.sessionId);
+    }
+    if (
+      targetPaneId &&
+      leafPanes().some((pane) => pane.pane_id === targetPaneId)
+    ) {
+      await paneApi.selectPane(targetPaneId, { persist: true, focusTerm: true });
+    }
+    await loadUnread();
+  } catch (err) {
+    setStatus(String(err?.message ?? err), true);
+  } finally {
+    state.notificationActionBusy = false;
+  }
+}
+function toggleWorkspacePanel() {
+  state.leftCollapsed = !state.leftCollapsed;
+  localStorage.setItem(
+    STORAGE_KEYS.leftCollapsed,
+    state.leftCollapsed ? "1" : "0",
+  );
+  applyPanelVisibility();
+  paneApi.fitAllPanes();
+}
+function toggleNotificationPanel() {
+  state.rightCollapsed = !state.rightCollapsed;
+  localStorage.setItem(
+    STORAGE_KEYS.rightCollapsed,
+    state.rightCollapsed ? "1" : "0",
+  );
+  applyPanelVisibility();
+  paneApi.fitAllPanes();
+}
+function bindEvents() {
+  $("createWorkspaceBtn").addEventListener("click", () =>
+    onCreateWorkspace().catch((err) => setStatus(String(err), true)),
+  );
+  $("deleteWorkspaceBtn").addEventListener("click", () =>
+    onDeleteWorkspace().catch((err) => setStatus(String(err), true)),
+  );
+  $("pickFolderBtn").addEventListener("click", () =>
+    onPickFolder().catch((err) => setStatus(String(err), true)),
+  );
+  $("openInVscodeBtn").addEventListener("click", () =>
+    onOpenInVscode().catch((err) => setStatus(String(err), true)),
+  );
+  $("refreshUnreadBtn").addEventListener("click", () =>
+    loadUnread().catch((err) => setStatus(String(err), true)),
+  );
+  $("markLatestReadBtn").addEventListener("click", () =>
+    onMarkLatestRead().catch((err) => setStatus(String(err), true)),
+  );
+  $("clearUnreadBtn").addEventListener("click", () =>
+    onClearUnread().catch((err) => setStatus(String(err), true)),
+  );
+  notificationList.addEventListener("scroll", () => renderNotifications());
+  notificationList.addEventListener("click", (event) =>
+    onNotificationClick(event).catch((err) => setStatus(String(err), true)),
+  );
+  toggleWorkspacePanelBtn.addEventListener("click", () =>
+    toggleWorkspacePanel(),
+  );
+  toggleNotificationPanelBtn.addEventListener("click", () =>
+    toggleNotificationPanel(),
+  );
+}
+async function bootstrap() {
+  try {
+    bindRuntimeErrorHooks();
+    assertRendererContracts();
+    state.refreshUnreadHook = loadUnread;
+    applyPanelWidths();
+    applyPanelVisibility();
+    initResizeHandles(() => paneApi.fitAllPanes());
+    bindEvents();
+    const paneHandlersBound = paneApi.setPaneHandlers({
+      startSessionForPane,
+      closeSessionForPane,
+      splitPane: (paneId, direction) => onSplit(paneId, direction),
+      closePane: (paneId) => onClosePane(paneId),
+      hidePane: (paneId) => onHidePane(paneId),
+      adjustPaneFont: (paneId, delta) => onAdjustPaneFont(paneId, delta),
+      insertQuickCommand: (paneId, text) => onInsertQuickCommand(paneId, text),
+    });
+    if (!paneHandlersBound) {
+      setStatus("Pane module unavailable. Terminal controls are limited.", true, { priority: 85, holdMs: 12000 });
+    }
+    hiddenSetPaneHandlers({
+      restoreHiddenPane: (hiddenId, direction) =>
+        onRestoreHiddenPane(hiddenId, direction),
+      terminateHiddenPane: (hiddenId) => onTerminateHiddenPane(hiddenId),
+    });
+    hiddenBindPaneUi();
+    hiddenRefreshPanesUi();
+    state.streamUnbind = window.wincmux.onStreamEvent(handleStreamEvent);
+    state.contextUnbind = window.wincmux.onContextAction(handleContextAction);
+    const rememberedPath =
+      localStorage.getItem(STORAGE_KEYS.lastWorkspacePath) ?? "C:\\";
+    wsPathInput.value = rememberedPath;
+    await loadWorkspaces();
+    if (state.workspaces.length === 0) {
+      wsNameInput.value = "workspace-1";
+      await onCreateWorkspace();
+    } else if (state.selectedWorkspaceId) {
+      await switchWorkspace(state.selectedWorkspaceId);
+    }
+    window.addEventListener("resize", () => paneApi.fitAllPanes());
+    setStatus("Ready");
+  } catch (err) {
+    setStatus(`Error: ${err.message ?? err}`, true);
+  }
+}
+window.addEventListener("beforeunload", () => {
+  state.refreshUnreadHook = null;
+  void updateUnreadBadge(0);
+  for (const workspaceId of Object.keys(state.hiddenPanesByWorkspace)) {
+    const hiddenRows = hiddenListPanesForWorkspace(workspaceId);
+    for (const row of hiddenRows) {
+      void rpc("session.close", { session_id: row.session_id }).catch(() => {});
+    }
+  }
+  clearPromptDetectorAll();
+  if (state.streamUnbind) {
+    state.streamUnbind();
+    state.streamUnbind = null;
+  }
+  if (state.contextUnbind) {
+    state.contextUnbind();
+    state.contextUnbind = null;
+  }
+  if (state.streamSubscriptionId) {
+    void window.wincmux
+      .streamUnsubscribe(state.streamSubscriptionId)
+      .catch(() => {});
+    state.streamSubscriptionId = null;
+  }
+  disposeAllViews();
+});
+bootstrap();
