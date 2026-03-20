@@ -14,7 +14,9 @@ const STORAGE_KEYS = {
   paneFontSizes: "wincmux.paneFontSizes",
   quickPresets: "wincmux.quickPresets.v1",
   quickHistory: "wincmux.quickHistory.v1",
-  quickPresetSeedVersion: "wincmux.quickPresets.seedVersion"
+  quickPresetSeedVersion: "wincmux.quickPresets.seedVersion",
+  rendererPromptFallback: "wincmux.features.rendererPromptFallback",
+  selectedWorkspaceId: "wincmux.selectedWorkspaceId"
 };
 
 function parseStoredMap(storageKey) {
@@ -195,7 +197,7 @@ const state = {
   sessions: [],
   notifications: [],
   panes: [],
-  selectedWorkspaceId: null,
+  selectedWorkspaceId: localStorage.getItem(STORAGE_KEYS.selectedWorkspaceId) ?? null,
   selectedPaneId: null,
   paneSessions: {},
   paneViews: new Map(),
@@ -216,6 +218,7 @@ const state = {
   streamSubscriptionId: null,
   streamUnbind: null,
   contextUnbind: null,
+  notificationOpenUnbind: null,
   streamRefreshTimer: null,
   refreshUnreadHook: null,
   notificationActionBusy: false,
@@ -229,6 +232,9 @@ const state = {
   quickPresets: loadQuickPresets(),
   quickHistory: loadQuickHistory(),
   quickCommandOpenPaneId: null,
+  features: {
+    rendererPromptFallback: localStorage.getItem(STORAGE_KEYS.rendererPromptFallback) === "1"
+  },
   promptDetector: {
     sessions: new Map(),
     maxBufferChars: 5000,
@@ -444,6 +450,32 @@ function parseNotificationSource(source) {
   return parsed;
 }
 
+function normalizeNotificationTarget(row) {
+  if (!row) {
+    return {
+      kind: "unknown",
+      workspaceId: null,
+      paneId: null,
+      sessionId: null
+    };
+  }
+
+  if (row.kind || row.session_id || row.pane_id) {
+    return {
+      kind: row.kind ?? "unknown",
+      workspaceId: row.workspace_id ?? null,
+      paneId: row.pane_id ?? null,
+      sessionId: row.session_id ?? null
+    };
+  }
+
+  return parseNotificationSource(row.source);
+}
+
+function isRendererPromptFallbackEnabled() {
+  return Boolean(state.features?.rendererPromptFallback);
+}
+
 function workspaceNameById(workspaceId) {
   if (!workspaceId) {
     return "workspace -";
@@ -458,11 +490,17 @@ function workspaceNameById(workspaceId) {
 function extractPromptMarker(bufferText) {
   const recent = bufferText.slice(-1200);
   const checks = [
+    { key: "proceed?", rx: /\bdo\s+you\s+want\s+to\s+(?:proceed|continue)\s*\?/i },
+    { key: "run shell command", rx: /\brun\s+shell\s+command\b/i },
+    { key: "yes/no choice", rx: /(?:^|\n)\s*(?:[>]\s*)?[12][.)]\s*(?:yes|no)\b/im },
+    { key: "enter to confirm", rx: /\benter\s+to\s+confirm\b/i },
+    { key: "esc to cancel", rx: /\besc\s+to\s+cancel\b/i },
     { key: "y/n", rx: /\b(?:\[?\s*y\s*\/\s*n\s*\]?|yes\s*\/\s*no)\b/i },
     { key: "press enter", rx: /\b(?:press|hit)\s+enter\b/i },
     { key: "select option", rx: /\b(?:select|choose)\b[^.\n]{0,80}\b(?:option|item|number|choice)\b/i },
-    { key: "confirm", rx: /\b(?:confirm|confirmation)\b/i },
-    { key: "continue?", rx: /\b(?:continue|proceed)\s*\?/i }
+    { key: "select number", rx: /\b(?:enter|input|type)\b[^.\n]{0,48}\b(?:number|choice|option)\b/i },
+    { key: "ko proceed?", rx: /(?:진행|계속).{0,8}(?:하시겠|할까)\S*/i },
+    { key: "ko select", rx: /(?:선택|번호).{0,8}(?:입력|해\s*주세요|하세요)/i }
   ];
 
   for (const check of checks) {
@@ -485,15 +523,25 @@ function extractPromptMarker(bufferText) {
   return null;
 }
 
+function hasAssistantPromptContext(bufferText) {
+  if (!bufferText) {
+    return false;
+  }
+  return /\b(?:claude|codex)\b/i.test(bufferText)
+    || /\b(?:bash|shell)\s+command\b/i.test(bufferText)
+    || /\bdo\s+you\s+want\s+to\s+(?:proceed|continue)\s*\?/i.test(bufferText)
+    || /\b(?:enter\s+to\s+confirm|esc\s+to\s+cancel)\b/i.test(bufferText);
+}
+
 function detectPromptSignal(sessionState, outputChunk) {
   const text = normalizePromptText(outputChunk);
   if (!text) {
     return null;
   }
 
-  sessionState.buffer = `${sessionState.buffer}\n${text}`.slice(-state.promptDetector.maxBufferChars);
+  sessionState.buffer = `${sessionState.buffer} ${text}`.slice(-state.promptDetector.maxBufferChars);
 
-  if (!/\b(?:codex|claude)\b/i.test(sessionState.buffer)) {
+  if (!hasAssistantPromptContext(sessionState.buffer)) {
     return null;
   }
 
@@ -522,6 +570,10 @@ async function refreshUnreadAfterPromptPush() {
 }
 
 async function maybeNotifyPromptFromOutput(sessionId, outputChunk, workspaceIdHint = null) {
+  if (!isRendererPromptFallbackEnabled()) {
+    return false;
+  }
+
   const sessionState = promptSessionState(sessionId);
   if (!sessionState || sessionState.notifying) {
     return false;
@@ -550,15 +602,20 @@ async function maybeNotifyPromptFromOutput(sessionId, outputChunk, workspaceIdHi
   const title = "Assistant input requested";
   const body = `session ${shortSession}: ${detected.marker.snippet}`;
   const paneId = typeof paneForSession === "function" ? paneForSession(sessionId) : null;
-  const source = `assistant_prompt|ws=${workspaceId}|pane=${paneId ?? ""}|session=${sessionId ?? ""}`;
+  const source = "renderer-pattern-fallback";
 
   try {
     await rpc("notify.push", {
       workspace_id: workspaceId,
+      session_id: sessionId ?? null,
+      pane_id: paneId ?? null,
+      kind: "assistant_prompt",
+      source_kind: "pattern",
       title,
       body,
       level: "info",
-      source
+      source,
+      dedup_key: `${sessionId ?? "none"}|assistant_prompt|${detected.signature}`
     });
     await refreshUnreadAfterPromptPush();
     return true;
@@ -715,13 +772,41 @@ function initResizeHandles(onResize) {
   bindDrag(rightHandle, "right");
 }
 
+function unreadCountsByWorkspace() {
+  const counts = new Map();
+  for (const row of state.notifications) {
+    const target = normalizeNotificationTarget(row);
+    const workspaceId = target.workspaceId ?? row.workspace_id ?? null;
+    if (!workspaceId) {
+      continue;
+    }
+    counts.set(workspaceId, (counts.get(workspaceId) ?? 0) + 1);
+  }
+  return counts;
+}
+
 function renderWorkspaces() {
+  const unreadByWorkspace = unreadCountsByWorkspace();
   workspaceList.innerHTML = "";
   for (const ws of state.workspaces) {
+    const unread = unreadByWorkspace.get(ws.id) ?? 0;
+    const isActive = ws.id === state.selectedWorkspaceId;
     const li = document.createElement("li");
-    li.className = ws.id === state.selectedWorkspaceId ? "active" : "";
+    li.className = isActive ? "active" : "";
+    if (unread > 0) {
+      li.classList.add("ws-has-unread");
+      if (!isActive) {
+        li.classList.add("ws-attention");
+      }
+    }
+    const unreadBadge = unread > 0
+      ? `<span class="ws-unread-badge" title="${unread} unread notifications">${unread > 99 ? "99+" : unread}</span>`
+      : "";
     li.innerHTML = `
-      <div class="ws-title">${ws.name}</div>
+      <div class="ws-title-row">
+        <div class="ws-title">${ws.name}</div>
+        ${unreadBadge}
+      </div>
       <div class="muted ws-path">${ws.path}</div>
       <div class="muted">${ws.branch ?? "-"} ${ws.dirty ? "(dirty)" : ""}</div>
     `;
@@ -774,12 +859,12 @@ function renderNotifications() {
     const n = state.notifications[i];
     const li = document.createElement("li");
     li.dataset.notificationId = n.id;
-    const source = parseNotificationSource(n.source);
-    const workspaceId = source.workspaceId ?? n.workspace_id ?? null;
-    const paneLabel = source.paneId
-      ? `pane ${source.paneId.slice(0, 8)}`
-      : (source.sessionId ? `session ${source.sessionId.slice(0, 8)}` : "pane -");
-    const metaText = `${workspaceNameById(workspaceId)} · ${paneLabel} · ${n.level}`;
+        const target = normalizeNotificationTarget(n);
+    const workspaceId = target.workspaceId ?? n.workspace_id ?? null;
+    const paneLabel = target.paneId
+      ? `pane ${target.paneId.slice(0, 8)}`
+      : (target.sessionId ? `session ${target.sessionId.slice(0, 8)}` : "pane -");
+    const metaText = `${workspaceNameById(workspaceId)} | ${paneLabel} | ${n.level}`;
 
     const titleEl = document.createElement("div");
     titleEl.className = "notif-title";
@@ -814,4 +899,5 @@ function renderNotifications() {
       : "Hide Notifications";
   }
 }
+
 
