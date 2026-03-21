@@ -205,6 +205,9 @@ function handleStreamEvent(event) {
     return;
   }
   const params = event.params ?? {};
+  if (event.method !== "session.output") {
+    console.debug("[stream]", event.method, JSON.stringify(params).slice(0, 120));
+  }
   if (event.method === "notify.created") {
     const row = params.notification;
     if (!row?.id) {
