@@ -95,6 +95,40 @@ const paneApi = {
   }
 };
 
+const workspaceTransition = {
+  transitionSeq: 0,
+  activeTransitionSeq: 0,
+  activeWorkspaceId: null,
+  switchInFlight: false
+};
+
+function isTransitionStale(transitionSeq, workspaceId) {
+  if (!transitionSeq) {
+    return false;
+  }
+  if (transitionSeq !== workspaceTransition.activeTransitionSeq) {
+    return true;
+  }
+  if (workspaceId && workspaceTransition.activeWorkspaceId !== workspaceId) {
+    return true;
+  }
+  if (workspaceId && state.selectedWorkspaceId !== workspaceId) {
+    return true;
+  }
+  return false;
+}
+
+function workspaceRowById(workspaceId) {
+  if (!workspaceId) {
+    return null;
+  }
+  return state.workspaces.find((row) => row.id === workspaceId) ?? null;
+}
+
+function runningSessionsForWorkspace(workspaceId) {
+  return state.sessions.filter((session) => session.workspace_id === workspaceId && session.status === "running");
+}
+
 function missingRendererContracts() {
   const checks = [
     ["hidden", "setHiddenPaneHandlers", typeof globalThis.setHiddenPaneHandlers === "function"],
@@ -309,14 +343,19 @@ async function loadWorkspaces() {
   }
   renderWorkspaces();
 }
-async function loadSessions() {
-  const ws = selectedWorkspace();
-  if (!ws) {
+async function loadSessions(workspaceId = state.selectedWorkspaceId, transitionSeq = null) {
+  if (!workspaceId) {
     state.sessions = [];
     cleanupPromptDetectorSessions([]);
     return;
   }
-  const res = await rpc("session.list", { workspace_id: ws.id });
+  const res = await rpc("session.list", { workspace_id: workspaceId });
+  if (isTransitionStale(transitionSeq, workspaceId)) {
+    return;
+  }
+  if (workspaceId !== state.selectedWorkspaceId) {
+    return;
+  }
   state.sessions = res.sessions ?? [];
   cleanupPromptDetectorSessions(
     state.sessions.filter((s) => s.status === "running").map((s) => s.id),
@@ -333,13 +372,18 @@ function cleanupHiddenSessionsForWorkspace(workspaceId, showStatus = false) {
   }
   return removed;
 }
-async function loadPanes() {
-  const ws = selectedWorkspace();
-  if (!ws) {
+async function loadPanes(workspaceId = state.selectedWorkspaceId, transitionSeq = null) {
+  if (!workspaceId) {
     state.panes = [];
     return;
   }
-  const res = await rpc("layout.list", { workspace_id: ws.id });
+  const res = await rpc("layout.list", { workspace_id: workspaceId });
+  if (isTransitionStale(transitionSeq, workspaceId)) {
+    return;
+  }
+  if (workspaceId !== state.selectedWorkspaceId) {
+    return;
+  }
   state.panes = res.panes ?? [];
 }
 async function loadUnread() {
@@ -398,14 +442,32 @@ async function runShellSession(workspaceId, cwd) {
   }
 }
 async function startSessionForPane(paneId, options = {}) {
-  const { force = false, silent = false, focusTerm = true, cmd = null, args = null, cwd = null } = options;
-  const ws = selectedWorkspace();
-  if (!ws) {
+  const {
+    force = false,
+    silent = false,
+    focusTerm = true,
+    cmd = null,
+    args = null,
+    cwd = null,
+    workspaceId = state.selectedWorkspaceId,
+    transitionSeq = null
+  } = options;
+  if (!workspaceId) {
     throw new Error("Select a workspace first.");
+  }
+  if (isTransitionStale(transitionSeq, workspaceId)) {
+    return null;
+  }
+  const ws = workspaceRowById(workspaceId);
+  if (!ws) {
+    throw new Error("Workspace not found.");
+  }
+  if (!paneId || !leafPanes().some((p) => p.pane_id === paneId)) {
+    throw new Error("Pane not found.");
   }
   const existing = state.paneSessions[paneId] ?? null;
   if (existing && !force) {
-    const alive = runningSessions().some((s) => s.id === existing);
+    const alive = runningSessionsForWorkspace(workspaceId).some((s) => s.id === existing);
     if (alive) {
       return existing;
     }
@@ -419,13 +481,13 @@ async function startSessionForPane(paneId, options = {}) {
   try {
     if (cmd) {
       created = await rpc("session.run", {
-        workspace_id: ws.id,
+        workspace_id: workspaceId,
         cmd,
         args: args ?? [],
         cwd: cwd ?? ws.path,
       });
     } else {
-      created = await runShellSession(ws.id, ws.path);
+      created = await runShellSession(workspaceId, ws.path);
     }
   } catch (err) {
     const message = String(err?.message ?? err);
@@ -434,24 +496,28 @@ async function startSessionForPane(paneId, options = {}) {
     }
     throw err;
   }
+  if (isTransitionStale(transitionSeq, workspaceId)) {
+    return null;
+  }
   const sid = created?.session?.session_id;
   if (!sid) {
     throw new Error("session.run returned no session_id");
   }
   state.paneSessions[paneId] = sid;
-  // Save pane-session binding to DB for restore on next app launch
   rpc("pane.session.bind", {
-    workspace_id: ws.id,
+    workspace_id: workspaceId,
     pane_id: paneId,
     session_id: sid,
   }).catch(() => {});
-  await loadSessions();
+  await loadSessions(workspaceId, transitionSeq);
+  if (isTransitionStale(transitionSeq, workspaceId)) {
+    return sid;
+  }
   paneApi.normalizePaneSessions();
   paneApi.refreshPaneBindings();
   if (!silent) {
-    setStatus(`Session started: ${sid.slice(0, 8)}`);
+    setStatus(`Session started: ${sid}`);
   }
-  // After binding, resize and nudge shell prompt (pwsh/powershell only — not claude/codex)
   const effectiveCmd = (cmd ?? "pwsh.exe").toLowerCase();
   const isShell = effectiveCmd.includes("pwsh") || effectiveCmd.includes("powershell") || effectiveCmd.includes("cmd.exe");
   setTimeout(() => {
@@ -468,36 +534,51 @@ async function startSessionForPane(paneId, options = {}) {
   await syncActiveContext();
   return sid;
 }
-async function ensurePaneSessionReady(paneId) {
-  if (!paneId) {
+async function ensurePaneSessionReady(workspaceId, paneId, transitionSeq = null) {
+  if (!workspaceId || !paneId) {
+    return;
+  }
+  if (isTransitionStale(transitionSeq, workspaceId)) {
+    return;
+  }
+  if (!leafPanes().some((p) => p.pane_id === paneId)) {
     return;
   }
   const sid = state.paneSessions[paneId] ?? null;
-  const alive = sid ? runningSessions().some((s) => s.id === sid) : false;
+  const alive = sid ? runningSessionsForWorkspace(workspaceId).some((s) => s.id === sid) : false;
   if (!alive) {
-    await startSessionForPane(paneId, { silent: true });
+    await startSessionForPane(paneId, { silent: true, workspaceId, transitionSeq });
+  }
+  if (isTransitionStale(transitionSeq, workspaceId)) {
+    return;
   }
   await paneApi.selectPane(paneId, { persist: true, focusTerm: true });
   await syncActiveContext();
 }
-async function ensureAllPaneSessionsReady(primaryPaneId) {
+async function ensureAllPaneSessionsReady(workspaceId, primaryPaneId, transitionSeq = null) {
+  if (!workspaceId) {
+    return;
+  }
   for (const pane of leafPanes()) {
+    if (isTransitionStale(transitionSeq, workspaceId)) {
+      return;
+    }
     const paneId = pane.pane_id;
     if (!paneId || paneId === primaryPaneId) {
       continue;
     }
     const sid = state.paneSessions[paneId] ?? null;
-    const alive = sid ? runningSessions().some((s) => s.id === sid) : false;
+    const alive = sid ? runningSessionsForWorkspace(workspaceId).some((s) => s.id === sid) : false;
     if (alive) {
       continue;
     }
     try {
-      await startSessionForPane(paneId, { silent: true, focusTerm: false });
+      await startSessionForPane(paneId, { silent: true, focusTerm: false, workspaceId, transitionSeq });
     } catch (err) {
-      setStatus(`Pane auto-start failed (${paneId.slice(0, 8)}): ${err?.message ?? err}`, true);
+      setStatus(`Pane auto-start failed (${paneId}): ${String(err?.message ?? err)}`, true);
     }
   }
-  if (primaryPaneId && leafPanes().some((p) => p.pane_id === primaryPaneId)) {
+  if (!isTransitionStale(transitionSeq, workspaceId) && primaryPaneId && leafPanes().some((p) => p.pane_id === primaryPaneId)) {
     await paneApi.selectPane(primaryPaneId, { persist: false, focusTerm: true });
   }
 }
@@ -520,15 +601,22 @@ async function closeSessionForPane(paneId) {
   setStatus(`Session closed: ${sid.slice(0, 8)}`);
   await syncActiveContext();
 }
-async function tryRestorePaneSessions(workspaceId) {
+async function tryRestorePaneSessions(workspaceId, transitionSeq = null) {
+  if (!workspaceId || isTransitionStale(transitionSeq, workspaceId)) {
+    return;
+  }
   const res = await rpc("pane.session.bindings", { workspace_id: workspaceId }).catch(() => null);
   if (!res?.bindings?.length) return;
-
-  const running = new Set(runningSessions().map((s) => s.id));
+  if (isTransitionStale(transitionSeq, workspaceId)) {
+    return;
+  }
+  const running = new Set(runningSessionsForWorkspace(workspaceId).map((s) => s.id));
   const currentLeafIds = new Set(leafPanes().map((p) => p.pane_id));
-
   const restoreWork = [];
   for (const binding of res.bindings) {
+    if (isTransitionStale(transitionSeq, workspaceId)) {
+      return;
+    }
     const { pane_id, session_id, spawn_cmd, spawn_args, spawn_cwd } = binding;
     if (!currentLeafIds.has(pane_id)) continue;
     if (running.has(session_id)) {
@@ -546,65 +634,90 @@ async function tryRestorePaneSessions(workspaceId) {
         cwd: spawn_cwd ?? undefined,
       })
         .then((result) => {
+          if (isTransitionStale(transitionSeq, workspaceId)) {
+            return;
+          }
           const newSid = result?.session?.session_id;
           if (newSid) {
             state.paneSessions[pane_id] = newSid;
             rpc("pane.session.bind", { workspace_id: workspaceId, pane_id, session_id: newSid }).catch(() => {});
           }
         })
-        .catch(() => {}) // Silent — ensurePaneSessionReady will start default shell
+        .catch(() => {})
     );
   }
   await Promise.all(restoreWork);
-  await loadSessions();
+  if (isTransitionStale(transitionSeq, workspaceId)) {
+    return;
+  }
+  await loadSessions(workspaceId, transitionSeq);
 }
-
-async function pruneOrphanSessions(workspaceId) {
-  // Kill running sessions that are not bound to any pane in state.paneSessions
-  const boundSids = new Set(Object.values(state.paneSessions));
-  const orphans = runningSessions().filter(
-    (s) => s.workspace_id === workspaceId && !boundSids.has(s.id)
-  );
-  await Promise.allSettled(
-    orphans.map((s) => rpc("session.close", { session_id: s.id }).catch(() => {}))
-  );
-  if (orphans.length > 0) {
-    await loadSessions();
-  }
-}
-
-async function refreshWorkspaceState(options = {}) {
-  const { forceLayout = false, autoSession = true } = options;
-  await Promise.all([loadSessions(), loadPanes(), loadUnread()]);
-  if (state.useStream) {
-    const ws = selectedWorkspace();
-    await subscribeWorkspaceStream(ws?.id ?? null);
-  }
-  // Restore sessions from previous launch before starting new ones
-  if (autoSession && state.selectedWorkspaceId) {
-    await tryRestorePaneSessions(state.selectedWorkspaceId);
-    await pruneOrphanSessions(state.selectedWorkspaceId);
-  }
-  cleanupHiddenSessionsForWorkspace(state.selectedWorkspaceId, false);
-  paneApi.renderPaneSurface(forceLayout);
-  paneApi.refreshPaneBindings();
-  hiddenRefreshPanesUi();
-  if (autoSession) {
-    await ensurePaneSessionReady(state.selectedPaneId);
-    await ensureAllPaneSessionsReady(state.selectedPaneId);
-  }
-  await syncActiveContext();
-}
-async function switchWorkspace(workspaceId) {
+async function refreshWorkspaceState(workspaceId, options = {}, transitionSeq = null) {
   if (!workspaceId) {
     return;
   }
+  const { forceLayout = false, autoSession = true } = options;
+  await Promise.all([loadSessions(workspaceId, transitionSeq), loadPanes(workspaceId, transitionSeq), loadUnread()]);
+  if (isTransitionStale(transitionSeq, workspaceId)) {
+    return;
+  }
+  if (state.useStream) {
+    await subscribeWorkspaceStream(workspaceId);
+    if (isTransitionStale(transitionSeq, workspaceId)) {
+      return;
+    }
+  }
+  if (autoSession) {
+    await tryRestorePaneSessions(workspaceId, transitionSeq);
+    if (isTransitionStale(transitionSeq, workspaceId)) {
+      return;
+    }
+  }
+  cleanupHiddenSessionsForWorkspace(workspaceId, false);
+  if (isTransitionStale(transitionSeq, workspaceId)) {
+    return;
+  }
+  paneApi.renderPaneSurface(forceLayout);
+  paneApi.refreshPaneBindings();
+  hiddenRefreshPanesUi();
+  if (isTransitionStale(transitionSeq, workspaceId)) {
+    return;
+  }
+  if (autoSession) {
+    await ensurePaneSessionReady(workspaceId, state.selectedPaneId, transitionSeq);
+    await ensureAllPaneSessionsReady(workspaceId, state.selectedPaneId, transitionSeq);
+    if (isTransitionStale(transitionSeq, workspaceId)) {
+      return;
+    }
+  }
+  await syncActiveContext();
+}
+async function runWorkspaceTransition(workspaceId, options = {}) {
+  if (!workspaceId) {
+    return;
+  }
+  const { reason = "manual", forceLayout = true, autoSession = true } = options;
+  const transitionSeq = ++workspaceTransition.transitionSeq;
+  workspaceTransition.activeTransitionSeq = transitionSeq;
+  workspaceTransition.activeWorkspaceId = workspaceId;
+  workspaceTransition.switchInFlight = true;
   state.selectedWorkspaceId = workspaceId;
   localStorage.setItem(STORAGE_KEYS.selectedWorkspaceId, workspaceId);
   renderWorkspaces();
   loadNotepadForWorkspace(workspaceId);
-  await refreshWorkspaceState({ forceLayout: true, autoSession: true });
-  await syncActiveContext();
+  try {
+    await refreshWorkspaceState(workspaceId, { forceLayout, autoSession }, transitionSeq);
+    if (!isTransitionStale(transitionSeq, workspaceId)) {
+      await syncActiveContext();
+    }
+  } finally {
+    if (workspaceTransition.activeTransitionSeq === transitionSeq) {
+      workspaceTransition.switchInFlight = false;
+    }
+  }
+}
+async function switchWorkspace(workspaceId) {
+  await runWorkspaceTransition(workspaceId, { reason: "switch", forceLayout: true, autoSession: true });
 }
 
 function isNotificationForPane(row, workspaceId, paneId, sessionId) {
@@ -743,7 +856,7 @@ async function onClosePane(paneId) {
   const nextPaneId = res?.focus_pane_id ?? leafPanes()[0]?.pane_id ?? null;
   if (nextPaneId) {
     state.selectedPaneId = nextPaneId;
-    await ensurePaneSessionReady(nextPaneId);
+    await ensurePaneSessionReady(ws.id, nextPaneId);
   }
   setStatus("Pane closed");
   await syncActiveContext();
@@ -792,7 +905,7 @@ async function splitPaneInternal(paneId, direction, options = {}) {
   if (state.selectedPaneId) {
     await paneApi.selectPane(state.selectedPaneId, { persist: true, focusTerm: true });
     if (autoStartIfMissing) {
-      await ensurePaneSessionReady(state.selectedPaneId);
+      await ensurePaneSessionReady(ws.id, state.selectedPaneId);
     }
   }
   return { first, second };
@@ -849,7 +962,7 @@ async function onHidePane(paneId) {
   const nextPaneId = res?.focus_pane_id ?? leafPanes()[0]?.pane_id ?? null;
   if (nextPaneId) {
     state.selectedPaneId = nextPaneId;
-    await ensurePaneSessionReady(nextPaneId);
+    await ensurePaneSessionReady(ws.id, nextPaneId);
   }
   setStatus(
     sessionId ? `Pane hidden: ${sessionId.slice(0, 8)}` : "Pane hidden",
@@ -943,7 +1056,7 @@ async function onInsertQuickCommand(paneId, text) {
     setStatus("Pane not found.", true);
     return;
   }
-  await ensurePaneSessionReady(paneId);
+  await ensurePaneSessionReady(state.selectedWorkspaceId, paneId);
   paneApi.writeToPane(paneId, text);
   setStatus("Quick command inserted");
 }
@@ -1006,7 +1119,7 @@ function toggleNotificationPanel() {
   applyPanelVisibility();
   paneApi.fitAllPanes();
 }
-// ── Workspace Info Panel ───────────────────────────────────────
+// ?? Workspace Info Panel ???????????????????????????????????????
 let wsDescSaveTimer = null;
 
 function openWsInfoPanel(ws, anchorEl) {
@@ -1026,10 +1139,10 @@ function openWsInfoPanel(ws, anchorEl) {
   if (qaEl) {
     qaEl.innerHTML = "";
     const actions = [
-      { label: "📂 Explorer", title: "Open in File Explorer", fn: () => window.wincmux.openInExplorer(ws.path).catch((e) => setStatus(String(e), true)) },
-      { label: "⬡ VSCode",   title: "Open in VSCode",        fn: () => window.wincmux.openInVscode(ws.path).catch((e) => setStatus(String(e), true)) },
-      { label: "⎆ Git",      title: "Show git log & status", fn: () => loadGitSummary(ws) },
-      { label: "+ Terminal",  title: "New PTY in selected pane", fn: () => { closeWsInfoPanel(); startSessionForPane(state.selectedPaneId, { force: true }).catch((e) => setStatus(String(e), true)); } },
+      { label: "Explorer", title: "Open in File Explorer", fn: () => window.wincmux.openInExplorer(ws.path).catch((e) => setStatus(String(e), true)) },
+      { label: "VSCode",   title: "Open in VSCode",        fn: () => window.wincmux.openInVscode(ws.path).catch((e) => setStatus(String(e), true)) },
+      { label: "Git",      title: "Show git log & status", fn: () => loadGitSummary(ws) },
+      { label: "+ Terminal",  title: "New PTY in selected pane", fn: () => { closeWsInfoPanel(); startSessionForPane(state.selectedPaneId, { force: true, workspaceId: ws.id }).catch((e) => setStatus(String(e), true)); } },
     ];
     for (const a of actions) {
       const btn = document.createElement("button");
@@ -1067,7 +1180,7 @@ function openWsInfoPanel(ws, anchorEl) {
   if (gitArea) { gitArea.style.display = "none"; gitArea.innerHTML = ""; }
 
   // Load session summary
-  summaryEl.innerHTML = '<span class="ws-summary-loading">Loading…</span>';
+  summaryEl.innerHTML = '<span class="ws-summary-loading">Loading...</span>';
   Promise.all([
     rpc("ai.sessions", { workspace_id: ws.id }).catch(() => ({ sessions: [] })),
     rpc("session.list", { workspace_id: ws.id }).catch(() => ({ sessions: [] }))
@@ -1087,10 +1200,10 @@ function openWsInfoPanel(ws, anchorEl) {
         return `<div class="ws-ai-item">
           <button class="ws-ai-copy-btn" data-copy="${resumeEsc}" title="Copy to clipboard: ${resumeEsc}">
             <span class="ws-ai-resume">${ai.resume_cmd}</span>
-            <span class="ws-ai-copy-icon">⎘</span>
+            <span class="ws-ai-copy-icon">Copy</span>
           </button>
           <div class="ws-ai-meta-row">
-            <span class="ws-ai-cwd" title="${cwd}">${cwd || "—"}</span>
+            <span class="ws-ai-cwd" title="${cwd}">${cwd || "-"}</span>
             <span class="ws-ai-time">${timeStr}</span>
           </div>
         </div>`;
@@ -1104,12 +1217,12 @@ function openWsInfoPanel(ws, anchorEl) {
     };
 
     let html = `<div class="ws-dashboard-grid">
-      ${renderAiCard("⬡ Claude", claudeSessions)}
-      ${renderAiCard("◈ Codex", codexSessions)}
+      ${renderAiCard("Claude", claudeSessions)}
+      ${renderAiCard("Codex", codexSessions)}
     </div>`;
 
     if (runningPty.length > 0) {
-      // Build reverse map: session_id → pane_id
+      // Build reverse map: session_id ??pane_id
       const sessionToPane = {};
       for (const [paneId, sid] of Object.entries(state.paneSessions)) {
         sessionToPane[sid] = paneId;
@@ -1133,7 +1246,7 @@ function openWsInfoPanel(ws, anchorEl) {
           <span class="ws-summary-pane-name" title="session ${s.id}">${paneName}</span>
           <span class="ws-summary-cmd" title="${label}">${label}</span>
           <span class="ws-summary-meta-pair"><span class="ws-summary-pid">pid ${s.pid}</span><span class="ws-summary-time">${startedStr}</span></span>
-          <button class="ws-pty-kill-btn" data-sid="${s.id}" data-pane-id="${paneId ?? ""}" title="Close pane &amp; kill session (pid ${s.pid})">✕</button>
+          <button class="ws-pty-kill-btn" data-sid="${s.id}" data-pane-id="${paneId ?? ""}" title="Close pane &amp; kill session (pid ${s.pid})">X</button>
         </div>`;
       }).join("");
       html += `<div class="ws-summary-section">
@@ -1153,21 +1266,26 @@ function openWsInfoPanel(ws, anchorEl) {
         const text = copyBtn.dataset.copy;
         await window.wincmux.clipboardWrite(text).catch(() => {});
         const icon = copyBtn.querySelector(".ws-ai-copy-icon");
-        if (icon) { icon.textContent = "✓"; setTimeout(() => { icon.textContent = "⎘"; }, 1200); }
+        if (icon) {
+          icon.textContent = "Copied";
+          setTimeout(() => {
+            icon.textContent = "Copy";
+          }, 1200);
+        }
         return;
       }
       const killBtn = ev.target.closest("[data-sid]");
       if (killBtn) {
         const sid = killBtn.dataset.sid;
         const paneId = killBtn.dataset.paneId || null;
-        killBtn.textContent = "…";
+        killBtn.textContent = "Closing...";
         killBtn.disabled = true;
         try {
           if (paneId && leafPanes().length > 1 && leafPanes().some((p) => p.pane_id === paneId)) {
             // Close the pane (which also closes the session internally)
             await onClosePane(paneId);
           } else {
-            // No linked pane (or last pane) — just kill the session
+            // No linked pane (or last pane) ??just kill the session
             await rpc("session.close", { session_id: sid });
           }
           // Remove item from DOM
@@ -1180,7 +1298,7 @@ function openWsInfoPanel(ws, anchorEl) {
             }
           }
         } catch (err) {
-          killBtn.textContent = "✕";
+          killBtn.textContent = "Re-run";
           killBtn.disabled = false;
           setStatus(String(err?.message ?? err), true);
         }
@@ -1222,14 +1340,14 @@ async function loadGitSummary(ws) {
 
   gitArea.dataset.wsId = ws.id;
   gitArea.style.display = "";
-  gitArea.innerHTML = '<div class="ws-git-loading">Loading git info…</div>';
+  gitArea.innerHTML = '<div class="ws-git-loading">Loading git info...</div>';
 
   try {
     const info = await window.wincmux.gitInfo(ws.path);
     let html = "";
 
     if (info.branch) {
-      html += `<div class="ws-git-branch">⎇ ${info.branch}</div>`;
+      html += `<div class="ws-git-branch">Branch: ${info.branch}</div>`;
     }
 
     if (info.dirty_files.length > 0) {
@@ -1249,7 +1367,7 @@ async function loadGitSummary(ws) {
       }
       html += "</div>";
     } else if (info.branch) {
-      html += '<div class="ws-git-clean">✓ Working tree clean</div>';
+      html += '<div class="ws-git-clean">Working tree clean</div>';
     }
 
     if (info.recent_commits.length > 0) {
@@ -1278,9 +1396,9 @@ async function handleWsScan(ws, scanBtn) {
   const scanArea = $("wsScanArea");
   if (!scanArea || !ws?.path) return;
   scanBtn.disabled = true;
-  scanBtn.textContent = "Scanning…";
+  scanBtn.textContent = "Scanning...";
   scanArea.style.display = "";
-  scanArea.innerHTML = '<div class="ws-scan-empty">Scanning…</div>';
+  scanArea.innerHTML = '<div class="ws-scan-empty">Scanning...</div>';
   try {
     const result = await window.wincmux.scanLongFiles(ws.path, 1000);
     const files = result?.files ?? [];
@@ -1324,7 +1442,7 @@ function bindWsInfoPanel() {
 
 globalThis.openWsInfoPanel = openWsInfoPanel;
 
-// ── Workspace Notepad ──────────────────────────────────────────
+// ?? Workspace Notepad ??????????????????????????????????????????
 let notepadSaveTimer = null;
 
 function loadNotepadForWorkspace(workspaceId) {
@@ -1433,7 +1551,9 @@ async function bootstrap() {
           setStatus("Core restarting...", false);
         } else if (status === "ready") {
           setStatus("Core reconnected", false);
-          void refreshWorkspaceState({ forceLayout: false, autoSession: true });
+          if (state.selectedWorkspaceId) {
+            void runWorkspaceTransition(state.selectedWorkspaceId, { reason: "core_ready", forceLayout: false, autoSession: true });
+          }
         } else if (status === "dead") {
           setStatus(`Core failed: ${error ?? "unknown"}`, true);
         }
