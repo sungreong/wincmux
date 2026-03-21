@@ -27,3 +27,4 @@ logs/
 # Keep upstream reference clone out of local source control
 upstream/cmux/
 legacy-dotnet
+.claude
