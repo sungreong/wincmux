@@ -8,6 +8,7 @@ const paneHandlers = {
   insertQuickCommand: async () => {},
   markPaneNotificationsRead: async () => {}
 };
+const INPUT_FLUSH_DELAY_MS = 12;
 
 function bindQuickCommandPanelSafe(paneId, quickPanel, quickBtn) {
   const binder = typeof globalThis.bindQuickCommandPanel === "function"
@@ -318,55 +319,89 @@ async function syncPaneSize(paneId) {
 }
 
 function queuePaneInput(view, data) {
-  if (!view.sessionId) {
+  if (!view.sessionId || !data) {
     return;
   }
 
   view.pendingInput += data;
-  if (view.flushTimer) {
+  if (view.inputFlushScheduled || view.inputFlushInFlight) {
     return;
   }
 
+  view.inputFlushScheduled = true;
   view.flushTimer = setTimeout(() => {
-    flushPaneInput(view).catch((err) => {
-      const msg = err?.message ?? String(err);
-      if (msg.includes("ENOENT") || msg.includes("pipe")) {
-        setStatus("Core reconnecting, retrying input...", true);
-      } else {
-        setStatus(`Terminal input error: ${msg}`, true);
-      }
-    });
-  }, 12);
+    view.flushTimer = null;
+    view.inputFlushScheduled = false;
+    void flushPaneInput(view);
+  }, INPUT_FLUSH_DELAY_MS);
 }
 
 async function flushPaneInput(view) {
-  view.flushTimer = null;
+  if (view.inputFlushInFlight) {
+    return;
+  }
+
   if (!view.sessionId || !view.pendingInput) {
     return;
   }
 
-  const payload = view.pendingInput;
-  const started = performance.now();
-  await rpc("session.write", { session_id: view.sessionId, data: payload });
-  view.pendingInput = view.pendingInput.slice(payload.length);
-  const latency = performance.now() - started;
-  state.metrics.input_latency_ms.push(latency);
-  if (state.metrics.input_latency_ms.length > 50) {
-    state.metrics.input_latency_ms.shift();
-  }
-  logPerf("input.latency", { pane_id: view.paneId, session_id: view.sessionId, latency_ms: Number(latency.toFixed(2)) });
+  view.inputFlushInFlight = true;
+  try {
+    while (view.sessionId && view.pendingInput) {
+      const sessionId = view.sessionId;
+      const payload = view.pendingInput;
+      const queued = payload.length;
+      view.pendingInput = "";
+      const started = performance.now();
 
-  if (view.pendingInput) {
-    view.flushTimer = setTimeout(() => {
-      flushPaneInput(view).catch((err) => {
+      try {
+        await rpc("session.write", { session_id: sessionId, data: payload });
+        const latency = performance.now() - started;
+        state.metrics.input_latency_ms.push(latency);
+        if (state.metrics.input_latency_ms.length > 50) {
+          state.metrics.input_latency_ms.shift();
+        }
+        logPerf("input.latency", {
+          pane_id: view.paneId,
+          session_id: sessionId,
+          latency_ms: Number(latency.toFixed(2))
+        });
+        logPerf("input.flush", {
+          pane_id: view.paneId,
+          session_id: sessionId,
+          queued,
+          sent: queued,
+          dropped: 0,
+          in_flight_ms: Number(latency.toFixed(2))
+        });
+      } catch (err) {
         const msg = err?.message ?? String(err);
         if (msg.includes("ENOENT") || msg.includes("pipe")) {
           setStatus("Core reconnecting, retrying input...", true);
         } else {
           setStatus(`Terminal input error: ${msg}`, true);
         }
-      });
-    }, 12);
+        const latency = performance.now() - started;
+        logPerf("input.flush", {
+          pane_id: view.paneId,
+          session_id: sessionId,
+          queued,
+          sent: 0,
+          dropped: queued,
+          in_flight_ms: Number(latency.toFixed(2))
+        });
+      }
+    }
+  } finally {
+    view.inputFlushInFlight = false;
+    if (view.sessionId && view.pendingInput && !view.inputFlushScheduled) {
+      view.inputFlushScheduled = true;
+      view.flushTimer = setTimeout(() => {
+        view.flushTimer = null;
+        view.inputFlushScheduled = false;
+        void flushPaneInput(view);
+      }, INPUT_FLUSH_DELAY_MS);
+    }
   }
 }
 
@@ -396,6 +431,8 @@ function bindViewToSession(view, sessionId) {
     clearTimeout(view.flushTimer);
     view.flushTimer = null;
   }
+  view.inputFlushScheduled = false;
+  view.inputFlushInFlight = false;
   if (view.flushRaf) {
     cancelAnimationFrame(view.flushRaf);
     view.flushRaf = null;
@@ -718,6 +755,8 @@ function createPaneView(paneId, host) {
     observer: null,
     pendingInput: "",
     flushTimer: null,
+    inputFlushScheduled: false,
+    inputFlushInFlight: false,
     flushRaf: null,
     outputQueue: "",
     resizeTimer: null,
