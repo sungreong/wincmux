@@ -3,7 +3,7 @@ import net from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import { pathToFileURL } from "node:url";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { app, BrowserWindow, ipcMain, dialog, clipboard, Menu, shell, nativeImage, Notification as ElectronNotification, type NativeImage, type OpenDialogOptions, type WebContents } from "electron";
 
 type RpcPayload = {
@@ -902,19 +902,25 @@ function registerIpcHandlers(): void {
   ipcMain.handle("wincmux:git-info", async (_event, payload: { path: string }) =>
     toIpcEnvelope(async () => {
       const normalized = validateWorkspacePath(payload?.path);
-      const run = (args: string[]): string | null => {
+      const runRaw = (args: string[]) => {
         try {
-          const out = spawnSync("git", args, { cwd: normalized, encoding: "utf8", windowsHide: true, timeout: 4000 });
-          return out.status === 0 ? (out.stdout as string).trim() : null;
-        } catch { return null; }
+          return spawnSync("git", args, { cwd: normalized, encoding: "utf8", windowsHide: true, timeout: 4000 });
+        } catch (e) {
+          return { status: -1, stdout: "", stderr: String(e) };
+        }
       };
-      const status = run(["status", "--short"]);
-      const log = run(["log", "--oneline", "-8"]);
-      const branch = run(["rev-parse", "--abbrev-ref", "HEAD"]);
+      const branchOut = runRaw(["rev-parse", "--abbrev-ref", "HEAD"]);
+      const branch = branchOut.status === 0 ? (branchOut.stdout as string).trim() : null;
+      const statusOut = runRaw(["status", "--short"]);
+      const status = statusOut.status === 0 ? (statusOut.stdout as string).trim() : null;
+      const logOut = runRaw(["log", "--oneline", "-8"]);
+      const log = logOut.status === 0 ? (logOut.stdout as string).trim() : null;
+      const debugError = branch === null ? ((branchOut.stderr as string) || `exit ${branchOut.status}`) : null;
       return {
         branch,
         dirty_files: status ? status.split("\n").filter(Boolean) : [],
-        recent_commits: log ? log.split("\n").filter(Boolean) : []
+        recent_commits: log ? log.split("\n").filter(Boolean) : [],
+        debug_error: debugError
       };
     })
   );
