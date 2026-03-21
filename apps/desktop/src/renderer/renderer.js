@@ -559,6 +559,20 @@ async function tryRestorePaneSessions(workspaceId) {
   await loadSessions();
 }
 
+async function pruneOrphanSessions(workspaceId) {
+  // Kill running sessions that are not bound to any pane in state.paneSessions
+  const boundSids = new Set(Object.values(state.paneSessions));
+  const orphans = runningSessions().filter(
+    (s) => s.workspace_id === workspaceId && !boundSids.has(s.id)
+  );
+  await Promise.allSettled(
+    orphans.map((s) => rpc("session.close", { session_id: s.id }).catch(() => {}))
+  );
+  if (orphans.length > 0) {
+    await loadSessions();
+  }
+}
+
 async function refreshWorkspaceState(options = {}) {
   const { forceLayout = false, autoSession = true } = options;
   await Promise.all([loadSessions(), loadPanes(), loadUnread()]);
@@ -569,6 +583,7 @@ async function refreshWorkspaceState(options = {}) {
   // Restore sessions from previous launch before starting new ones
   if (autoSession && state.selectedWorkspaceId) {
     await tryRestorePaneSessions(state.selectedWorkspaceId);
+    await pruneOrphanSessions(state.selectedWorkspaceId);
   }
   cleanupHiddenSessionsForWorkspace(state.selectedWorkspaceId, false);
   paneApi.renderPaneSurface(forceLayout);
@@ -1094,6 +1109,13 @@ function openWsInfoPanel(ws, anchorEl) {
     </div>`;
 
     if (runningPty.length > 0) {
+      // Build reverse map: session_id → pane_id
+      const sessionToPane = {};
+      for (const [paneId, sid] of Object.entries(state.paneSessions)) {
+        sessionToPane[sid] = paneId;
+      }
+      const leafIds = leafPanes().map((p) => p.pane_id);
+
       const ptyItems = runningPty.map((s) => {
         let label = s.spawn_cmd ?? "shell";
         try {
@@ -1101,10 +1123,17 @@ function openWsInfoPanel(ws, anchorEl) {
           const meaningful = args.filter((a) => !a.startsWith("-No") && !a.startsWith("chcp") && !a.startsWith("$Output") && !a.startsWith("[Console]"));
           if (meaningful.length > 0) label = `${s.spawn_cmd} ${meaningful.join(" ")}`.trim();
         } catch { /* */ }
+        const paneId = sessionToPane[s.id] ?? null;
+        const paneName = s.id.slice(0, 8);
+        const startedD = new Date(s.started_at);
+        const startedStr = startedD.toLocaleDateString([], { month: "short", day: "numeric" }) + " " +
+                           startedD.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
         return `<div class="ws-summary-item">
           <span class="ws-summary-dot"></span>
+          <span class="ws-summary-pane-name" title="session ${s.id}">${paneName}</span>
           <span class="ws-summary-cmd" title="${label}">${label}</span>
-          <button class="ws-pty-kill-btn" data-sid="${s.id}" title="Kill session (pid ${s.pid})">pid ${s.pid} ✕</button>
+          <span class="ws-summary-meta-pair"><span class="ws-summary-pid">pid ${s.pid}</span><span class="ws-summary-time">${startedStr}</span></span>
+          <button class="ws-pty-kill-btn" data-sid="${s.id}" data-pane-id="${paneId ?? ""}" title="Close pane &amp; kill session (pid ${s.pid})">✕</button>
         </div>`;
       }).join("");
       html += `<div class="ws-summary-section">
@@ -1130,14 +1159,29 @@ function openWsInfoPanel(ws, anchorEl) {
       const killBtn = ev.target.closest("[data-sid]");
       if (killBtn) {
         const sid = killBtn.dataset.sid;
+        const paneId = killBtn.dataset.paneId || null;
         killBtn.textContent = "…";
         killBtn.disabled = true;
         try {
-          await rpc("session.close", { session_id: sid });
-          // Reload the panel content after kill
-          openWsInfoPanel(ws, anchorEl);
+          if (paneId && leafPanes().length > 1 && leafPanes().some((p) => p.pane_id === paneId)) {
+            // Close the pane (which also closes the session internally)
+            await onClosePane(paneId);
+          } else {
+            // No linked pane (or last pane) — just kill the session
+            await rpc("session.close", { session_id: sid });
+          }
+          // Remove item from DOM
+          const item = killBtn.closest(".ws-summary-item");
+          if (item) {
+            item.remove();
+            const section = summaryEl.querySelector(".ws-summary-section");
+            if (section && section.querySelectorAll(".ws-summary-item").length === 0) {
+              section.remove();
+            }
+          }
         } catch (err) {
-          killBtn.textContent = "err";
+          killBtn.textContent = "✕";
+          killBtn.disabled = false;
           setStatus(String(err?.message ?? err), true);
         }
       }
@@ -1220,7 +1264,8 @@ async function loadGitSummary(ws) {
     }
 
     if (!html) {
-      html = '<div class="ws-git-loading">Not a git repository</div>';
+      const hint = info.debug_error ? `<div class="ws-git-error-detail">${info.debug_error}</div>` : "";
+      html = `<div class="ws-git-loading">Not a git repository (.git folder not found)</div>${hint}`;
     }
 
     gitArea.innerHTML = html;

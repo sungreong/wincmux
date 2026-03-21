@@ -1379,6 +1379,35 @@ li.active .ws-info-btn {
   flex-shrink: 0;
 }
 
+.ws-summary-pane-name {
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 42px;
+}
+
+.ws-summary-meta-pair {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex-shrink: 0;
+  gap: 1px;
+}
+
+.ws-summary-pid {
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.ws-summary-time {
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .ws-summary-cmd {
   overflow: hidden;
   text-overflow: ellipsis;

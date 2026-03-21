@@ -1347,7 +1347,8 @@ async function openSessionPicker(paneId, anchorBtn) {
           label = s.spawn_cmd;
         }
         const dateObj = new Date(s.started_at);
-        const timeStr = dateObj.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const timeStr = dateObj.toLocaleDateString([], { month: "short", day: "numeric" }) + " " +
+                        dateObj.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
         const isRunning = s.status === "running";
 
         const item = document.createElement("div");
@@ -1367,7 +1368,7 @@ async function openSessionPicker(paneId, anchorBtn) {
 
         const metaEl = document.createElement("span");
         metaEl.className = "session-meta";
-        metaEl.textContent = `${isRunning ? "running" : s.status} - ${timeStr}`;
+        metaEl.textContent = `${s.id.slice(0, 8)} · ${isRunning ? "running" : s.status} · ${timeStr}`;
 
         info.append(labelEl, metaEl);
 
