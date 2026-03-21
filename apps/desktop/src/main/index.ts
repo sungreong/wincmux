@@ -894,7 +894,8 @@ function registerIpcHandlers(): void {
   ipcMain.handle("wincmux:open-in-explorer", async (_event, payload: { path: string }) =>
     toIpcEnvelope(async () => {
       const normalized = validateWorkspacePath(payload?.path);
-      shell.openPath(normalized);
+      const err = await shell.openPath(normalized);
+      if (err) throw new Error(err);
       return { ok: true };
     })
   );
@@ -903,7 +904,7 @@ function registerIpcHandlers(): void {
       const normalized = validateWorkspacePath(payload?.path);
       const run = (args: string[]): string | null => {
         try {
-          const out = require("node:child_process").spawnSync("git", args, { cwd: normalized, encoding: "utf8", windowsHide: true, timeout: 4000 });
+          const out = spawnSync("git", args, { cwd: normalized, encoding: "utf8", windowsHide: true, timeout: 4000 });
           return out.status === 0 ? (out.stdout as string).trim() : null;
         } catch { return null; }
       };
