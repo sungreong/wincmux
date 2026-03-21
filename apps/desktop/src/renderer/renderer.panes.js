@@ -1082,18 +1082,23 @@ function renderPaneSurface(force = false) {
   }
 
   state.layoutHash = nextHash;
-  paneSurface.innerHTML = "";
-  state.paneCards.clear();
-  state.paneMeta.clear();
-  state.quickCommandOpenPaneId = null;
-  disposeAllViews();
 
   if (!state.selectedWorkspaceId) {
+    paneSurface.innerHTML = "";
+    state.paneCards.clear();
+    state.paneMeta.clear();
+    state.quickCommandOpenPaneId = null;
+    disposeAllViews();
     renderPaneEmptyState("No workspace selected", "Create or select a workspace to start.");
     return;
   }
 
   if (state.panes.length === 0) {
+    paneSurface.innerHTML = "";
+    state.paneCards.clear();
+    state.paneMeta.clear();
+    state.quickCommandOpenPaneId = null;
+    disposeAllViews();
     renderPaneEmptyState("No panes available", "Refresh workspace or create a new workspace.");
     return;
   }
@@ -1102,21 +1107,68 @@ function renderPaneSurface(force = false) {
   const root = state.panes.find((p) => p.parent_id === null);
 
   if (!root) {
+    paneSurface.innerHTML = "";
+    state.paneCards.clear();
+    state.paneMeta.clear();
+    state.quickCommandOpenPaneId = null;
+    disposeAllViews();
     renderPaneEmptyState("Invalid layout", "Root pane not found. Re-open workspace or restart the app.");
     return;
   }
+
+  // Preserve existing views so scrollback buffers survive layout changes
+  const survivingPaneIds = new Set(leafPanes().map((p) => p.pane_id));
+  const preservedViews = new Map();
+  for (const [paneId, view] of state.paneViews.entries()) {
+    if (survivingPaneIds.has(paneId)) {
+      preservedViews.set(paneId, view);
+    } else {
+      disposeView(view);
+    }
+  }
+  state.paneViews.clear();
+  for (const [paneId, view] of preservedViews.entries()) {
+    state.paneViews.set(paneId, view);
+  }
+
+  paneSurface.innerHTML = "";
+  state.paneCards.clear();
+  state.paneMeta.clear();
+  state.quickCommandOpenPaneId = null;
 
   const hosts = [];
   const rootNode = renderPaneNode(root, paneMap, hosts);
   paneSurface.appendChild(rootNode);
 
   for (const item of hosts) {
-    createPaneView(item.paneId, item.host);
+    const existing = state.paneViews.get(item.paneId);
+    if (existing) {
+      // Reuse existing xterm — just move its host element into the new slot
+      while (existing.host.firstChild) {
+        item.host.appendChild(existing.host.firstChild);
+      }
+      existing.host = item.host;
+      existing.observer?.disconnect();
+      const observer = new ResizeObserver(() => {
+        updatePaneActionLayout(item.paneId);
+        existing.fitAddon.fit();
+        schedulePaneResize(existing);
+      });
+      observer.observe(item.host);
+      existing.observer = observer;
+    } else {
+      createPaneView(item.paneId, item.host);
+    }
   }
 
   refreshPaneBindings();
   applyPaneSelectionStyles();
-  fitAllPanes();
+  // Defer fit until after browser has applied layout, so xterm gets correct dimensions
+  requestAnimationFrame(() => {
+    fitAllPanes();
+    // Second pass after any CSS transitions settle
+    setTimeout(() => fitAllPanes(), 80);
+  });
 }
 
 function renderPaneEmptyState(title, description) {
