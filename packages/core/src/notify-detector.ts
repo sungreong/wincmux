@@ -71,7 +71,8 @@ export function extractPromptMarker(bufferText: string): PromptMarker | null {
 }
 
 export function computePromptDedupKey(sessionId: string, snippet: string): string {
-  return `${sessionId}|assistant_prompt|${snippet.toLowerCase()}`;
+  const key = `${sessionId}|assistant_prompt|${snippet.toLowerCase()}`;
+  return key.slice(0, 200);
 }
 
 export function hasAssistantResponseActivity(text: string): boolean {
@@ -115,7 +116,7 @@ export function extractAssistantReadyMarker(bufferText: string): string | null {
 }
 
 export function computeCompletionDedupKey(sessionId: string, readyMarker: string): string {
-  return `${sessionId}|task_done|${readyMarker}`;
+  return `${sessionId}|task_done|${readyMarker}`.slice(0, 200);
 }
 
 export interface AiResumeMarker {
