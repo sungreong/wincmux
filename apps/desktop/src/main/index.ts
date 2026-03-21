@@ -49,6 +49,7 @@ const streamConnections = new Map<string, { socket: net.Socket; subscriptionId: 
 let streamRequestSeq = 1;
 let unreadBadgeCount = 0;
 const badgeIconCache = new Map<string, NativeImage>();
+let appWindowIcon: NativeImage | null = null;
 let notifyStreamSocket: net.Socket | null = null;
 let notifyStreamSubscriptionId: string | null = null;
 let appIsQuitting = false;
@@ -126,6 +127,64 @@ function overlayIconForCount(count: number): NativeImage | null {
   return icon;
 }
 
+function createTerminalAppIcon(): NativeImage | null {
+  if (appWindowIcon) {
+    return appWindowIcon;
+  }
+
+  const iconCandidates = [
+    path.resolve(process.cwd(), "apps/desktop/assets/icon-terminal.ico"),
+    path.resolve(process.cwd(), "assets/icon-terminal.ico"),
+    path.resolve(__dirname, "../../assets/icon-terminal.ico"),
+    path.resolve(process.resourcesPath, "assets/icon-terminal.ico"),
+    path.resolve(process.cwd(), "apps/desktop/assets/icon-terminal.png"),
+    path.resolve(process.cwd(), "assets/icon-terminal.png"),
+    path.resolve(__dirname, "../../assets/icon-terminal.png"),
+    path.resolve(process.resourcesPath, "assets/icon-terminal.png")
+  ];
+
+  for (const candidate of iconCandidates) {
+    if (!fs.existsSync(candidate)) {
+      continue;
+    }
+    const fileIcon = nativeImage.createFromPath(candidate).resize({ width: 256, height: 256 });
+    if (!fileIcon.isEmpty()) {
+      appWindowIcon = fileIcon;
+      return appWindowIcon;
+    }
+  }
+
+  const svg = `
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#18212f" />
+      <stop offset="100%" stop-color="#0f161f" />
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a2433" />
+      <stop offset="100%" stop-color="#0f141c" />
+    </linearGradient>
+  </defs>
+  <rect x="14" y="14" width="228" height="228" rx="44" fill="url(#bg)" />
+  <rect x="30" y="40" width="196" height="176" rx="24" fill="url(#screen)" stroke="#2a394d" stroke-width="3" />
+  <circle cx="56" cy="62" r="6" fill="#ef4444" />
+  <circle cx="78" cy="62" r="6" fill="#f59e0b" />
+  <circle cx="100" cy="62" r="6" fill="#22c55e" />
+  <path d="M72 120 L105 146 L72 172" fill="none" stroke="#4ade80" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" />
+  <rect x="118" y="162" width="64" height="14" rx="7" fill="#4ade80" />
+</svg>`.trim();
+
+  const dataUrl = `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
+  const fallbackIcon = nativeImage.createFromDataURL(dataUrl).resize({ width: 256, height: 256 });
+  if (fallbackIcon.isEmpty()) {
+    return null;
+  }
+
+  appWindowIcon = fallbackIcon;
+  return appWindowIcon;
+}
+
 function broadcastToAllWindows(channel: string, payload: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) {
@@ -153,9 +212,11 @@ function applyUnreadBadge(count: number): void {
 
 function createWindow(): void {
   const preloadPath = path.join(__dirname, "..", "preload", "index.js");
+  const icon = createTerminalAppIcon();
   const win = new BrowserWindow({
     width: 1600,
     height: 980,
+    ...(icon ? { icon } : {}),
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
@@ -716,6 +777,61 @@ async function openWorkspaceInVscode(workspacePath: string): Promise<{ ok: true;
   }
 }
 
+const SCAN_SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", "out", ".next", "coverage", "__pycache__", ".turbo", ".cache"]);
+const SCAN_CODE_EXTS = new Set([".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".cs", ".java", ".cpp", ".c", ".h", ".hpp", ".rb", ".swift", ".kt", ".vue", ".svelte"]);
+
+function countFileLines(filePath: string): number {
+  try {
+    const content = fs.readFileSync(filePath, "utf8");
+    let count = 1;
+    for (let i = 0; i < content.length; i++) {
+      if (content[i] === "\n") count++;
+    }
+    return count;
+  } catch {
+    return 0;
+  }
+}
+
+function walkForLongFiles(
+  dir: string,
+  root: string,
+  minLines: number,
+  results: Array<{ relativePath: string; lineCount: number }>
+): void {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      if (!SCAN_SKIP_DIRS.has(entry.name)) {
+        walkForLongFiles(path.join(dir, entry.name), root, minLines, results);
+      }
+    } else if (entry.isFile()) {
+      const ext = path.extname(entry.name).toLowerCase();
+      if (SCAN_CODE_EXTS.has(ext)) {
+        const fullPath = path.join(dir, entry.name);
+        const lineCount = countFileLines(fullPath);
+        if (lineCount >= minLines) {
+          results.push({ relativePath: path.relative(root, fullPath).replace(/\\/g, "/"), lineCount });
+        }
+      }
+    }
+  }
+}
+
+function scanLongFiles(workspacePath: string, minLines: number): { files: Array<{ relativePath: string; lineCount: number }> } {
+  const normalized = validateWorkspacePath(workspacePath);
+  const safeMin = Math.max(1, Math.floor(Number(minLines) || 1000));
+  const results: Array<{ relativePath: string; lineCount: number }> = [];
+  walkForLongFiles(normalized, normalized, safeMin, results);
+  results.sort((a, b) => b.lineCount - a.lineCount);
+  return { files: results.slice(0, 50) };
+}
+
 function registerIpcHandlers(): void {
   ipcMain.handle("wincmux:rpc", async (_event, payload: RpcPayload) => toIpcEnvelope(() => pipeCall(payload)));
   ipcMain.handle("wincmux:stream-subscribe", async (event, payload: StreamFilter) =>
@@ -771,6 +887,35 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("wincmux:open-in-vscode", async (_event, payload: { path: string }) =>
     toIpcEnvelope(() => openWorkspaceInVscode(payload?.path))
+  );
+  ipcMain.handle("wincmux:scan-long-files", async (_event, payload: { path: string; minLines: number }) =>
+    toIpcEnvelope(() => Promise.resolve(scanLongFiles(payload?.path, payload?.minLines ?? 1000)))
+  );
+  ipcMain.handle("wincmux:open-in-explorer", async (_event, payload: { path: string }) =>
+    toIpcEnvelope(async () => {
+      const normalized = validateWorkspacePath(payload?.path);
+      shell.openPath(normalized);
+      return { ok: true };
+    })
+  );
+  ipcMain.handle("wincmux:git-info", async (_event, payload: { path: string }) =>
+    toIpcEnvelope(async () => {
+      const normalized = validateWorkspacePath(payload?.path);
+      const run = (args: string[]): string | null => {
+        try {
+          const out = require("node:child_process").spawnSync("git", args, { cwd: normalized, encoding: "utf8", windowsHide: true, timeout: 4000 });
+          return out.status === 0 ? (out.stdout as string).trim() : null;
+        } catch { return null; }
+      };
+      const status = run(["status", "--short"]);
+      const log = run(["log", "--oneline", "-8"]);
+      const branch = run(["rev-parse", "--abbrev-ref", "HEAD"]);
+      return {
+        branch,
+        dirty_files: status ? status.split("\n").filter(Boolean) : [],
+        recent_commits: log ? log.split("\n").filter(Boolean) : []
+      };
+    })
   );
   ipcMain.handle("wincmux:set-unread-badge", async (_event, payload: { count?: number }) => {
     applyUnreadBadge(payload?.count ?? 0);

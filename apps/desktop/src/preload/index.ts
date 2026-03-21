@@ -49,6 +49,12 @@ contextBridge.exposeInMainWorld("wincmux", {
   },
   openInVscode: async (workspacePath: string) =>
     unwrapEnvelope(await ipcRenderer.invoke("wincmux:open-in-vscode", { path: workspacePath })),
+  scanLongFiles: async (workspacePath: string, minLines: number) =>
+    unwrapEnvelope(await ipcRenderer.invoke("wincmux:scan-long-files", { path: workspacePath, minLines })),
+  openInExplorer: async (workspacePath: string) =>
+    unwrapEnvelope(await ipcRenderer.invoke("wincmux:open-in-explorer", { path: workspacePath })),
+  gitInfo: async (workspacePath: string) =>
+    unwrapEnvelope(await ipcRenderer.invoke("wincmux:git-info", { path: workspacePath })),
   onCoreStatus: (handler: (payload: CoreStatusPayload) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: CoreStatusPayload) => handler(payload);
     ipcRenderer.on("wincmux:core-status", listener);

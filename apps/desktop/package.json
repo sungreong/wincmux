@@ -29,11 +29,13 @@
     "productName": "WinCMux",
     "files": [
       "dist/**/*",
+      "assets/**/*",
       "node_modules/**/*",
       "../../packages/core/dist/**/*"
     ],
     "asar": true,
     "win": {
+      "icon": "assets/icon-terminal.ico",
       "target": [
         "portable"
       ],
