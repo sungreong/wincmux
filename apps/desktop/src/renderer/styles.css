@@ -92,7 +92,12 @@ body {
   font-size: 17px;
 }
 
-.panel-left,
+.panel-left {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
 .panel-right {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
@@ -805,4 +810,229 @@ li.active {
   #clearUnreadBtn {
     grid-column: 1 / -1;
   }
+}
+
+/* ── Session Picker Dropdown ─────────────────────────────────── */
+.session-picker-dropdown {
+  position: fixed;
+  z-index: 9999;
+  background: #1a1d26;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  width: 360px;
+  max-height: 340px;
+  overflow-y: auto;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.7);
+  display: flex;
+  flex-direction: column;
+}
+
+.session-picker-header {
+  padding: 6px 12px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  flex-shrink: 0;
+}
+
+.session-picker-empty {
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.session-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  cursor: default;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  flex-shrink: 0;
+}
+
+.session-picker-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.session-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.session-picker-item.running .session-status-dot {
+  background: var(--accent);
+  box-shadow: 0 0 4px var(--accent);
+}
+
+.session-picker-item.exited .session-status-dot,
+.session-picker-item.failed .session-status-dot {
+  background: var(--muted);
+}
+
+.session-item-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.session-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 12px;
+  font-family: "Cascadia Code", "Consolas", monospace;
+}
+
+.session-meta {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.session-attach-btn {
+  padding: 3px 9px;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.session-attach-btn:hover {
+  background: rgba(76, 195, 138, 0.18);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.session-picker-new {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  flex-shrink: 0;
+}
+
+.session-picker-new-label {
+  font-size: 11px;
+  color: var(--accent);
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.session-cmd-input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 4px 8px;
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+  font-family: "Cascadia Code", "Consolas", monospace;
+}
+
+.session-cmd-input:focus {
+  border-color: var(--accent);
+}
+
+.session-run-btn {
+  padding: 4px 10px;
+  background: var(--accent);
+  border: none;
+  border-radius: 3px;
+  color: #0f1115;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.session-run-btn:hover {
+  filter: brightness(1.12);
+}
+
+.session-picker-btn {
+  font-size: 11px;
+}
+
+.session-picker-item.ai-session {
+  background: rgba(76, 195, 138, 0.04);
+}
+
+.session-picker-item.ai-session:hover {
+  background: rgba(76, 195, 138, 0.1);
+}
+
+.session-status-dot.ai-dot {
+  background: #7c6af7;
+  box-shadow: 0 0 5px #7c6af7;
+}
+
+/* ── Workspace Notepad ───────────────────────────────────────── */
+.workspace-notepad {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 120px;
+  max-height: 240px;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+
+.notepad-header {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.notepad-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.notepad-hint {
+  font-size: 10px;
+  color: var(--border);
+}
+
+.notepad-textarea {
+  flex: 1;
+  resize: none;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  color: var(--text);
+  font-family: "Segoe UI", "Pretendard", sans-serif;
+  font-size: 12px;
+  line-height: 1.55;
+  outline: none;
+  min-height: 90px;
+  max-height: 200px;
+}
+
+.notepad-textarea:focus {
+  border-color: rgba(76, 195, 138, 0.4);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.notepad-textarea::placeholder {
+  color: var(--border);
 }

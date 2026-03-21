@@ -449,8 +449,11 @@ function startPanePolling(view) {
     } catch (err) {
       const message = String(err?.message ?? err);
       if (message.includes("session not found")) {
+        // Session ended — stop polling but keep terminal output visible (don't reset)
+        clearInterval(view.poller);
+        view.poller = null;
+        view.sessionId = null;
         delete state.paneSessions[view.paneId];
-        bindViewToSession(view, null);
         refreshPaneBindings();
       } else {
         setStatus(`Terminal read error: ${message}`, true);
@@ -558,6 +561,13 @@ function createPaneLeaf(node, hosts) {
     paneHandlers.startSessionForPane(paneId, { force: true }).catch((err) => setStatus(String(err), true));
   });
 
+  const sessionPickerBtn = makeBtn("Sessions ▾", "View and attach session history", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    openSessionPicker(paneId, sessionPickerBtn);
+  });
+  sessionPickerBtn.className = "pane-btn session-picker-btn";
+
   const closeBtn = makeBtn("Close", "", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
@@ -581,7 +591,7 @@ function createPaneLeaf(node, hosts) {
   quickBtn.setAttribute("aria-label", "Quick command");
   quickBtn.innerHTML = '<span class="quickcmd-icon" aria-hidden="true"></span>';
 
-  actions.append(fontDownBtn, fontUpBtn, splitHBtn, splitVBtn, startBtn, closeBtn, hidePaneBtn, quickBtn, closePaneBtn);
+  actions.append(fontDownBtn, fontUpBtn, splitHBtn, splitVBtn, startBtn, sessionPickerBtn, closeBtn, hidePaneBtn, quickBtn, closePaneBtn);
   header.append(idWrap, statusEl, actions);
 
   const quickPanel = document.createElement("div");
@@ -617,6 +627,7 @@ function createPaneLeaf(node, hosts) {
     splitHBtn,
     splitVBtn,
     startBtn,
+    sessionPickerBtn,
     closeBtn,
     closePaneBtn,
     hidePaneBtn,
@@ -715,7 +726,8 @@ function createPaneView(paneId, host) {
     imeTextarea: null,
     imeBindTimer: null,
     onCompositionStart: null,
-    onCompositionEnd: null
+    onCompositionEnd: null,
+    suppressOnData: false
   };
 
   term.attachCustomKeyEventHandler((ev) => {
@@ -743,8 +755,11 @@ function createPaneView(paneId, host) {
       return false;
     }
 
-    if (ev.ctrlKey && ev.shiftKey && key === "v") {
+    if (ev.ctrlKey && key === "v") {
+      // Suppress onData immediately — xterm's native paste path fires before clipboardRead resolves.
+      view.suppressOnData = true;
       void window.wincmux.clipboardRead().then((text) => {
+        view.suppressOnData = false;
         if (text) {
           queuePaneInput(view, text);
         }
@@ -756,11 +771,24 @@ function createPaneView(paneId, host) {
   });
 
   term.onData((data) => {
+    // Block input if an external textarea/input has focus (e.g. notepad, session picker)
+    const active = document.activeElement;
+    if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT") && active !== view.imeTextarea) {
+      return;
+    }
+    // Suppress duplicate onData fired by xterm's native paste path when Ctrl+V is intercepted
+    if (view.suppressOnData) {
+      return;
+    }
     logIme("onData", { pane_id: paneId, len: data.length, composing: view.isComposing });
     queuePaneInput(view, data);
   });
 
   term.onBinary((data) => {
+    const active = document.activeElement;
+    if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT") && active !== view.imeTextarea) {
+      return;
+    }
     logIme("onBinary", { pane_id: paneId, len: data.length });
     queuePaneInput(view, data);
   });
@@ -856,8 +884,15 @@ function refreshPaneBindings() {
     let sessionId = state.paneSessions[paneId] ?? null;
 
     if (sessionId && !runningMap.has(sessionId)) {
-      delete state.paneSessions[paneId];
-      sessionId = null;
+      // Only clear if the session is not in the DB at all (truly gone),
+      // not merely absent from runningSessions yet (could be newly starting).
+      // runningSessions() reflects state.sessions which may lag behind session.run.
+      // We rely on normalizePaneSessions (which also checks leafIds) for thorough cleanup.
+      const knownToState = state.sessions.some((s) => s.id === sessionId);
+      if (!knownToState) {
+        delete state.paneSessions[paneId];
+        sessionId = null;
+      }
     }
 
     const meta = state.paneMeta.get(paneId);
@@ -894,6 +929,265 @@ function refreshPaneBindings() {
   }
 
   applyPaneSelectionStyles();
+}
+
+async function openSessionPicker(paneId, anchorBtn) {
+  const _loadSessions = typeof globalThis.loadSessions === "function" ? globalThis.loadSessions : async () => {};
+
+  // Close any existing dropdown
+  document.querySelectorAll(".session-picker-dropdown").forEach((el) => el.remove());
+
+  const ws = selectedWorkspace();
+  if (!ws) return;
+
+  const [histRes, aiRes] = await Promise.all([
+    rpc("session.history", { workspace_id: ws.id }).catch(() => null),
+    rpc("ai.sessions", { workspace_id: ws.id }).catch(() => null),
+  ]);
+  const aiSessions = aiRes?.sessions ?? [];
+
+  const dropdown = document.createElement("div");
+  dropdown.className = "session-picker-dropdown";
+
+  // ── AI Sessions section (Claude / Codex conversation sessions) ──
+  if (aiSessions.length > 0) {
+    const aiHeader = document.createElement("div");
+    aiHeader.className = "session-picker-header";
+    aiHeader.textContent = "AI Sessions (Claude / Codex)";
+    dropdown.appendChild(aiHeader);
+
+    for (const ai of aiSessions) {
+      const dateObj = new Date(ai.detected_at);
+      const timeStr = dateObj.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+      const item = document.createElement("div");
+      item.className = "session-picker-item ai-session";
+
+      const dot = document.createElement("span");
+      dot.className = "session-status-dot ai-dot";
+      dot.title = ai.tool;
+
+      const info = document.createElement("div");
+      info.className = "session-item-info";
+
+      const labelEl = document.createElement("span");
+      labelEl.className = "session-label";
+      labelEl.title = ai.resume_cmd;
+      labelEl.textContent = ai.resume_cmd;
+
+      const metaEl = document.createElement("span");
+      metaEl.className = "session-meta";
+      metaEl.textContent = `${ai.tool} · detected ${timeStr}`;
+
+      info.append(labelEl, metaEl);
+
+      const resumeBtn = document.createElement("button");
+      resumeBtn.className = "session-attach-btn";
+      resumeBtn.textContent = "Resume";
+      resumeBtn.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        dropdown.remove();
+        try {
+          // Run via pwsh so PATH resolution works (claude is a Node script on PATH)
+          await paneHandlers.startSessionForPane(paneId, {
+            force: true,
+            cmd: "pwsh.exe",
+            args: [
+              "-NoLogo", "-NoExit",
+              "-Command",
+              `$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); [Console]::InputEncoding=[Text.UTF8Encoding]::new(); if (Get-Variable PSStyle -ErrorAction SilentlyContinue) { $PSStyle.OutputRendering = 'Ansi' }; ${ai.resume_cmd}`,
+            ],
+            cwd: ai.cwd || undefined,
+          });
+        } catch {
+          try {
+            await paneHandlers.startSessionForPane(paneId, {
+              force: true,
+              cmd: "powershell.exe",
+              args: ["-NoLogo", "-NoExit", "-Command", ai.resume_cmd],
+              cwd: ai.cwd || undefined,
+            });
+          } catch (err2) {
+            setStatus(String(err2?.message ?? err2), true);
+          }
+        }
+      });
+
+      item.append(dot, info, resumeBtn);
+      dropdown.appendChild(item);
+    }
+  }
+
+  // ── PTY Sessions section ──
+  const allSessions = histRes?.sessions ?? [];
+  const namedSessions = allSessions.filter((s) => s.spawn_cmd);
+
+  if (namedSessions.length > 0 || aiSessions.length === 0) {
+    const ptyHeader = document.createElement("div");
+    ptyHeader.className = "session-picker-header";
+    ptyHeader.textContent = "PTY Sessions";
+    dropdown.appendChild(ptyHeader);
+
+    if (namedSessions.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "session-picker-empty";
+      empty.textContent = "No named sessions yet — use the input below";
+      dropdown.appendChild(empty);
+    } else {
+      for (const s of namedSessions) {
+        let label;
+        try {
+          const parsedArgs = JSON.parse(s.spawn_args || "[]");
+          const displayArgs = parsedArgs.filter((a) => !a.startsWith("-No") && !a.startsWith("chcp") && !a.startsWith("$Output") && !a.startsWith("[Console]"));
+          label = displayArgs.length > 0
+            ? `${s.spawn_cmd} ${displayArgs.join(" ")}`.trim()
+            : s.spawn_cmd;
+        } catch {
+          label = s.spawn_cmd;
+        }
+        const dateObj = new Date(s.started_at);
+        const timeStr = dateObj.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const isRunning = s.status === "running";
+
+        const item = document.createElement("div");
+        item.className = `session-picker-item ${s.status}`;
+
+        const dot = document.createElement("span");
+        dot.className = "session-status-dot";
+        dot.title = s.status;
+
+        const info = document.createElement("div");
+        info.className = "session-item-info";
+
+        const labelEl = document.createElement("span");
+        labelEl.className = "session-label";
+        labelEl.title = label;
+        labelEl.textContent = label;
+
+        const metaEl = document.createElement("span");
+        metaEl.className = "session-meta";
+        metaEl.textContent = `${isRunning ? "running" : s.status} · ${timeStr}`;
+
+        info.append(labelEl, metaEl);
+
+        const attachBtn = document.createElement("button");
+        attachBtn.className = "session-attach-btn";
+        attachBtn.textContent = isRunning ? "Attach" : "Re-run";
+        attachBtn.addEventListener("click", async (ev) => {
+          ev.stopPropagation();
+          dropdown.remove();
+          try {
+            if (isRunning) {
+              const currentSid = state.paneSessions[paneId] ?? null;
+              if (currentSid && currentSid !== s.id) {
+                await rpc("session.close", { session_id: currentSid }).catch(() => {});
+              }
+              state.paneSessions[paneId] = s.id;
+              rpc("pane.session.bind", { workspace_id: ws.id, pane_id: paneId, session_id: s.id }).catch(() => {});
+              await _loadSessions();
+              paneApi.normalizePaneSessions();
+              paneApi.refreshPaneBindings();
+              setStatus(`Attached: ${s.id.slice(0, 8)}`);
+            } else {
+              let parsedArgs = [];
+              try { parsedArgs = JSON.parse(s.spawn_args || "[]"); } catch { /* */ }
+              await paneHandlers.startSessionForPane(paneId, {
+                force: true,
+                cmd: s.spawn_cmd,
+                args: parsedArgs,
+                cwd: s.spawn_cwd || undefined,
+              });
+            }
+          } catch (err) {
+            setStatus(String(err?.message ?? err), true);
+          }
+        });
+
+        item.append(dot, info, attachBtn);
+        dropdown.appendChild(item);
+      }
+    }
+  }
+
+  // New session input row
+  const newRow = document.createElement("div");
+  newRow.className = "session-picker-new";
+
+  const newLabel = document.createElement("span");
+  newLabel.className = "session-picker-new-label";
+  newLabel.textContent = "+ New";
+
+  const cmdInput = document.createElement("input");
+  cmdInput.className = "session-cmd-input";
+  cmdInput.placeholder = "claude / codex / pwsh …";
+  cmdInput.addEventListener("keydown", async (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      runNewSession();
+    }
+    ev.stopPropagation();
+  });
+
+  const runBtn = document.createElement("button");
+  runBtn.className = "session-run-btn";
+  runBtn.textContent = "Run";
+
+  async function runNewSession() {
+    const raw = cmdInput.value.trim();
+    if (!raw) return;
+    dropdown.remove();
+    // If user typed a shell-like command (e.g. "claude", "codex --resume xyz"),
+    // run it inside pwsh so PATH resolution works
+    const psCmd = `$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); [Console]::InputEncoding=[Text.UTF8Encoding]::new(); if (Get-Variable PSStyle -ErrorAction SilentlyContinue) { $PSStyle.OutputRendering = 'Ansi' }; ${raw}`;
+    try {
+      await paneHandlers.startSessionForPane(paneId, {
+        force: true,
+        cmd: "pwsh.exe",
+        args: ["-NoLogo", "-NoExit", "-Command", psCmd],
+      });
+    } catch {
+      try {
+        await paneHandlers.startSessionForPane(paneId, {
+          force: true,
+          cmd: "powershell.exe",
+          args: ["-NoLogo", "-NoExit", "-Command", raw],
+        });
+      } catch (err2) {
+        setStatus(String(err2?.message ?? err2), true);
+      }
+    }
+  }
+
+  runBtn.addEventListener("click", runNewSession);
+  newRow.append(newLabel, cmdInput, runBtn);
+  dropdown.appendChild(newRow);
+
+  // Position: prefer below anchor, flip up if too low
+  document.body.appendChild(dropdown);
+  const rect = anchorBtn.getBoundingClientRect();
+  const dropH = dropdown.offsetHeight || 300;
+  const dropW = dropdown.offsetWidth || 340;
+  let top = rect.bottom + 4;
+  let left = rect.left;
+  if (top + dropH > window.innerHeight - 10) {
+    top = rect.top - dropH - 4;
+  }
+  if (left + dropW > window.innerWidth - 10) {
+    left = window.innerWidth - dropW - 10;
+  }
+  dropdown.style.top = `${top}px`;
+  dropdown.style.left = `${left}px`;
+
+  // Close on outside click
+  const closeHandler = (ev) => {
+    if (!dropdown.contains(ev.target)) {
+      dropdown.remove();
+      document.removeEventListener("click", closeHandler, true);
+    }
+  };
+  setTimeout(() => document.addEventListener("click", closeHandler, true), 0);
+
+  cmdInput.focus();
 }
 
 globalThis.setPaneHandlers = setPaneHandlers;

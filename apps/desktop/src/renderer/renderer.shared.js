@@ -16,7 +16,8 @@ const STORAGE_KEYS = {
   quickHistory: "wincmux.quickHistory.v1",
   quickPresetSeedVersion: "wincmux.quickPresets.seedVersion",
   rendererPromptFallback: "wincmux.features.rendererPromptFallback",
-  selectedWorkspaceId: "wincmux.selectedWorkspaceId"
+  selectedWorkspaceId: "wincmux.selectedWorkspaceId",
+  workspaceNotes: "wincmux.workspaceNotes"
 };
 
 function parseStoredMap(storageKey) {
@@ -30,7 +31,7 @@ function parseStoredMap(storageKey) {
 
 const PANE_FONT_LIMITS = {
   default: Number(localStorage.getItem(STORAGE_KEYS.terminalFontDefault) ?? 14),
-  min: 10,
+  min: 6,
   max: 20,
   step: 1
 };
@@ -228,6 +229,7 @@ const state = {
   },
   splitRatios: parseStoredMap(STORAGE_KEYS.splitRatios),
   paneFontSizes: parseStoredMap(STORAGE_KEYS.paneFontSizes),
+  workspaceNotes: parseStoredMap(STORAGE_KEYS.workspaceNotes),
   hiddenPanesByWorkspace: {},
   quickPresets: loadQuickPresets(),
   quickHistory: loadQuickHistory(),

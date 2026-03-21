@@ -398,7 +398,7 @@ async function runShellSession(workspaceId, cwd) {
   }
 }
 async function startSessionForPane(paneId, options = {}) {
-  const { force = false, silent = false, focusTerm = true } = options;
+  const { force = false, silent = false, focusTerm = true, cmd = null, args = null, cwd = null } = options;
   const ws = selectedWorkspace();
   if (!ws) {
     throw new Error("Select a workspace first.");
@@ -417,7 +417,16 @@ async function startSessionForPane(paneId, options = {}) {
   }
   let created;
   try {
-    created = await runShellSession(ws.id, ws.path);
+    if (cmd) {
+      created = await rpc("session.run", {
+        workspace_id: ws.id,
+        cmd,
+        args: args ?? [],
+        cwd: cwd ?? ws.path,
+      });
+    } else {
+      created = await runShellSession(ws.id, ws.path);
+    }
   } catch (err) {
     const message = String(err?.message ?? err);
     if (message.includes("File not found")) {
@@ -430,12 +439,27 @@ async function startSessionForPane(paneId, options = {}) {
     throw new Error("session.run returned no session_id");
   }
   state.paneSessions[paneId] = sid;
+  // Save pane-session binding to DB for restore on next app launch
+  rpc("pane.session.bind", {
+    workspace_id: ws.id,
+    pane_id: paneId,
+    session_id: sid,
+  }).catch(() => {});
   await loadSessions();
   paneApi.normalizePaneSessions();
   paneApi.refreshPaneBindings();
   if (!silent) {
     setStatus(`Session started: ${sid.slice(0, 8)}`);
   }
+  // After binding, resize and nudge shell prompt (pwsh/powershell only — not claude/codex)
+  const effectiveCmd = (cmd ?? "pwsh.exe").toLowerCase();
+  const isShell = effectiveCmd.includes("pwsh") || effectiveCmd.includes("powershell") || effectiveCmd.includes("cmd.exe");
+  setTimeout(() => {
+    state.paneViews.get(paneId)?.fitAddon?.fit?.();
+    if (isShell) {
+      rpc("session.write", { session_id: sid, data: "\r" }).catch(() => {});
+    }
+  }, 300);
   if (focusTerm) {
     window.requestAnimationFrame(() => {
       state.paneViews.get(paneId)?.term.focus();
@@ -496,6 +520,45 @@ async function closeSessionForPane(paneId) {
   setStatus(`Session closed: ${sid.slice(0, 8)}`);
   await syncActiveContext();
 }
+async function tryRestorePaneSessions(workspaceId) {
+  const res = await rpc("pane.session.bindings", { workspace_id: workspaceId }).catch(() => null);
+  if (!res?.bindings?.length) return;
+
+  const running = new Set(runningSessions().map((s) => s.id));
+  const currentLeafIds = new Set(leafPanes().map((p) => p.pane_id));
+
+  const restoreWork = [];
+  for (const binding of res.bindings) {
+    const { pane_id, session_id, spawn_cmd, spawn_args, spawn_cwd } = binding;
+    if (!currentLeafIds.has(pane_id)) continue;
+    if (running.has(session_id)) {
+      state.paneSessions[pane_id] = session_id;
+      continue;
+    }
+    if (!spawn_cmd) continue;
+    let parsedArgs = [];
+    try { parsedArgs = JSON.parse(spawn_args ?? "[]"); } catch { /* */ }
+    restoreWork.push(
+      rpc("session.run", {
+        workspace_id: workspaceId,
+        cmd: spawn_cmd,
+        args: parsedArgs,
+        cwd: spawn_cwd ?? undefined,
+      })
+        .then((result) => {
+          const newSid = result?.session?.session_id;
+          if (newSid) {
+            state.paneSessions[pane_id] = newSid;
+            rpc("pane.session.bind", { workspace_id: workspaceId, pane_id, session_id: newSid }).catch(() => {});
+          }
+        })
+        .catch(() => {}) // Silent — ensurePaneSessionReady will start default shell
+    );
+  }
+  await Promise.all(restoreWork);
+  await loadSessions();
+}
+
 async function refreshWorkspaceState(options = {}) {
   const { forceLayout = false, autoSession = true } = options;
   await Promise.all([loadSessions(), loadPanes(), loadUnread()]);
@@ -503,8 +566,11 @@ async function refreshWorkspaceState(options = {}) {
     const ws = selectedWorkspace();
     await subscribeWorkspaceStream(ws?.id ?? null);
   }
+  // Restore sessions from previous launch before starting new ones
+  if (autoSession && state.selectedWorkspaceId) {
+    await tryRestorePaneSessions(state.selectedWorkspaceId);
+  }
   cleanupHiddenSessionsForWorkspace(state.selectedWorkspaceId, false);
-  paneApi.normalizePaneSessions();
   paneApi.renderPaneSurface(forceLayout);
   paneApi.refreshPaneBindings();
   hiddenRefreshPanesUi();
@@ -521,6 +587,7 @@ async function switchWorkspace(workspaceId) {
   state.selectedWorkspaceId = workspaceId;
   localStorage.setItem(STORAGE_KEYS.selectedWorkspaceId, workspaceId);
   renderWorkspaces();
+  loadNotepadForWorkspace(workspaceId);
   await refreshWorkspaceState({ forceLayout: true, autoSession: true });
   await syncActiveContext();
 }
@@ -924,6 +991,37 @@ function toggleNotificationPanel() {
   applyPanelVisibility();
   paneApi.fitAllPanes();
 }
+// ── Workspace Notepad ──────────────────────────────────────────
+let notepadSaveTimer = null;
+
+function loadNotepadForWorkspace(workspaceId) {
+  const el = document.getElementById("workspaceNotepad");
+  if (!el) return;
+  el.value = workspaceId ? (state.workspaceNotes[workspaceId] ?? "") : "";
+}
+
+function saveNotepadForWorkspace(workspaceId, text) {
+  if (!workspaceId) return;
+  state.workspaceNotes[workspaceId] = text;
+  localStorage.setItem(STORAGE_KEYS.workspaceNotes, JSON.stringify(state.workspaceNotes));
+}
+
+function bindNotepadEvents() {
+  const el = document.getElementById("workspaceNotepad");
+  if (!el) return;
+  el.addEventListener("input", () => {
+    const wsId = state.selectedWorkspaceId;
+    if (!wsId) return;
+    clearTimeout(notepadSaveTimer);
+    notepadSaveTimer = setTimeout(() => saveNotepadForWorkspace(wsId, el.value), 400);
+  });
+  // Prevent IME / key events from leaking to pane shortcuts
+  const stopProp = (ev) => ev.stopPropagation();
+  for (const type of ["keydown", "keyup", "paste", "cut", "copy"]) {
+    el.addEventListener(type, stopProp);
+  }
+}
+
 function bindEvents() {
   $("createWorkspaceBtn").addEventListener("click", () =>
     onCreateWorkspace().catch((err) => setStatus(String(err), true)),
@@ -966,6 +1064,8 @@ async function bootstrap() {
     applyPanelVisibility();
     initResizeHandles(() => paneApi.fitAllPanes());
     bindEvents();
+    bindNotepadEvents();
+    loadNotepadForWorkspace(state.selectedWorkspaceId);
     const paneHandlersBound = paneApi.setPaneHandlers({
       startSessionForPane,
       closeSessionForPane,
@@ -999,6 +1099,7 @@ async function bootstrap() {
           setStatus("Core restarting...", false);
         } else if (status === "ready") {
           setStatus("Core reconnected", false);
+          void refreshWorkspaceState({ forceLayout: false, autoSession: true });
         } else if (status === "dead") {
           setStatus(`Core failed: ${error ?? "unknown"}`, true);
         }
@@ -1057,4 +1158,7 @@ window.addEventListener("beforeunload", () => {
   }
   disposeAllViews();
 });
+// Expose functions needed by renderer.panes.js (loaded before this file)
+globalThis.loadSessions = loadSessions;
+
 bootstrap();
