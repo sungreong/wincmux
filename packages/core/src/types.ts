@@ -35,6 +35,7 @@ export interface WorkspaceRow {
   last_active: string;
   pinned: number;
   sort_order: number;
+  description: string | null;
 }
 
 export interface SessionRow {

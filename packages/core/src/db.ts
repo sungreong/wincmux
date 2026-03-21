@@ -46,6 +46,8 @@ export class DbStore {
 
   deleteWorkspace(id: string): void {
     const tx = this.db.transaction((workspaceId: string) => {
+      this.db.prepare("DELETE FROM pane_session_bindings WHERE workspace_id = ?").run(workspaceId);
+      this.db.prepare("DELETE FROM ai_sessions WHERE workspace_id = ?").run(workspaceId);
       this.db.prepare("DELETE FROM sessions WHERE workspace_id = ?").run(workspaceId);
       this.db.prepare("DELETE FROM notifications WHERE workspace_id = ?").run(workspaceId);
       this.db.prepare("DELETE FROM layout_snapshots WHERE workspace_id = ?").run(workspaceId);
@@ -56,6 +58,10 @@ export class DbStore {
 
   renameWorkspace(id: string, name: string, now: string): void {
     this.db.prepare("UPDATE workspaces SET name = ?, last_active = ? WHERE id = ?").run(name, now, id);
+  }
+
+  updateWorkspaceDescription(id: string, description: string): void {
+    this.db.prepare("UPDATE workspaces SET description = ? WHERE id = ?").run(description, id);
   }
 
   setWorkspacePin(id: string, pinned: boolean): void {
@@ -85,6 +91,10 @@ export class DbStore {
     this.db.prepare("UPDATE sessions SET status = ?, ended_at = ?, exit_code = ? WHERE id = ?").run(status, endedAt, exitCode, id);
   }
 
+  deleteSession(sessionId: string): void {
+    this.db.prepare("DELETE FROM sessions WHERE id = ? AND status != 'running'").run(sessionId);
+  }
+
   listSessions(workspaceId: string): SessionRow[] {
     return this.db
       .prepare("SELECT * FROM sessions WHERE workspace_id = ? ORDER BY started_at DESC")
@@ -95,6 +105,82 @@ export class DbStore {
     return this.db
       .prepare("SELECT * FROM sessions WHERE workspace_id = ? ORDER BY started_at DESC LIMIT 50")
       .all(workspaceId) as SessionRow[];
+  }
+
+  pruneRedundantSessionHistory(workspaceId: string): number {
+    const rows = this.db
+      .prepare(
+        `SELECT id, status, spawn_cmd, spawn_args, spawn_cwd, started_at
+         FROM sessions
+         WHERE workspace_id = ?
+           AND spawn_cmd IS NOT NULL
+         ORDER BY started_at DESC, id DESC`
+      )
+      .all(workspaceId) as Array<{
+        id: string;
+        status: string;
+        spawn_cmd: string | null;
+        spawn_args: string | null;
+        spawn_cwd: string | null;
+        started_at: string;
+      }>;
+
+    if (rows.length === 0) {
+      return 0;
+    }
+
+    const signatureOf = (row: { spawn_cmd: string | null; spawn_args: string | null; spawn_cwd: string | null }): string => {
+      const cmd = row.spawn_cmd ?? "";
+      let args = "[]";
+      try {
+        const parsed = JSON.parse(row.spawn_args ?? "[]");
+        args = JSON.stringify(Array.isArray(parsed) ? parsed : []);
+      } catch {
+        args = String(row.spawn_args ?? "[]");
+      }
+      const cwd = row.spawn_cwd ?? "";
+      return `${cmd}|${args}|${cwd}`;
+    };
+
+    const runningSignatures = new Set<string>();
+    for (const row of rows) {
+      if (row.status === "running") {
+        runningSignatures.add(signatureOf(row));
+      }
+    }
+
+    const keptExited = new Set<string>();
+    const deleteIds: string[] = [];
+    for (const row of rows) {
+      const signature = signatureOf(row);
+      if (row.status === "running") {
+        continue;
+      }
+      if (runningSignatures.has(signature)) {
+        deleteIds.push(row.id);
+        continue;
+      }
+      if (keptExited.has(signature)) {
+        deleteIds.push(row.id);
+        continue;
+      }
+      keptExited.add(signature);
+    }
+
+    if (deleteIds.length === 0) {
+      return 0;
+    }
+
+    const tx = this.db.transaction((ids: string[]) => {
+      const clearBinding = this.db.prepare("DELETE FROM pane_session_bindings WHERE session_id = ?");
+      const deleteSession = this.db.prepare("DELETE FROM sessions WHERE id = ? AND status != 'running'");
+      for (const id of ids) {
+        clearBinding.run(id);
+        deleteSession.run(id);
+      }
+    });
+    tx(deleteIds);
+    return deleteIds.length;
   }
 
   getSession(sessionId: string): SessionRow | null {

@@ -30,6 +30,7 @@ import {
   notifyPushSchema,
   paneSessionBindSchema,
   sessionCloseSchema,
+  sessionDeleteSchema,
   sessionResizeSchema,
   sessionListSchema,
   sessionReadSchema,
@@ -39,6 +40,7 @@ import {
   sessionWriteSchema,
   workspaceCreateSchema,
   workspaceDeleteSchema,
+  workspaceDescribeSchema,
   workspaceIdSchema,
   workspacePinSchema,
   workspaceRenameSchema,
@@ -133,6 +135,8 @@ export class CoreEngine {
           return this.ok(req.id, { workspaces: this.db.listWorkspaces() });
         case "workspace.rename":
           return this.ok(req.id, this.workspaceRename(req.params));
+        case "workspace.describe":
+          return this.ok(req.id, this.workspaceDescribe(req.params));
         case "workspace.delete":
           return this.ok(req.id, this.workspaceDelete(req.params));
         case "workspace.pin":
@@ -145,6 +149,8 @@ export class CoreEngine {
           return this.ok(req.id, this.sessionList(req.params));
         case "session.close":
           return this.ok(req.id, this.sessionClose(req.params));
+        case "session.delete":
+          return this.ok(req.id, this.sessionDelete(req.params));
         case "session.resize":
           return this.ok(req.id, this.sessionResize(req.params));
         case "session.write":
@@ -222,6 +228,12 @@ export class CoreEngine {
     return { ok: true };
   }
 
+  private workspaceDescribe(params: unknown): { ok: true } {
+    const p = workspaceDescribeSchema.parse(params ?? {});
+    this.db.updateWorkspaceDescription(p.id, p.description);
+    return { ok: true };
+  }
+
   private workspaceDelete(params: unknown): { ok: true } {
     const p = workspaceDeleteSchema.parse(params ?? {});
     const sessions = this.db.listSessions(p.id);
@@ -269,6 +281,7 @@ export class CoreEngine {
     };
 
     this.db.insertSession(row);
+    this.db.pruneRedundantSessionHistory(p.workspace_id);
     this.sessionWorkspace.set(sessionId, p.workspace_id);
     this.outputBuffers.set(sessionId, "");
     this.promptDetector.set(sessionId, {
@@ -315,6 +328,7 @@ export class CoreEngine {
     });
     pty.onExit(({ exitCode }) => {
       this.db.updateSessionResult(sessionId, exitCode === 0 ? "exited" : "failed", new Date().toISOString(), exitCode);
+      this.db.pruneRedundantSessionHistory(p.workspace_id);
       // Scan the full output buffer before deleting — catches resume markers split across chunks
       const finalBuffer = this.outputBuffers.get(sessionId) ?? "";
       if (finalBuffer.length >= 20) {
@@ -360,6 +374,9 @@ export class CoreEngine {
     this.seenAiResumeCmds.delete(p.session_id);
     this.db.updateSessionResult(p.session_id, "exited", new Date().toISOString(), 0);
     this.db.clearPaneSessionBindingBySession(p.session_id);
+    if (workspaceId) {
+      this.db.pruneRedundantSessionHistory(workspaceId);
+    }
     this.emitStreamEvent("session.state_changed", {
       session_id: p.session_id,
       workspace_id: workspaceId,
@@ -372,6 +389,12 @@ export class CoreEngine {
       exit_code: 0
     });
     this.sessionWorkspace.delete(p.session_id);
+    return { ok: true };
+  }
+
+  private sessionDelete(params: unknown): { ok: true } {
+    const p = sessionDeleteSchema.parse(params ?? {});
+    this.db.deleteSession(p.session_id);
     return { ok: true };
   }
 
@@ -648,6 +671,7 @@ export class CoreEngine {
 
   private sessionHistory(params: unknown): { sessions: Array<{ id: string; status: string; spawn_cmd: string | null; spawn_args: string | null; spawn_cwd: string | null; started_at: string }> } {
     const p = workspaceIdSchema.parse(params);
+    this.db.pruneRedundantSessionHistory(p.workspace_id);
     const rows = this.db.listAllSessions(p.workspace_id);
     return {
       sessions: rows.map((r) => ({

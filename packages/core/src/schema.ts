@@ -110,5 +110,9 @@ export const MIGRATIONS: Record<number, string[]> = {
   5: [
     "ALTER TABLE ai_sessions ADD COLUMN cwd TEXT",
     "INSERT OR IGNORE INTO schema_versions(version, applied_at) VALUES (5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+  ],
+  6: [
+    "ALTER TABLE workspaces ADD COLUMN description TEXT",
+    "INSERT OR IGNORE INTO schema_versions(version, applied_at) VALUES (6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
   ]
 };

@@ -25,6 +25,11 @@ export const workspaceReorderSchema = z.object({
   sort_order: z.number().int()
 });
 
+export const workspaceDescribeSchema = z.object({
+  id: z.string().uuid(),
+  description: z.string()
+});
+
 export const sessionRunSchema = z.object({
   workspace_id: z.string().uuid(),
   cmd: z.string().min(1),
@@ -68,6 +73,10 @@ export const sessionListSchema = z.object({
 });
 
 export const sessionCloseSchema = z.object({
+  session_id: z.string().uuid()
+});
+
+export const sessionDeleteSchema = z.object({
   session_id: z.string().uuid()
 });
 
