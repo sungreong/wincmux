@@ -259,6 +259,41 @@ li.active {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: text;
+}
+
+.ws-rename-input {
+  font-size: 15px;
+  font-family: inherit;
+  background: var(--bg2, #2a2a2a);
+  color: var(--fg, #e0e0e0);
+  border: 1px solid var(--accent, #4a9eff);
+  border-radius: 3px;
+  padding: 1px 4px;
+  width: 100%;
+  outline: none;
+}
+
+.ws-rename-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 3px;
+  opacity: 0;
+  flex-shrink: 0;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+li:hover .ws-rename-btn,
+li.active .ws-rename-btn {
+  opacity: 0.6;
+}
+
+.ws-rename-btn:hover {
+  opacity: 1 !important;
+  color: var(--accent);
 }
 
 .ws-title-row {
@@ -535,12 +570,73 @@ li.active {
 .pane-actions {
   justify-content: flex-end;
   gap: 6px;
+  flex-wrap: nowrap;
+  min-width: 0;
+  position: relative;
+}
+
+.pane-actions-primary {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pane-overflow {
+  position: relative;
+}
+
+.pane-overflow-menu {
+  display: none;
+  position: fixed;
+  right: auto;
+  top: auto;
+  z-index: 1300;
+  min-width: 180px;
+  max-width: min(360px, calc(100vw - 20px));
+  max-height: calc(100vh - 20px);
+  overflow-y: auto;
+  border: 1px solid #2d4059;
+  border-radius: 8px;
+  background: #0f1622;
+  padding: 8px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  gap: 6px;
+}
+
+.pane-overflow-menu.open {
+  display: grid;
+}
+
+.pane-overflow-menu .pane-btn {
+  width: 100%;
+  text-align: left;
+}
+
+.pane-btn-auto {
+  border-color: #376082;
+}
+
+.pane-leaf.pane-actions-tight .pane-session {
+  display: none;
+}
+
+.pane-leaf.pane-actions-tight .pane-id {
+  opacity: 0.82;
 }
 
 .pane-btn {
   padding: 5px 8px;
   font-size: 12px;
   white-space: nowrap;
+}
+
+.pane-btn-icon {
+  min-width: 34px;
+  width: 34px;
+  padding: 5px 0;
+  text-align: center;
 }
 
 .pane-btn-danger {
@@ -587,11 +683,13 @@ li.active {
 
 .quickcmd-popover {
   display: none;
-  position: absolute;
-  right: 8px;
-  top: 44px;
-  z-index: 20;
-  width: min(480px, calc(100% - 16px));
+  position: fixed;
+  right: auto;
+  top: auto;
+  z-index: 1200;
+  width: min(480px, calc(100vw - 20px));
+  max-height: calc(100vh - 20px);
+  overflow-y: auto;
   border: 1px solid #2d4059;
   border-radius: 8px;
   background: #0e1520;
@@ -916,6 +1014,26 @@ li.active {
   color: var(--accent);
 }
 
+.session-delete-btn {
+  padding: 2px 6px;
+  font-size: 11px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0.5;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+.session-delete-btn:hover {
+  opacity: 1;
+  color: #e06060;
+  border-color: #e06060;
+  background: rgba(224, 96, 96, 0.12);
+}
+
 .session-picker-new {
   padding: 8px 10px;
   border-top: 1px solid var(--border);
@@ -980,6 +1098,503 @@ li.active {
 .session-status-dot.ai-dot {
   background: #7c6af7;
   box-shadow: 0 0 5px #7c6af7;
+}
+
+/* ── Workspace Info Panel (popup overlay) ────────────────────── */
+.ws-info-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 15px;
+  padding: 0 3px;
+  opacity: 0;
+  flex-shrink: 0;
+  line-height: 1;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+li:hover .ws-info-btn,
+li.active .ws-info-btn {
+  opacity: 0.6;
+}
+
+.ws-info-btn:hover {
+  opacity: 1 !important;
+  color: var(--accent);
+}
+
+/* Backdrop that catches outside clicks */
+.ws-info-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  /* transparent, just catches pointer events */
+}
+
+/* The actual popup card */
+.ws-info-panel {
+  position: fixed;
+  z-index: 901;
+  width: 640px;
+  max-height: min(720px, calc(100vh - 24px));
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg2, #1e1e1e);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+  /* position set dynamically via JS */
+}
+
+.ws-info-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px 6px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.ws-info-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-info-close {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 2px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.ws-info-close:hover { color: var(--fg); }
+
+.ws-quick-actions {
+  display: flex;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.ws-quick-btn {
+  flex: 1;
+  min-width: 80px;
+  padding: 5px 8px;
+  font-size: 11px;
+  font-family: inherit;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.ws-quick-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ws-git-summary {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 12px;
+  font-size: 11px;
+  max-height: 220px;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.ws-git-loading {
+  color: var(--muted);
+  padding: 2px 0;
+}
+
+.ws-git-branch {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+
+.ws-git-clean {
+  color: #4ade80;
+  margin-bottom: 4px;
+}
+
+.ws-git-section-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 6px 0 3px;
+}
+
+.ws-git-file-list,
+.ws-git-commit-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ws-git-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 0;
+}
+
+.ws-git-status {
+  font-size: 10px;
+  font-weight: 700;
+  width: 16px;
+  flex-shrink: 0;
+  text-align: center;
+}
+
+.ws-git-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  flex: 1;
+  min-width: 0;
+}
+
+.ws-git-modified .ws-git-status { color: #f59e0b; }
+.ws-git-untracked .ws-git-status { color: var(--muted); }
+.ws-git-deleted .ws-git-status  { color: #ef4444; }
+.ws-git-added .ws-git-status    { color: #4ade80; }
+
+.ws-git-commit {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 1px 0;
+}
+
+.ws-git-sha {
+  font-family: monospace;
+  font-size: 10px;
+  color: var(--accent);
+  flex-shrink: 0;
+  opacity: 0.8;
+}
+
+.ws-git-msg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  flex: 1;
+  min-width: 0;
+}
+
+.ws-desc-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: transparent;
+  color: var(--fg);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 8px 12px;
+  resize: none;
+  height: 64px;
+  outline: none;
+  flex-shrink: 0;
+}
+
+.ws-desc-input:focus {
+  background: rgba(255,255,255,0.03);
+}
+
+.ws-session-summary {
+  padding: 8px 12px 10px;
+  font-size: 12px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.ws-summary-loading { color: var(--muted); }
+.ws-summary-empty { padding: 4px 0; color: var(--muted); }
+
+.ws-summary-section {
+  margin-bottom: 10px;
+}
+
+.ws-summary-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 5px;
+}
+
+.ws-running { color: var(--accent); }
+
+.ws-summary-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 0;
+  min-width: 0;
+}
+
+.ws-summary-tool {
+  color: var(--fg);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.ws-summary-meta {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.ws-summary-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 4px var(--accent);
+  flex-shrink: 0;
+}
+
+.ws-summary-cmd {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  min-width: 0;
+  flex: 1;
+}
+
+.ws-summary-more {
+  font-size: 10px;
+  padding: 2px 0;
+  color: var(--muted);
+}
+
+.ws-dashboard-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.ws-section-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 8px 10px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  overflow: hidden;
+}
+
+.ws-section-card-body {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.ws-section-card-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+
+.ws-section-none {
+  color: var(--muted);
+  font-style: italic;
+  font-size: 11px;
+}
+
+.ws-ai-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.ws-ai-item:last-child {
+  border-bottom: none;
+}
+
+.ws-ai-copy-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  min-width: 0;
+  width: 100%;
+  border-radius: 3px;
+  transition: background 0.1s;
+}
+
+.ws-ai-copy-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.ws-ai-copy-btn:hover .ws-ai-copy-icon {
+  opacity: 1;
+}
+
+.ws-ai-resume {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  flex: 1;
+  min-width: 0;
+}
+
+.ws-ai-copy-icon {
+  font-size: 11px;
+  color: var(--accent);
+  opacity: 0;
+  flex-shrink: 0;
+  transition: opacity 0.15s;
+}
+
+.ws-ai-meta-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.ws-ai-cwd {
+  font-size: 10px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.ws-ai-time {
+  font-size: 10px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.ws-pty-kill-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  padding: 1px 5px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+
+.ws-summary-item:hover .ws-pty-kill-btn {
+  opacity: 1;
+}
+
+.ws-pty-kill-btn:hover {
+  color: #e06060;
+  border-color: #e06060;
+  background: rgba(224, 96, 96, 0.1);
+}
+
+.ws-pty-kill-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.ws-scan-area {
+  max-height: 160px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  padding: 8px 12px;
+}
+
+.ws-scan-btn {
+  width: calc(100% - 24px);
+  margin: 0 12px 10px;
+  padding: 6px 0;
+  font-size: 11px;
+  font-family: inherit;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.ws-scan-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ws-scan-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ws-scan-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.ws-scan-path {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  flex: 1;
+  min-width: 0;
+}
+
+.ws-scan-count {
+  font-size: 11px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.ws-scan-empty {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 2px 0;
 }
 
 /* ── Workspace Notepad ───────────────────────────────────────── */

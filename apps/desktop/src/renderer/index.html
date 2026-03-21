@@ -65,6 +65,20 @@
       </aside>
     </div>
 
+    <div id="wsInfoOverlay" class="ws-info-overlay" style="display:none">
+      <div id="wsInfoPanel" class="ws-info-panel">
+        <div class="ws-info-header">
+          <span id="wsInfoTitle" class="ws-info-title"></span>
+          <button id="wsInfoCloseBtn" class="ws-info-close" title="Close">✕</button>
+        </div>
+        <div id="wsQuickActions" class="ws-quick-actions"></div>
+        <textarea id="wsDescInput" class="ws-desc-input" placeholder="Description… (auto-saved)"></textarea>
+        <div id="wsGitSummary" class="ws-git-summary" style="display:none"></div>
+        <div id="wsSessionSummary" class="ws-session-summary"></div>
+        <div id="wsScanArea" class="ws-scan-area" style="display:none"></div>
+      </div>
+    </div>
+
     <footer id="statusBar">Ready</footer>
 
     <script src="./vendor/xterm.js"></script>

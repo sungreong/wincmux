@@ -12,6 +12,7 @@ const STORAGE_KEYS = {
   useStream: "wincmux.useStream",
   splitRatios: "wincmux.splitRatios",
   paneFontSizes: "wincmux.paneFontSizes",
+  paneAutoResize: "wincmux.paneAutoResize",
   quickPresets: "wincmux.quickPresets.v1",
   quickHistory: "wincmux.quickHistory.v1",
   quickPresetSeedVersion: "wincmux.quickPresets.seedVersion",
@@ -38,9 +39,15 @@ const PANE_FONT_LIMITS = {
 
 const QUICK_ASSISTANTS = ["codex", "claude"];
 const QUICK_HISTORY_LIMIT = 24;
-const QUICK_PRESET_SEED_VERSION = 2;
+const QUICK_PRESET_SEED_VERSION = 3;
 const QUICK_LEGACY_DEFAULT_IDS = ["codex-basic", "codex-full-auto", "claude-basic", "claude-with-model"];
 const QUICK_PRESET_DEFAULTS = [
+  {
+    assistant: "codex",
+    id: "codex-only",
+    label: "Codex Only",
+    template: "codex "
+  },
   {
     assistant: "codex",
     id: "codex-read-only",
@@ -64,6 +71,12 @@ const QUICK_PRESET_DEFAULTS = [
     id: "codex-dangerous",
     label: "Dangerous",
     template: "codex --dangerously-bypass-approvals-and-sandbox "
+  },
+  {
+    assistant: "claude",
+    id: "claude-only",
+    label: "Claude Only",
+    template: "claude "
   },
   {
     assistant: "claude",
@@ -229,6 +242,7 @@ const state = {
   },
   splitRatios: parseStoredMap(STORAGE_KEYS.splitRatios),
   paneFontSizes: parseStoredMap(STORAGE_KEYS.paneFontSizes),
+  paneAutoResize: localStorage.getItem(STORAGE_KEYS.paneAutoResize) !== "0",
   workspaceNotes: parseStoredMap(STORAGE_KEYS.workspaceNotes),
   hiddenPanesByWorkspace: {},
   quickPresets: loadQuickPresets(),
@@ -801,17 +815,82 @@ function renderWorkspaces() {
         li.classList.add("ws-attention");
       }
     }
-    const unreadBadge = unread > 0
-      ? `<span class="ws-unread-badge" title="${unread} unread notifications">${unread > 99 ? "99+" : unread}</span>`
-      : "";
-    li.innerHTML = `
-      <div class="ws-title-row">
-        <div class="ws-title">${ws.name}</div>
-        ${unreadBadge}
-      </div>
-      <div class="muted ws-path">${ws.path}</div>
-      <div class="muted">${ws.branch ?? "-"} ${ws.dirty ? "(dirty)" : ""}</div>
-    `;
+
+    const titleRow = document.createElement("div");
+    titleRow.className = "ws-title-row";
+
+    const nameEl = document.createElement("div");
+    nameEl.className = "ws-title";
+    nameEl.textContent = ws.name;
+
+    const editBtn = document.createElement("button");
+    editBtn.className = "ws-rename-btn";
+    editBtn.title = "Rename workspace";
+    editBtn.textContent = "✎";
+    editBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const input = document.createElement("input");
+      input.className = "ws-rename-input";
+      input.value = ws.name;
+      nameEl.replaceWith(input);
+      editBtn.style.display = "none";
+      input.focus();
+      input.select();
+
+      const commit = async () => {
+        const newName = input.value.trim();
+        if (newName && newName !== ws.name) {
+          try {
+            await rpc("workspace.rename", { id: ws.id, name: newName });
+            ws.name = newName;
+            setStatus(`Renamed: ${newName}`);
+          } catch (err) {
+            setStatus(String(err?.message ?? err), true);
+          }
+        }
+        nameEl.textContent = ws.name;
+        input.replaceWith(nameEl);
+        editBtn.style.display = "";
+      };
+
+      input.addEventListener("blur", commit);
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+        if (e.key === "Escape") { input.value = ws.name; input.blur(); }
+        e.stopPropagation();
+      });
+    });
+
+    titleRow.appendChild(nameEl);
+    titleRow.appendChild(editBtn);
+
+    const infoBtn = document.createElement("button");
+    infoBtn.className = "ws-info-btn";
+    infoBtn.title = "Workspace info & sessions";
+    infoBtn.textContent = "⋯";
+    infoBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (typeof openWsInfoPanel === "function") openWsInfoPanel(ws, li);
+    });
+    titleRow.appendChild(infoBtn);
+
+    if (unread > 0) {
+      const badge = document.createElement("span");
+      badge.className = "ws-unread-badge";
+      badge.title = `${unread} unread notifications`;
+      badge.textContent = unread > 99 ? "99+" : String(unread);
+      titleRow.appendChild(badge);
+    }
+
+    const pathEl = document.createElement("div");
+    pathEl.className = "muted ws-path";
+    pathEl.textContent = ws.path;
+
+    const branchEl = document.createElement("div");
+    branchEl.className = "muted";
+    branchEl.textContent = `${ws.branch ?? "-"} ${ws.dirty ? "(dirty)" : ""}`;
+
+    li.append(titleRow, pathEl, branchEl);
     li.addEventListener("click", () => {
       switchWorkspace(ws.id).catch((err) => setStatus(String(err), true));
     });
@@ -901,5 +980,3 @@ function renderNotifications() {
       : "Hide Notifications";
   }
 }
-
-

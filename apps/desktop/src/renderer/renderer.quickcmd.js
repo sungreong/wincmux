@@ -122,7 +122,7 @@ function removeQuickPreset(id) {
   return true;
 }
 
-function migrateQuickPresetsToSeedVersion2() {
+function migrateQuickPresetsToLatestSeedVersion() {
   const currentSeed = readQuickPresetSeedVersion();
   if (currentSeed >= QUICK_PRESET_SEED_VERSION) {
     return;
@@ -135,9 +135,41 @@ function migrateQuickPresetsToSeedVersion2() {
   writeQuickPresetSeedVersion(QUICK_PRESET_SEED_VERSION);
 }
 
-migrateQuickPresetsToSeedVersion2();
+migrateQuickPresetsToLatestSeedVersion();
 
 let quickCommandGlobalCloseBound = false;
+let quickCommandPositionBound = false;
+
+function positionQuickCommandPanel(paneId) {
+  const meta = state.paneMeta.get(paneId);
+  if (!meta?.quickPanel || !meta?.quickBtn) {
+    return;
+  }
+  const panel = meta.quickPanel;
+  const anchor = meta.quickBtn;
+  const margin = 10;
+
+  panel.style.maxHeight = `${Math.max(220, window.innerHeight - margin * 2)}px`;
+  panel.style.visibility = "hidden";
+  panel.classList.add("open");
+
+  const anchorRect = anchor.getBoundingClientRect();
+  const panelRect = panel.getBoundingClientRect();
+  const panelWidth = Math.min(panelRect.width || 420, Math.max(280, window.innerWidth - margin * 2));
+
+  let left = anchorRect.right - panelWidth;
+  left = Math.max(margin, Math.min(left, window.innerWidth - panelWidth - margin));
+
+  let top = anchorRect.bottom + 6;
+  if (top + panelRect.height > window.innerHeight - margin) {
+    top = Math.max(margin, anchorRect.top - panelRect.height - 6);
+  }
+
+  panel.style.width = `${panelWidth}px`;
+  panel.style.left = `${Math.round(left)}px`;
+  panel.style.top = `${Math.round(top)}px`;
+  panel.style.visibility = "";
+}
 
 function ensureQuickCommandGlobalCloseBinding() {
   if (quickCommandGlobalCloseBound) {
@@ -162,6 +194,17 @@ function ensureQuickCommandGlobalCloseBinding() {
       closeQuickCommandPanels(null);
     }
   });
+
+  if (!quickCommandPositionBound) {
+    quickCommandPositionBound = true;
+    const reposition = () => {
+      if (state.quickCommandOpenPaneId) {
+        positionQuickCommandPanel(state.quickCommandOpenPaneId);
+      }
+    };
+    window.addEventListener("resize", reposition);
+    window.addEventListener("scroll", reposition, true);
+  }
 }
 
 function setQuickCommandPanelVisibility(paneId, isOpen) {
@@ -171,6 +214,9 @@ function setQuickCommandPanelVisibility(paneId, isOpen) {
   }
   meta.quickPanel.classList.toggle("open", isOpen);
   meta.quickBtn.classList.toggle("active", isOpen);
+  if (isOpen) {
+    window.requestAnimationFrame(() => positionQuickCommandPanel(paneId));
+  }
 }
 
 function closeQuickCommandPanels(exceptPaneId = null) {

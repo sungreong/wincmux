@@ -991,6 +991,294 @@ function toggleNotificationPanel() {
   applyPanelVisibility();
   paneApi.fitAllPanes();
 }
+// ── Workspace Info Panel ───────────────────────────────────────
+let wsDescSaveTimer = null;
+
+function openWsInfoPanel(ws, anchorEl) {
+  const overlay = $("wsInfoOverlay");
+  const panel = $("wsInfoPanel");
+  const titleEl = $("wsInfoTitle");
+  const descInput = $("wsDescInput");
+  const summaryEl = $("wsSessionSummary");
+  if (!overlay || !panel) return;
+
+  titleEl.textContent = ws.name;
+  descInput.value = ws.description ?? "";
+  overlay.style.display = "";
+
+  // Quick action buttons
+  const qaEl = $("wsQuickActions");
+  if (qaEl) {
+    qaEl.innerHTML = "";
+    const actions = [
+      { label: "📂 Explorer", title: "Open in File Explorer", fn: () => window.wincmux.openInExplorer(ws.path).catch((e) => setStatus(String(e), true)) },
+      { label: "⬡ VSCode",   title: "Open in VSCode",        fn: () => window.wincmux.openInVscode(ws.path).catch((e) => setStatus(String(e), true)) },
+      { label: "⎆ Git",      title: "Show git log & status", fn: () => loadGitSummary(ws) },
+      { label: "+ Terminal",  title: "New PTY in selected pane", fn: () => { closeWsInfoPanel(); startSessionForPane(state.selectedPaneId, { force: true }).catch((e) => setStatus(String(e), true)); } },
+    ];
+    for (const a of actions) {
+      const btn = document.createElement("button");
+      btn.className = "ws-quick-btn";
+      btn.textContent = a.label;
+      btn.title = a.title;
+      btn.addEventListener("click", a.fn);
+      qaEl.appendChild(btn);
+    }
+  }
+
+  // Position popup to the right of the anchor (workspace list item)
+  if (anchorEl) {
+    const rect = anchorEl.getBoundingClientRect();
+    const panelW = 640;
+    const margin = 6;
+    let left = rect.right + margin;
+    let top = rect.top;
+    // If overflows right edge of viewport, flip left
+    if (left + panelW > window.innerWidth - 8) {
+      left = rect.left - panelW - margin;
+    }
+    // Clamp top so panel doesn't go off bottom (panel height is dynamic, use 80vh estimate)
+    const maxTop = window.innerHeight - Math.min(720, window.innerHeight * 0.9) - 8;
+    if (top > maxTop) top = maxTop;
+    if (top < 8) top = 8;
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
+  }
+
+  // Reset scan + git areas on open
+  const scanArea = $("wsScanArea");
+  if (scanArea) { scanArea.style.display = "none"; scanArea.innerHTML = ""; }
+  const gitArea = $("wsGitSummary");
+  if (gitArea) { gitArea.style.display = "none"; gitArea.innerHTML = ""; }
+
+  // Load session summary
+  summaryEl.innerHTML = '<span class="ws-summary-loading">Loading…</span>';
+  Promise.all([
+    rpc("ai.sessions", { workspace_id: ws.id }).catch(() => ({ sessions: [] })),
+    rpc("session.list", { workspace_id: ws.id }).catch(() => ({ sessions: [] }))
+  ]).then(([aiRes, sessionRes]) => {
+    const allAi = aiRes?.sessions ?? [];
+    const claudeSessions = allAi.filter((s) => s.tool === "claude");
+    const codexSessions  = allAi.filter((s) => s.tool === "codex");
+    const runningPty = (sessionRes?.sessions ?? []).filter((s) => s.status === "running" && s.spawn_cmd);
+
+    const renderAiCard = (label, sessions) => {
+      const items = sessions.slice(0, 8).map((ai) => {
+        const d = new Date(ai.detected_at);
+        const timeStr = d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " +
+                        d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const cwd = ai.cwd ? ai.cwd.replace(/\\/g, "/") : "";
+        const resumeEsc = ai.resume_cmd.replace(/"/g, "&quot;");
+        return `<div class="ws-ai-item">
+          <button class="ws-ai-copy-btn" data-copy="${resumeEsc}" title="Copy to clipboard: ${resumeEsc}">
+            <span class="ws-ai-resume">${ai.resume_cmd}</span>
+            <span class="ws-ai-copy-icon">⎘</span>
+          </button>
+          <div class="ws-ai-meta-row">
+            <span class="ws-ai-cwd" title="${cwd}">${cwd || "—"}</span>
+            <span class="ws-ai-time">${timeStr}</span>
+          </div>
+        </div>`;
+      }).join("");
+      const more = sessions.length > 8 ? `<div class="ws-summary-more">+ ${sessions.length - 8} more</div>` : "";
+      const body = sessions.length === 0 ? '<div class="ws-section-none">none</div>' : items + more;
+      return `<div class="ws-section-card">
+        <div class="ws-section-card-title">${label} (${sessions.length})</div>
+        <div class="ws-section-card-body">${body}</div>
+      </div>`;
+    };
+
+    let html = `<div class="ws-dashboard-grid">
+      ${renderAiCard("⬡ Claude", claudeSessions)}
+      ${renderAiCard("◈ Codex", codexSessions)}
+    </div>`;
+
+    if (runningPty.length > 0) {
+      const ptyItems = runningPty.map((s) => {
+        let label = s.spawn_cmd ?? "shell";
+        try {
+          const args = JSON.parse(s.spawn_args ?? "[]");
+          const meaningful = args.filter((a) => !a.startsWith("-No") && !a.startsWith("chcp") && !a.startsWith("$Output") && !a.startsWith("[Console]"));
+          if (meaningful.length > 0) label = `${s.spawn_cmd} ${meaningful.join(" ")}`.trim();
+        } catch { /* */ }
+        return `<div class="ws-summary-item">
+          <span class="ws-summary-dot"></span>
+          <span class="ws-summary-cmd" title="${label}">${label}</span>
+          <button class="ws-pty-kill-btn" data-sid="${s.id}" title="Kill session (pid ${s.pid})">pid ${s.pid} ✕</button>
+        </div>`;
+      }).join("");
+      html += `<div class="ws-summary-section">
+        <div class="ws-summary-label">Running PTY (${runningPty.length})</div>
+        ${ptyItems}
+      </div>`;
+    }
+
+    html += `<button class="ws-scan-btn" id="wsScanBtn">Scan long files (&gt;1000 lines)</button>`;
+
+    summaryEl.innerHTML = html;
+
+    // Event delegation for copy + kill buttons
+    summaryEl.addEventListener("click", async (ev) => {
+      const copyBtn = ev.target.closest("[data-copy]");
+      if (copyBtn) {
+        const text = copyBtn.dataset.copy;
+        await window.wincmux.clipboardWrite(text).catch(() => {});
+        const icon = copyBtn.querySelector(".ws-ai-copy-icon");
+        if (icon) { icon.textContent = "✓"; setTimeout(() => { icon.textContent = "⎘"; }, 1200); }
+        return;
+      }
+      const killBtn = ev.target.closest("[data-sid]");
+      if (killBtn) {
+        const sid = killBtn.dataset.sid;
+        killBtn.textContent = "…";
+        killBtn.disabled = true;
+        try {
+          await rpc("session.close", { session_id: sid });
+          // Reload the panel content after kill
+          openWsInfoPanel(ws, anchorEl);
+        } catch (err) {
+          killBtn.textContent = "err";
+          setStatus(String(err?.message ?? err), true);
+        }
+      }
+    });
+
+    const scanBtn = summaryEl.querySelector("#wsScanBtn");
+    if (scanBtn) scanBtn.addEventListener("click", () => handleWsScan(ws, scanBtn));
+  });
+
+  // Description auto-save
+  descInput.oninput = () => {
+    clearTimeout(wsDescSaveTimer);
+    wsDescSaveTimer = setTimeout(() => {
+      ws.description = descInput.value;
+      rpc("workspace.describe", { id: ws.id, description: descInput.value }).catch(() => {});
+    }, 500);
+  };
+  const stopProp = (ev) => ev.stopPropagation();
+  for (const type of ["keydown", "keyup", "paste", "cut", "copy"]) {
+    descInput.addEventListener(type, stopProp);
+  }
+}
+
+function closeWsInfoPanel() {
+  const overlay = $("wsInfoOverlay");
+  if (overlay) overlay.style.display = "none";
+}
+
+async function loadGitSummary(ws) {
+  const gitArea = $("wsGitSummary");
+  if (!gitArea || !ws?.path) return;
+
+  // Toggle off if already shown
+  if (gitArea.style.display !== "none" && gitArea.dataset.wsId === ws.id) {
+    gitArea.style.display = "none";
+    return;
+  }
+
+  gitArea.dataset.wsId = ws.id;
+  gitArea.style.display = "";
+  gitArea.innerHTML = '<div class="ws-git-loading">Loading git info…</div>';
+
+  try {
+    const info = await window.wincmux.gitInfo(ws.path);
+    let html = "";
+
+    if (info.branch) {
+      html += `<div class="ws-git-branch">⎇ ${info.branch}</div>`;
+    }
+
+    if (info.dirty_files.length > 0) {
+      html += `<div class="ws-git-section-label">Changed files (${info.dirty_files.length})</div>`;
+      html += '<div class="ws-git-file-list">';
+      for (const line of info.dirty_files.slice(0, 20)) {
+        const status = line.slice(0, 2).trim();
+        const file = line.slice(3);
+        const cls = status === "M" || status === "MM" ? "ws-git-modified"
+                  : status === "??" ? "ws-git-untracked"
+                  : status === "D"  ? "ws-git-deleted"
+                  : status === "A"  ? "ws-git-added" : "";
+        html += `<div class="ws-git-file ${cls}"><span class="ws-git-status">${status || "?"}</span><span class="ws-git-path" title="${file}">${file}</span></div>`;
+      }
+      if (info.dirty_files.length > 20) {
+        html += `<div class="ws-summary-more">+ ${info.dirty_files.length - 20} more</div>`;
+      }
+      html += "</div>";
+    } else if (info.branch) {
+      html += '<div class="ws-git-clean">✓ Working tree clean</div>';
+    }
+
+    if (info.recent_commits.length > 0) {
+      html += `<div class="ws-git-section-label">Recent commits</div>`;
+      html += '<div class="ws-git-commit-list">';
+      for (const line of info.recent_commits) {
+        const sha = line.slice(0, 7);
+        const msg = line.slice(8);
+        html += `<div class="ws-git-commit"><span class="ws-git-sha">${sha}</span><span class="ws-git-msg" title="${msg}">${msg}</span></div>`;
+      }
+      html += "</div>";
+    }
+
+    if (!html) {
+      html = '<div class="ws-git-loading">Not a git repository</div>';
+    }
+
+    gitArea.innerHTML = html;
+  } catch (err) {
+    gitArea.innerHTML = `<div class="ws-git-loading">Git info unavailable</div>`;
+  }
+}
+
+async function handleWsScan(ws, scanBtn) {
+  const scanArea = $("wsScanArea");
+  if (!scanArea || !ws?.path) return;
+  scanBtn.disabled = true;
+  scanBtn.textContent = "Scanning…";
+  scanArea.style.display = "";
+  scanArea.innerHTML = '<div class="ws-scan-empty">Scanning…</div>';
+  try {
+    const result = await window.wincmux.scanLongFiles(ws.path, 1000);
+    const files = result?.files ?? [];
+    if (files.length === 0) {
+      scanArea.innerHTML = '<div class="ws-scan-empty">No files over 1000 lines found.</div>';
+    } else {
+      const cap = files.length === 50 ? ", capped at 50" : "";
+      let html = `<div class="ws-summary-label">Long files (${files.length}${cap})</div>`;
+      for (const f of files) {
+        html += `<div class="ws-scan-item">
+          <span class="ws-scan-path" title="${f.relativePath}">${f.relativePath}</span>
+          <span class="ws-scan-count">${f.lineCount.toLocaleString()}</span>
+        </div>`;
+      }
+      scanArea.innerHTML = html;
+    }
+  } catch (err) {
+    scanArea.innerHTML = `<div class="ws-scan-empty">Scan failed: ${String(err?.message ?? err)}</div>`;
+  } finally {
+    scanBtn.disabled = false;
+    scanBtn.textContent = "Scan long files (>1000 lines)";
+  }
+}
+
+function bindWsInfoPanel() {
+  const closeBtn = $("wsInfoCloseBtn");
+  if (closeBtn) {
+    closeBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      closeWsInfoPanel();
+    });
+  }
+  const overlay = $("wsInfoOverlay");
+  if (overlay) {
+    // Click on backdrop (overlay itself, not the panel) closes it
+    overlay.addEventListener("click", (ev) => {
+      if (ev.target === overlay) closeWsInfoPanel();
+    });
+  }
+}
+
+globalThis.openWsInfoPanel = openWsInfoPanel;
+
 // ── Workspace Notepad ──────────────────────────────────────────
 let notepadSaveTimer = null;
 
@@ -1054,6 +1342,7 @@ function bindEvents() {
   toggleNotificationPanelBtn.addEventListener("click", () =>
     toggleNotificationPanel(),
   );
+  bindWsInfoPanel();
 }
 async function bootstrap() {
   try {
