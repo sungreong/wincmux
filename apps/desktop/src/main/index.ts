@@ -227,6 +227,7 @@ function createWindow(): void {
   win.loadFile(path.join(__dirname, "..", "renderer", "index.html"));
   win.on("focus", () => {
     activeContext.app_focused = true;
+    win.flashFrame(false);
   });
   win.on("blur", () => {
     activeContext.app_focused = false;
@@ -442,6 +443,15 @@ async function handleNotifyCreated(notification: NotificationRecord): Promise<vo
   }
 
   applyUnreadBadge(unreadBadgeCount + 1);
+
+  // Flash taskbar icon when app is not focused
+  if (!activeContext.app_focused) {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) {
+        win.flashFrame(true);
+      }
+    }
+  }
 
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) {
@@ -962,6 +972,23 @@ app.whenReady()
       console.error("[WinCMux] Notify stream startup failed:", err);
     });
     createWindow();
+
+    // Send a one-time probe notification to register the app with Windows
+    // notification system so future toasts appear as banners.
+    // Only shown once — tracked via a marker file in app data.
+    const notifProbeMarker = path.join(
+      app.getPath("userData"), "notif-probe-shown"
+    );
+    if (ElectronNotification.isSupported() && !fs.existsSync(notifProbeMarker)) {
+      try { fs.writeFileSync(notifProbeMarker, "1"); } catch { /* */ }
+      const probe = new ElectronNotification({
+        title: "WinCMux",
+        body: "Notifications are enabled. You'll be alerted when AI sessions complete.",
+        silent: false,
+        timeoutType: "default"
+      });
+      probe.show();
+    }
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) {
         createWindow();
@@ -978,6 +1005,13 @@ process.on("unhandledRejection", (reason) => {
 
 process.on("uncaughtException", (err) => {
   console.error("[WinCMux] Uncaught exception:", err);
+});
+
+app.on("browser-window-focus", () => {
+  activeContext.app_focused = true;
+});
+app.on("browser-window-blur", () => {
+  activeContext.app_focused = false;
 });
 
 app.on("window-all-closed", () => {
