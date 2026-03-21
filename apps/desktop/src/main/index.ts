@@ -595,6 +595,7 @@ function startCoreProcess(entry: string, runtime: { command: string; env: NodeJS
   coreProc.stderr?.setEncoding("utf8");
   coreProc.stderr?.on("data", (chunk: string) => {
     coreStderrTail = `${coreStderrTail}${chunk}`.slice(-4000).replace(/\s+/g, " ").trim();
+    if (chunk.includes("[wincmux")) process.stderr.write(chunk);
   });
   coreProc.once("exit", (code, signal) => {
     coreExitReason = `core exited code=${code ?? "null"} signal=${signal ?? "null"}`;
