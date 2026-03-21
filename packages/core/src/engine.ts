@@ -316,10 +316,6 @@ export class CoreEngine {
       // Scan the recent tail of the buffer (not just the chunk) so resume markers
       // split across multiple chunks are still detected.
       const recentBuffer = this.outputBuffers.get(sessionId)?.slice(-2000) ?? chunk;
-      if (chunk.includes("resume") || chunk.includes("Resume")) {
-        process.stderr.write(`[wincmux-dbg] chunk has resume, len=${chunk.length} buf=${recentBuffer.length}\n`);
-        process.stderr.write(`[wincmux-dbg] chunk=${JSON.stringify(chunk.slice(0, 300))}\n`);
-      }
       this.maybeRecordAiResume({
         workspace_id: p.workspace_id,
         session_id: sessionId,
