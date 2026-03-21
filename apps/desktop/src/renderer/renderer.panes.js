@@ -113,7 +113,7 @@ function flushPaneOutput(paneId) {
   const chunk = view.outputQueue.slice(0, 16_384);
   view.outputQueue = view.outputQueue.slice(16_384);
 
-  // 사용자가 스크롤을 올려서 보고 있는 중이면 write 후 위치 유지
+  // If user has scrolled up, preserve viewport position after write.
   const buf = view.term.buffer.active;
   const isScrolledUp = buf.viewportY < buf.baseY;
   const savedViewportY = isScrolledUp ? buf.viewportY : null;
@@ -277,6 +277,7 @@ function disposeAllViews() {
 function fitAllPanes() {
   for (const view of state.paneViews.values()) {
     try {
+      updatePaneActionLayout(view.paneId);
       view.fitAddon.fit();
       schedulePaneResize(view);
     } catch {
@@ -306,6 +307,177 @@ function applyPaneFontToView(paneId, size) {
   view.term.options.fontSize = nextSize;
   view.fitAddon.fit();
   schedulePaneResize(view);
+}
+
+const PANE_ACTION_COMPACT_BREAKPOINT = 1080;
+const PANE_ACTION_TIGHT_BREAKPOINT = 760;
+let paneOverflowCloseBound = false;
+let paneOverflowPositionBound = false;
+let paneOverflowOpenPaneId = null;
+
+function positionPaneOverflowMenu(paneId) {
+  const meta = state.paneMeta.get(paneId);
+  if (!meta?.actionsOverflowMenu || !meta?.actionsOverflowBtn) {
+    return;
+  }
+  if (!meta.actionsOverflowMenu.classList.contains("open")) {
+    return;
+  }
+
+  const anchor = meta.actionsOverflowBtn.getBoundingClientRect();
+  const menu = meta.actionsOverflowMenu;
+  const margin = 10;
+
+  menu.style.maxHeight = `${Math.max(180, window.innerHeight - margin * 2)}px`;
+  menu.style.visibility = "hidden";
+
+  const rect = menu.getBoundingClientRect();
+  const width = Math.min(rect.width || 220, Math.max(180, window.innerWidth - margin * 2));
+
+  let left = anchor.right - width;
+  left = Math.max(margin, Math.min(left, window.innerWidth - width - margin));
+
+  let top = anchor.bottom + 6;
+  if (top + rect.height > window.innerHeight - margin) {
+    top = Math.max(margin, anchor.top - rect.height - 6);
+  }
+
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+  menu.style.width = `${Math.round(width)}px`;
+  menu.style.visibility = "";
+}
+
+function closePaneOverflowMenus(exceptPaneId = null) {
+  for (const [paneId, meta] of state.paneMeta.entries()) {
+    if (!meta?.actionsOverflowMenu) {
+      continue;
+    }
+    if (exceptPaneId && paneId === exceptPaneId) {
+      continue;
+    }
+    meta.actionsOverflowMenu.classList.remove("open");
+    meta.actionsOverflowMenu.style.left = "";
+    meta.actionsOverflowMenu.style.top = "";
+    meta.actionsOverflowMenu.style.width = "";
+    meta.actionsOverflowMenu.style.visibility = "";
+    meta.actionsOverflowMenu.style.maxHeight = "";
+    meta.actionsOverflowBtn?.setAttribute("aria-expanded", "false");
+  }
+  paneOverflowOpenPaneId = exceptPaneId;
+}
+
+function updatePaneActionLayout(paneId) {
+  const meta = state.paneMeta.get(paneId);
+  const card = state.paneCards.get(paneId);
+  if (!meta || !card || !meta.actionsPrimary || !meta.actionsOverflowMenu || !meta.actionsOverflowWrap) {
+    return;
+  }
+
+  const autoEnabled = state.paneAutoResize !== false;
+  const width = card.clientWidth || 0;
+  let level = 0;
+  if (autoEnabled && width > 0) {
+    if (width <= PANE_ACTION_TIGHT_BREAKPOINT) {
+      level = 2;
+    } else if (width <= PANE_ACTION_COMPACT_BREAKPOINT) {
+      level = 1;
+    }
+  }
+
+  const allActionButtons = [
+    meta.fontDownBtn,
+    meta.fontUpBtn,
+    meta.splitHBtn,
+    meta.splitVBtn,
+    meta.startBtn,
+    meta.sessionPickerBtn,
+    meta.closeBtn,
+    meta.hidePaneBtn,
+    meta.quickBtn,
+    meta.closePaneBtn
+  ].filter(Boolean);
+
+  const primarySet = new Set();
+  if (level === 0) {
+    for (const button of allActionButtons) {
+      primarySet.add(button);
+    }
+  } else if (level === 1) {
+    [meta.startBtn, meta.sessionPickerBtn, meta.quickBtn].forEach((button) => {
+      if (button) {
+        primarySet.add(button);
+      }
+    });
+  } else {
+    [meta.startBtn, meta.quickBtn].forEach((button) => {
+      if (button) {
+        primarySet.add(button);
+      }
+    });
+  }
+
+  meta.actionsPrimary.innerHTML = "";
+  meta.actionsOverflowMenu.innerHTML = "";
+
+  for (const button of allActionButtons) {
+    if (primarySet.has(button)) {
+      meta.actionsPrimary.appendChild(button);
+      continue;
+    }
+    meta.actionsOverflowMenu.appendChild(button);
+  }
+
+  if (meta.autoResizeBtn) {
+    meta.autoResizeBtn.textContent = autoEnabled ? "Auto On" : "Auto Off";
+    meta.autoResizeBtn.title = autoEnabled
+      ? "Automatic compact layout is enabled"
+      : "Automatic compact layout is disabled";
+    if (level === 0) {
+      meta.actionsPrimary.appendChild(meta.autoResizeBtn);
+    } else {
+      meta.actionsOverflowMenu.prepend(meta.autoResizeBtn);
+    }
+  }
+
+  const hasOverflow = meta.actionsOverflowMenu.childElementCount > 0;
+  meta.actionsOverflowWrap.hidden = !hasOverflow;
+  if (hasOverflow) {
+    meta.actionsPrimary.appendChild(meta.actionsOverflowWrap);
+  } else {
+    meta.actionsOverflowMenu.classList.remove("open");
+    meta.actionsOverflowBtn?.setAttribute("aria-expanded", "false");
+  }
+
+  if (hasOverflow && paneOverflowOpenPaneId === paneId && meta.actionsOverflowMenu.classList.contains("open")) {
+    window.requestAnimationFrame(() => positionPaneOverflowMenu(paneId));
+  }
+
+  card.classList.toggle("pane-actions-compact", level > 0);
+  card.classList.toggle("pane-actions-tight", level > 1);
+
+  const startFullLabel = meta.startBtn?.dataset?.fullLabel || meta.startBtn?.textContent || "Start";
+  if (meta.startBtn) {
+    if (level > 1) {
+      const isRestart = /^restart$/i.test(startFullLabel.trim());
+      meta.startBtn.textContent = isRestart ? "↻" : "▶";
+      meta.startBtn.classList.add("pane-btn-icon");
+      meta.startBtn.title = isRestart ? "Restart" : "Start";
+    } else {
+      meta.startBtn.textContent = startFullLabel;
+      meta.startBtn.classList.remove("pane-btn-icon");
+      meta.startBtn.title = "";
+    }
+  }
+}
+
+function setPaneAutoResizeEnabled(enabled) {
+  state.paneAutoResize = Boolean(enabled);
+  localStorage.setItem(STORAGE_KEYS.paneAutoResize, state.paneAutoResize ? "1" : "0");
+  for (const paneId of state.paneCards.keys()) {
+    updatePaneActionLayout(paneId);
+  }
+  fitAllPanes();
 }
 
 async function syncPaneSize(paneId) {
@@ -486,7 +658,7 @@ function startPanePolling(view) {
     } catch (err) {
       const message = String(err?.message ?? err);
       if (message.includes("session not found")) {
-        // Session ended — stop polling but keep terminal output visible (don't reset)
+        // Session ended: stop polling but keep terminal output visible (don't reset)
         clearInterval(view.poller);
         view.poller = null;
         view.sessionId = null;
@@ -531,32 +703,38 @@ function rebindImeTextarea(view) {
 
 function createPaneLeaf(node, hosts) {
   const paneId = node.pane_id;
-
   const card = document.createElement("div");
   card.className = "pane-leaf";
   card.dataset.paneId = paneId;
-
   const header = document.createElement("div");
   header.className = "pane-header";
-
   const idEl = document.createElement("span");
   idEl.className = "pane-id";
   idEl.textContent = paneId.slice(0, 8);
-
   const unreadBadgeEl = document.createElement("span");
   unreadBadgeEl.className = "pane-unread-badge";
   unreadBadgeEl.hidden = true;
-
   const idWrap = document.createElement("div");
   idWrap.className = "pane-id-wrap";
   idWrap.append(idEl, unreadBadgeEl);
-
   const statusEl = document.createElement("span");
   statusEl.className = "pane-session";
   statusEl.textContent = "No session";
-
   const actions = document.createElement("div");
   actions.className = "pane-actions";
+  const actionsPrimary = document.createElement("div");
+  actionsPrimary.className = "pane-actions-primary";
+  const actionsOverflowWrap = document.createElement("div");
+  actionsOverflowWrap.className = "pane-overflow";
+  const actionsOverflowBtn = document.createElement("button");
+  actionsOverflowBtn.className = "pane-btn pane-overflow-btn";
+  actionsOverflowBtn.textContent = "...";
+  actionsOverflowBtn.title = "More actions";
+  actionsOverflowBtn.setAttribute("aria-expanded", "false");
+  const actionsOverflowMenu = document.createElement("div");
+  actionsOverflowMenu.className = "pane-overflow-menu";
+  actionsOverflowWrap.append(actionsOverflowBtn, actionsOverflowMenu);
+  actions.append(actionsPrimary);
   const makeBtn = (text, title, onClick, cls = "pane-btn") => {
     const btn = document.createElement("button");
     btn.className = cls;
@@ -567,78 +745,116 @@ function createPaneLeaf(node, hosts) {
     btn.addEventListener("click", onClick);
     return btn;
   };
-
   const fontDownBtn = makeBtn("A-", "Decrease font size", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.adjustPaneFont(paneId, -PANE_FONT_LIMITS.step).catch((err) => setStatus(String(err), true));
   });
-
   const fontUpBtn = makeBtn("A+", "Increase font size", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.adjustPaneFont(paneId, PANE_FONT_LIMITS.step).catch((err) => setStatus(String(err), true));
   });
-
   const splitHBtn = makeBtn("Split H", "Split horizontally", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.splitPane(paneId, "horizontal").catch((err) => setStatus(String(err), true));
   });
-
   const splitVBtn = makeBtn("Split V", "Split vertically", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.splitPane(paneId, "vertical").catch((err) => setStatus(String(err), true));
   });
-
   const startBtn = makeBtn("Start", "", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.startSessionForPane(paneId, { force: true }).catch((err) => setStatus(String(err), true));
   });
-
-  const sessionPickerBtn = makeBtn("Sessions ▾", "View and attach session history", (ev) => {
+  const sessionPickerBtn = makeBtn("Sessions v", "View and attach session history", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     openSessionPicker(paneId, sessionPickerBtn);
   });
   sessionPickerBtn.className = "pane-btn session-picker-btn";
-
   const closeBtn = makeBtn("Close", "", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.closeSessionForPane(paneId).catch((err) => setStatus(String(err), true));
   });
-
   const closePaneBtn = makeBtn("Close Pane", "", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.closePane(paneId).catch((err) => setStatus(String(err), true));
   }, "pane-btn pane-btn-danger");
-
   const hidePaneBtn = makeBtn("Hide Pane", "Hide this pane without ending session", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.hidePane(paneId).catch((err) => setStatus(String(err), true));
   });
-
   const quickBtn = makeBtn("", "Quick command", () => {});
   quickBtn.classList.add("quickcmd-toggle");
   quickBtn.setAttribute("aria-label", "Quick command");
   quickBtn.innerHTML = '<span class="quickcmd-icon" aria-hidden="true"></span>';
+  const autoResizeBtn = makeBtn("", "Toggle automatic compact layout", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    setPaneAutoResizeEnabled(!(state.paneAutoResize !== false));
+    setStatus(state.paneAutoResize !== false ? "Auto resize enabled" : "Auto resize disabled");
+  }, "pane-btn pane-btn-auto");
+  actionsOverflowBtn.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const isSamePaneOpen = paneOverflowOpenPaneId === paneId && actionsOverflowMenu.classList.contains("open");
+    if (isSamePaneOpen) {
+      closePaneOverflowMenus(null);
+      actionsOverflowMenu.classList.remove("open");
+      actionsOverflowBtn.setAttribute("aria-expanded", "false");
+      return;
+    }
 
-  actions.append(fontDownBtn, fontUpBtn, splitHBtn, splitVBtn, startBtn, sessionPickerBtn, closeBtn, hidePaneBtn, quickBtn, closePaneBtn);
+    closePaneOverflowMenus(paneId);
+    actionsOverflowMenu.classList.add("open");
+    actionsOverflowBtn.setAttribute("aria-expanded", "true");
+    paneOverflowOpenPaneId = paneId;
+    positionPaneOverflowMenu(paneId);
+  });
+  actionsOverflowMenu.addEventListener("click", () => {
+    actionsOverflowMenu.classList.remove("open");
+    actionsOverflowMenu.style.left = "";
+    actionsOverflowMenu.style.top = "";
+    actionsOverflowMenu.style.width = "";
+    actionsOverflowMenu.style.visibility = "";
+    actionsOverflowMenu.style.maxHeight = "";
+    paneOverflowOpenPaneId = null;
+    actionsOverflowBtn.setAttribute("aria-expanded", "false");
+  });
+
+  if (!paneOverflowCloseBound) {
+    paneOverflowCloseBound = true;
+    document.addEventListener("pointerdown", (ev) => {
+      const target = ev.target;
+      if (target instanceof HTMLElement && target.closest(".pane-overflow")) {
+        return;
+      }
+      closePaneOverflowMenus();
+    });
+  }
+  if (!paneOverflowPositionBound) {
+    paneOverflowPositionBound = true;
+    const reposition = () => {
+      if (paneOverflowOpenPaneId) {
+        positionPaneOverflowMenu(paneOverflowOpenPaneId);
+      }
+    };
+    window.addEventListener("resize", reposition);
+    window.addEventListener("scroll", reposition, true);
+  }
   header.append(idWrap, statusEl, actions);
-
   const quickPanel = document.createElement("div");
   quickPanel.className = "quickcmd-popover";
-
   const terminalHost = document.createElement("div");
   terminalHost.className = "pane-terminal-host";
-
   card.append(header, quickPanel, terminalHost);
-
   card.addEventListener("pointerdown", (ev) => {
     if (ev.button !== 0) {
       return;
@@ -656,10 +872,13 @@ function createPaneLeaf(node, hosts) {
       })
       .catch((err) => setStatus(String(err), true));
   });
-
   hosts.push({ paneId, host: terminalHost });
   state.paneCards.set(paneId, card);
   state.paneMeta.set(paneId, {
+    actionsPrimary,
+    actionsOverflowWrap,
+    actionsOverflowBtn,
+    actionsOverflowMenu,
     statusEl,
     splitHBtn,
     splitVBtn,
@@ -670,12 +889,13 @@ function createPaneLeaf(node, hosts) {
     hidePaneBtn,
     fontDownBtn,
     fontUpBtn,
+    autoResizeBtn,
     quickBtn,
     quickPanel,
     unreadBadgeEl
   });
   bindQuickCommandPanelSafe(paneId, quickPanel, quickBtn);
-
+  updatePaneActionLayout(paneId);
   return card;
 }
 
@@ -795,7 +1015,7 @@ function createPaneView(paneId, host) {
     }
 
     if (ev.ctrlKey && key === "v") {
-      // Suppress onData immediately — xterm's native paste path fires before clipboardRead resolves.
+      // Suppress onData immediately: xterm native paste fires before clipboardRead resolves.
       view.suppressOnData = true;
       void window.wincmux.clipboardRead().then((text) => {
         view.suppressOnData = false;
@@ -845,6 +1065,7 @@ function createPaneView(paneId, host) {
   view.imeBindTimer = setInterval(() => rebindImeTextarea(view), 800);
 
   const observer = new ResizeObserver(() => {
+    updatePaneActionLayout(paneId);
     fitAddon.fit();
     schedulePaneResize(view);
   });
@@ -942,10 +1163,12 @@ function refreshPaneBindings() {
         const session = runningMap.get(sessionId);
         meta.statusEl.textContent = session ? `Running - pid ${session.pid}` : "Attached";
         meta.startBtn.textContent = "Restart";
+        meta.startBtn.dataset.fullLabel = "Restart";
         meta.closeBtn.disabled = false;
       } else {
         meta.statusEl.textContent = "No session";
         meta.startBtn.textContent = "Start";
+        meta.startBtn.dataset.fullLabel = "Start";
         meta.closeBtn.disabled = true;
       }
       meta.fontDownBtn.disabled = fontSize <= PANE_FONT_LIMITS.min;
@@ -959,6 +1182,7 @@ function refreshPaneBindings() {
     if (card) {
       card.classList.toggle("pane-has-unread", unreadCount > 0);
     }
+    updatePaneActionLayout(paneId);
 
     const view = state.paneViews.get(paneId);
     if (view) {
@@ -988,7 +1212,7 @@ async function openSessionPicker(paneId, anchorBtn) {
   const dropdown = document.createElement("div");
   dropdown.className = "session-picker-dropdown";
 
-  // ── AI Sessions section (Claude / Codex conversation sessions) ──
+  // AI Sessions section (Claude / Codex conversation sessions)
   if (aiSessions.length > 0) {
     const aiHeader = document.createElement("div");
     aiHeader.className = "session-picker-header";
@@ -1016,7 +1240,7 @@ async function openSessionPicker(paneId, anchorBtn) {
 
       const metaEl = document.createElement("span");
       metaEl.className = "session-meta";
-      metaEl.textContent = `${ai.tool} · detected ${timeStr}`;
+      metaEl.textContent = `${ai.tool} - detected ${timeStr}`;
 
       info.append(labelEl, metaEl);
 
@@ -1057,23 +1281,61 @@ async function openSessionPicker(paneId, anchorBtn) {
     }
   }
 
-  // ── PTY Sessions section ──
+  // PTY Sessions section
   const allSessions = histRes?.sessions ?? [];
   const namedSessions = allSessions.filter((s) => s.spawn_cmd);
+  const sessionSignature = (session) => {
+    let argsText = "[]";
+    try {
+      const parsed = JSON.parse(session.spawn_args || "[]");
+      argsText = JSON.stringify(Array.isArray(parsed) ? parsed : []);
+    } catch {
+      argsText = String(session.spawn_args || "[]");
+    }
+    return `${session.spawn_cmd || ""}|${argsText}|${session.spawn_cwd || ""}`;
+  };
 
-  if (namedSessions.length > 0 || aiSessions.length === 0) {
+  // De-duplicate by command signature:
+  // 1) keep running rows
+  // 2) for non-running, keep only latest one per signature
+  // 3) if a signature has running, hide its exited rows
+  const runningSignatures = new Set();
+  for (const session of namedSessions) {
+    if (session.status === "running") {
+      runningSignatures.add(sessionSignature(session));
+    }
+  }
+  const keptExited = new Set();
+  const displaySessions = [];
+  for (const session of namedSessions) {
+    const signature = sessionSignature(session);
+    if (session.status === "running") {
+      displaySessions.push(session);
+      continue;
+    }
+    if (runningSignatures.has(signature)) {
+      continue;
+    }
+    if (keptExited.has(signature)) {
+      continue;
+    }
+    keptExited.add(signature);
+    displaySessions.push(session);
+  }
+
+  if (displaySessions.length > 0 || aiSessions.length === 0) {
     const ptyHeader = document.createElement("div");
     ptyHeader.className = "session-picker-header";
     ptyHeader.textContent = "PTY Sessions";
     dropdown.appendChild(ptyHeader);
 
-    if (namedSessions.length === 0) {
+    if (displaySessions.length === 0) {
       const empty = document.createElement("div");
       empty.className = "session-picker-empty";
-      empty.textContent = "No named sessions yet — use the input below";
+      empty.textContent = "No named sessions yet - use the input below";
       dropdown.appendChild(empty);
     } else {
-      for (const s of namedSessions) {
+      for (const s of displaySessions) {
         let label;
         try {
           const parsedArgs = JSON.parse(s.spawn_args || "[]");
@@ -1105,7 +1367,7 @@ async function openSessionPicker(paneId, anchorBtn) {
 
         const metaEl = document.createElement("span");
         metaEl.className = "session-meta";
-        metaEl.textContent = `${isRunning ? "running" : s.status} · ${timeStr}`;
+        metaEl.textContent = `${isRunning ? "running" : s.status} - ${timeStr}`;
 
         info.append(labelEl, metaEl);
 
@@ -1143,6 +1405,24 @@ async function openSessionPicker(paneId, anchorBtn) {
         });
 
         item.append(dot, info, attachBtn);
+
+        if (!isRunning) {
+          const deleteBtn = document.createElement("button");
+          deleteBtn.className = "session-delete-btn";
+          deleteBtn.textContent = "✕";
+          deleteBtn.title = "Delete this session record";
+          deleteBtn.addEventListener("click", async (ev) => {
+            ev.stopPropagation();
+            try {
+              await rpc("session.delete", { session_id: s.id });
+              item.remove();
+            } catch (err) {
+              setStatus(String(err?.message ?? err), true);
+            }
+          });
+          item.append(deleteBtn);
+        }
+
         dropdown.appendChild(item);
       }
     }
@@ -1158,7 +1438,7 @@ async function openSessionPicker(paneId, anchorBtn) {
 
   const cmdInput = document.createElement("input");
   cmdInput.className = "session-cmd-input";
-  cmdInput.placeholder = "claude / codex / pwsh …";
+  cmdInput.placeholder = "claude / codex / pwsh";
   cmdInput.addEventListener("keydown", async (ev) => {
     if (ev.key === "Enter") {
       ev.preventDefault();
