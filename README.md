@@ -22,8 +22,9 @@ On macOS/Linux, developers use `tmux` or `cmux` to manage multiple terminal sess
 The screenshot above shows two active workspaces with a horizontal split:
 - **Left pane**: Claude Code (Sonnet 4.6) running in `C:\Users\leesu\Downloads`
 - **Right pane**: Sessions dropdown open — showing AI Sessions (claude/codex resume commands) and PTY Sessions with Attach buttons
-- **Toolbar**: A- / A+ / Split H / Split V / Restart / Sessions / Close / Hide Pane controls per pane
-- **Workspace sidebar** (left): Multiple workspaces with path, branch, and dirty-flag display; Notes section at bottom
+- **Toolbar**: A- / A+ / Split H / Split V / Restart / Sessions / Close / Hide Pane / Auto-resize toggle controls per pane; overflow menu for narrow panes
+- **Workspace sidebar** (left): Multiple workspaces with path, branch, and dirty-flag display; info button opens workspace popup (description, git status, long-file scan, running sessions); Notes section at bottom
+- **Workspace info panel**: Editable description, git branch/log/status, code scan (files > 1000 lines), running PTY session list with kill/close actions, AI session history
 - **Top bar**: Hide Workspaces / Show Notifications / Hidden Panes / Selected Pane ID
 - **Status bar** (bottom): Split applied: horizontal
 
@@ -34,7 +35,11 @@ The screenshot above shows two active workspaces with a horizontal split:
 | Feature | Status |
 |---|---|
 | Workspace CRUD (create / list / rename / pin / reorder) | Done |
+| Workspace description field (editable in info panel) | Done |
+| Workspace info popup panel (description, git, scan, sessions) | Done |
 | Session run via `node-pty` (ConPTY on Windows) | Done |
+| Session delete (non-running sessions) via IPC | Done |
+| Redundant session history pruning (dedup sequential runs) | Done |
 | Named-pipe JSON-RPC server (`\\.\pipe\wincmux-rpc`) | Done |
 | SQLite-backed workspace/session/notification/layout storage | Done |
 | Notification ingest (`notify.push`) + unread tracking | Done |
@@ -42,7 +47,14 @@ The screenshot above shows two active workspaces with a horizontal split:
 | Notification dedup via `dedup_key` + schema migration | Done |
 | Pattern-based terminal output detection (NotifyDetector) | Done |
 | Basic pane split/focus + snapshot persistence | Done |
+| Pane action overflow menu (compact/tight responsive layout) | Done |
+| Pane auto-resize toggle (persisted to localStorage) | Done |
+| Terminal scrollback preserved across layout changes | Done |
+| Workspace transition guard (prevents stale async race on switch) | Done |
+| Orphan session cleanup on workspace switch | Done |
 | Git branch/dirty-flag polling (3s interval) | Done |
+| Git error detail hint when .git folder not found | Done |
+| Scan long files IPC (`scanLongFiles` — finds files > N lines) | Done |
 | Stream topic filtering (`session` \| `notify`) | Done |
 | Core auto-respawn on runtime crash + pipe ENOENT retry | Done |
 | Notify stream auto-reconnect after pipe recovery | Done |
@@ -57,6 +69,9 @@ The screenshot above shows two active workspaces with a horizontal split:
 | Font size per-pane adjustment (A- / A+) | Done |
 | Workspace notes panel | Done |
 | Workspace rename/pin/reorder UI controls | Done |
+| Quick presets: Codex Only, Claude Only added (seed v3) | Done |
+| Quick command panel repositions on window resize/scroll | Done |
+| App icon (terminal .ico) applied to BrowserWindow and installer | Done |
 | Notification center filter (level/workspace) + Jump-to-unread | In Progress |
 | Portable `.exe` smoke-test automation | In Progress |
 | Embedded browser engine (WebView2 panels) | Phase 2 |
@@ -149,7 +164,7 @@ Electron Main Process
     ├── Git Metadata Poller
     ├── AI Session Detector (claude/codex resume command extraction)
     ├── Pane Session Binding (persist pane↔session across restarts)
-    └── SQLite Storage (schema v5 with auto-migration)
+    └── SQLite Storage (schema v6 with auto-migration)
 ```
 
 ---
