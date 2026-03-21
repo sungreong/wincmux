@@ -9,6 +9,7 @@ import { LayoutStore } from "./layout";
 import {
   computeCompletionDedupKey,
   computePromptDedupKey,
+  extractAiResumeMarker,
   extractAssistantReadyMarker,
   extractPromptMarker,
   hasAssistantPromptContext,
@@ -16,7 +17,7 @@ import {
   normalizePromptText
 } from "./notify-detector";
 import { PtyManager } from "./pty";
-import type { JsonRpcRequest, JsonRpcResponse, NotificationRow, SessionRow, StreamTopic, WorkspaceRow } from "./types";
+import type { AiSessionRow, JsonRpcRequest, JsonRpcResponse, NotificationRow, SessionRow, StreamTopic, WorkspaceRow } from "./types";
 import {
   layoutCloseSchema,
   layoutFocusSchema,
@@ -27,6 +28,7 @@ import {
   notifyUnreadSchema,
   notificationReadSchema,
   notifyPushSchema,
+  paneSessionBindSchema,
   sessionCloseSchema,
   sessionResizeSchema,
   sessionListSchema,
@@ -37,6 +39,7 @@ import {
   sessionWriteSchema,
   workspaceCreateSchema,
   workspaceDeleteSchema,
+  workspaceIdSchema,
   workspacePinSchema,
   workspaceRenameSchema,
   workspaceReorderSchema
@@ -65,6 +68,8 @@ export class CoreEngine {
   private readonly sessionWorkspace = new Map<string, string>();
   private readonly streamSubscriptions = new Map<string, StreamSubscription>();
   private readonly socketSubscriptions = new Map<net.Socket, Set<string>>();
+  // Tracks resume_cmd strings already recorded per PTY session to avoid per-chunk re-upserts
+  private readonly seenAiResumeCmds = new Map<string, Set<string>>();
   private readonly promptDetector = new Map<string, {
     buffer: string;
     last_notified_at: number;
@@ -168,6 +173,14 @@ export class CoreEngine {
           return this.ok(req.id, this.layoutClose(req.params));
         case "layout.list":
           return this.ok(req.id, this.layoutList(req.params));
+        case "pane.session.bind":
+          return this.ok(req.id, this.paneSessionBind(req.params));
+        case "pane.session.bindings":
+          return this.ok(req.id, this.paneSessionBindings(req.params));
+        case "session.history":
+          return this.ok(req.id, this.sessionHistory(req.params));
+        case "ai.sessions":
+          return this.ok(req.id, this.aiSessions(req.params));
         default:
           return this.error(req.id, -32601, `method not found: ${req.method}`);
       }
@@ -249,7 +262,10 @@ export class CoreEngine {
       status: "running",
       started_at: new Date().toISOString(),
       ended_at: null,
-      exit_code: null
+      exit_code: null,
+      spawn_cmd: p.cmd,
+      spawn_args: JSON.stringify(p.args ?? []),
+      spawn_cwd: p.cwd ?? null
     };
 
     this.db.insertSession(row);
@@ -284,12 +300,35 @@ export class CoreEngine {
         session_id: sessionId,
         output_chunk: chunk
       });
+      // Scan the recent tail of the buffer (not just the chunk) so resume markers
+      // split across multiple chunks are still detected.
+      const recentBuffer = this.outputBuffers.get(sessionId)?.slice(-2000) ?? chunk;
+      if (chunk.includes("resume") || chunk.includes("Resume")) {
+        process.stderr.write(`[wincmux-dbg] chunk has resume, len=${chunk.length} buf=${recentBuffer.length}\n`);
+        process.stderr.write(`[wincmux-dbg] chunk=${JSON.stringify(chunk.slice(0, 300))}\n`);
+      }
+      this.maybeRecordAiResume({
+        workspace_id: p.workspace_id,
+        session_id: sessionId,
+        output_chunk: recentBuffer
+      });
     });
     pty.onExit(({ exitCode }) => {
       this.db.updateSessionResult(sessionId, exitCode === 0 ? "exited" : "failed", new Date().toISOString(), exitCode);
-      this.pty.close(sessionId);
+      // Scan the full output buffer before deleting — catches resume markers split across chunks
+      const finalBuffer = this.outputBuffers.get(sessionId) ?? "";
+      if (finalBuffer.length >= 20) {
+        this.maybeRecordAiResume({
+          workspace_id: p.workspace_id,
+          session_id: sessionId,
+          output_chunk: finalBuffer.slice(-3000)
+        });
+      }
+      // Process has already exited — remove from map without re-killing
+      this.pty.remove(sessionId);
       this.outputBuffers.delete(sessionId);
       this.promptDetector.delete(sessionId);
+      this.seenAiResumeCmds.delete(sessionId);
       this.emitStreamEvent("session.exit", {
         session_id: sessionId,
         workspace_id: p.workspace_id,
@@ -318,7 +357,9 @@ export class CoreEngine {
     this.pty.close(p.session_id);
     this.outputBuffers.delete(p.session_id);
     this.promptDetector.delete(p.session_id);
+    this.seenAiResumeCmds.delete(p.session_id);
     this.db.updateSessionResult(p.session_id, "exited", new Date().toISOString(), 0);
+    this.db.clearPaneSessionBindingBySession(p.session_id);
     this.emitStreamEvent("session.state_changed", {
       session_id: p.session_id,
       workspace_id: workspaceId,
@@ -463,6 +504,41 @@ export class CoreEngine {
     return { ok: true };
   }
 
+  private maybeRecordAiResume(input: {
+    workspace_id: string;
+    session_id: string;
+    output_chunk: string;
+  }): void {
+    // Skip short chunks — resume patterns are always >50 chars
+    if (input.output_chunk.length < 20) return;
+    const marker = extractAiResumeMarker(input.output_chunk);
+    if (!marker) return;
+    // Dedup: same resume_cmd already recorded for this session
+    const seenForSession = this.seenAiResumeCmds.get(input.session_id) ?? new Set<string>();
+    if (seenForSession.has(marker.resume_cmd)) return;
+    seenForSession.add(marker.resume_cmd);
+    this.seenAiResumeCmds.set(input.session_id, seenForSession);
+    // Use SHA-based stable ID derived from resume_cmd for consistent upsert key
+    const id = Buffer.from(marker.resume_cmd).toString("base64url").slice(0, 32).replace(/[^a-z0-9]/gi, "x");
+    const sessionRow = this.db.getSession(input.session_id);
+    const row: AiSessionRow = {
+      id,
+      workspace_id: input.workspace_id,
+      pty_session_id: input.session_id,
+      tool: marker.tool,
+      resume_cmd: marker.resume_cmd,
+      cwd: sessionRow?.spawn_cwd ?? null,
+      detected_at: new Date().toISOString()
+    };
+    process.stderr.write(`[wincmux] AI resume detected: ${marker.resume_cmd}\n`);
+    try {
+      this.db.upsertAiSession(row);
+      process.stderr.write(`[wincmux] AI resume saved OK\n`);
+    } catch (err) {
+      process.stderr.write(`[wincmux] upsertAiSession error: ${err}\n`);
+    }
+  }
+
   private maybeIngestPromptPattern(input: {
     workspace_id: string;
     session_id: string;
@@ -545,6 +621,49 @@ export class CoreEngine {
       source: "core-pattern-detector",
       dedup_key: computeCompletionDedupKey(input.session_id, readyMarker)
     });
+  }
+
+  private paneSessionBind(params: unknown): { ok: true } {
+    const p = paneSessionBindSchema.parse(params);
+    this.db.savePaneSessionBinding(p.workspace_id, p.pane_id, p.session_id);
+    return { ok: true };
+  }
+
+  private paneSessionBindings(params: unknown): { bindings: Array<{ pane_id: string; session_id: string; spawn_cmd: string | null; spawn_args: string | null; spawn_cwd: string | null }> } {
+    const p = workspaceIdSchema.parse(params);
+    const bindings = this.db.loadPaneSessionBindings(p.workspace_id);
+    return {
+      bindings: bindings.map((b) => {
+        const session = this.db.getSession(b.session_id);
+        return {
+          pane_id: b.pane_id,
+          session_id: b.session_id,
+          spawn_cmd: session?.spawn_cmd ?? null,
+          spawn_args: session?.spawn_args ?? null,
+          spawn_cwd: session?.spawn_cwd ?? null
+        };
+      })
+    };
+  }
+
+  private sessionHistory(params: unknown): { sessions: Array<{ id: string; status: string; spawn_cmd: string | null; spawn_args: string | null; spawn_cwd: string | null; started_at: string }> } {
+    const p = workspaceIdSchema.parse(params);
+    const rows = this.db.listAllSessions(p.workspace_id);
+    return {
+      sessions: rows.map((r) => ({
+        id: r.id,
+        status: r.status,
+        spawn_cmd: r.spawn_cmd ?? null,
+        spawn_args: r.spawn_args ?? null,
+        spawn_cwd: r.spawn_cwd ?? null,
+        started_at: r.started_at
+      }))
+    };
+  }
+
+  private aiSessions(params: unknown): { sessions: AiSessionRow[] } {
+    const p = workspaceIdSchema.parse(params);
+    return { sessions: this.db.listAiSessions(p.workspace_id) };
   }
 
   private layoutSplit(params: unknown): { pane_ids: [string, string] } {

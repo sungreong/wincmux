@@ -117,3 +117,34 @@ export function extractAssistantReadyMarker(bufferText: string): string | null {
 export function computeCompletionDedupKey(sessionId: string, readyMarker: string): string {
   return `${sessionId}|task_done|${readyMarker}`;
 }
+
+export interface AiResumeMarker {
+  tool: string;
+  resume_cmd: string;
+}
+
+/**
+ * Detects AI tool conversation session resume commands from PTY output.
+ * Matches patterns like:
+ *   claude --resume <uuid>
+ *   codex --session <uuid>
+ *   codex --resume <uuid>
+ *   codex resume <uuid>
+ */
+export function extractAiResumeMarker(outputChunk: string): AiResumeMarker | null {
+  const text = stripAnsi(normalizeTerminalOutput(outputChunk));
+
+  // Claude: "claude --resume <uuid>"
+  const claudeMatch = text.match(/\bclaude\s+--resume\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[^0-9a-f-]|$)/i);
+  if (claudeMatch) {
+    return { tool: "claude", resume_cmd: `claude --resume ${claudeMatch[1]}` };
+  }
+
+  // Codex: "codex --session <uuid>", "codex --resume <uuid>", or "codex resume <uuid>"
+  const codexMatch = text.match(/\bcodex\s+(?:--(?:session|resume)|resume)\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[^0-9a-f-]|$)/i);
+  if (codexMatch) {
+    return { tool: "codex", resume_cmd: `codex resume ${codexMatch[1]}` };
+  }
+
+  return null;
+}

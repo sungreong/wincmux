@@ -72,6 +72,11 @@ export class PtyManager {
     }
   }
 
+  /** Remove a session from the map without killing the process (use after natural exit). */
+  remove(sessionId: string): void {
+    this.sessions.delete(sessionId);
+  }
+
   closeAll(): void {
     for (const id of this.sessions.keys()) {
       this.close(id);
