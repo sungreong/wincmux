@@ -380,6 +380,8 @@ async function handleNotifyCreated(notification: NotificationRecord): Promise<vo
     toast.show();
   }
 
+  applyUnreadBadge(unreadBadgeCount + 1);
+
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) {
       continue;
