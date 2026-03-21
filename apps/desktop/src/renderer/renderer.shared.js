@@ -222,9 +222,9 @@ const state = {
   rightWidth: Number(localStorage.getItem(STORAGE_KEYS.rightWidth) ?? 300),
   leftCollapsed: localStorage.getItem(STORAGE_KEYS.leftCollapsed) === "1",
   rightCollapsed: localStorage.getItem(STORAGE_KEYS.rightCollapsed) === "1",
-  shellCommand: localStorage.getItem(STORAGE_KEYS.terminalDefaultShell) ?? "pwsh.exe",
+  shellCommand: localStorage.getItem(STORAGE_KEYS.terminalDefaultShell) ?? "powershell.exe",
   terminal: {
-    default_shell: localStorage.getItem(STORAGE_KEYS.terminalDefaultShell) ?? "pwsh.exe",
+    default_shell: localStorage.getItem(STORAGE_KEYS.terminalDefaultShell) ?? "powershell.exe",
     ime_debug: localStorage.getItem(STORAGE_KEYS.terminalImeDebug) === "1",
     unicode_width: localStorage.getItem(STORAGE_KEYS.terminalUnicodeWidth) ?? "unicode11"
   },
@@ -262,7 +262,9 @@ const state = {
     stream_queue_depth: 0
   },
   // Cache of paneViews per workspace so xterm buffers survive workspace switching
-  workspacePaneViewCache: new Map()
+  workspacePaneViewCache: new Map(),
+  // Cache of paneSessions per workspace so pane→session mappings survive workspace switching
+  workspacePaneSessionCache: new Map()
 };
 if (!localStorage.getItem(STORAGE_KEYS.terminalDefaultShell)) {
   localStorage.setItem(STORAGE_KEYS.terminalDefaultShell, state.terminal.default_shell);

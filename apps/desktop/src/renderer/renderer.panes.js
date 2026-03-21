@@ -159,9 +159,16 @@ function normalizePaneSessions() {
     ? hiddenSessionIdsForWorkspace(state.selectedWorkspaceId)
     : new Set();
 
+  console.debug("[normalize] running sessions:", [...running.keys()].map(s => s.slice(0,8)));
+  console.debug("[normalize] paneSessions before:", Object.entries(state.paneSessions).map(([p,s]) => `${p.slice(0,8)}→${s?.slice(0,8)}`));
+
   for (const paneId of Object.keys(state.paneSessions)) {
     const sid = state.paneSessions[paneId];
-    if (!leafIds.has(paneId) || (sid && (!running.has(sid) || hiddenSessions.has(sid)))) {
+    // Only clean up entries belonging to the CURRENT workspace's panes.
+    // paneIds not in leafIds belong to other workspaces — preserve them for workspace-switch cache.
+    if (!leafIds.has(paneId)) continue;
+    if (sid && (!running.has(sid) || hiddenSessions.has(sid))) {
+      console.warn("[normalize] DELETING pane session:", paneId.slice(0,8), "→", sid?.slice(0,8), "reason: running=", running.has(sid), "hidden=", hiddenSessions.has(sid));
       clearPromptDetectorSession(sid);
       delete state.paneSessions[paneId];
     }
@@ -284,6 +291,7 @@ function disposeAllViews() {
     }
   }
   state.workspacePaneViewCache.clear();
+  state.workspacePaneSessionCache.clear();
   state._lastRenderedWorkspaceId = null;
 }
 
@@ -601,12 +609,19 @@ function writeToPane(paneId, data) {
 function bindViewToSession(view, sessionId) {
   const nextSession = sessionId ?? null;
 
-  // If same session and polling is already running, still sync PTY size
-  // (e.g. view was restored from workspace cache — size must be re-sent to server)
-  if (view.sessionId === nextSession && (view.poller || state.useStream)) {
+  // If same session and already bound, just sync PTY size
+  if (view.sessionId === nextSession && view._boundToStream) {
     syncPaneSize(view.paneId).catch(() => {});
     return;
   }
+
+  console.warn("[bindView] REBIND pane:", view.paneId?.slice(0,8),
+    "prevSession:", view.sessionId?.slice(0,8),
+    "nextSession:", nextSession?.slice(0,8),
+    "_boundToStream:", view._boundToStream,
+    "sameId:", view.sessionId === nextSession,
+    "stack:", new Error().stack?.split('\n')[2]?.trim()
+  );
 
   const previousSession = view.sessionId;
   if (previousSession && previousSession !== nextSession) {
@@ -646,7 +661,10 @@ function bindViewToSession(view, sessionId) {
     if (!state.useStream) {
       startPanePolling(view);
     }
+    view._boundToStream = state.useStream;
     syncPaneSize(view.paneId).catch(() => {});
+  } else {
+    view._boundToStream = false;
   }
 }
 
@@ -1144,10 +1162,11 @@ function renderPaneSurface(force = false) {
     return;
   }
 
-  // On workspace switch: stash current workspace's views into cache, restore returning workspace's views
+  // On workspace switch: stash current workspace's views+sessions into cache, restore returning workspace's
   const renderingWorkspaceId = state.selectedWorkspaceId;
+  let restoredFromWorkspaceSwitch = false;
   if (state._lastRenderedWorkspaceId !== renderingWorkspaceId) {
-    // Save outgoing workspace's live views into cache (stop polling first)
+    // Save outgoing workspace's live views and session mappings into cache (stop polling first)
     if (state._lastRenderedWorkspaceId) {
       for (const view of state.paneViews.values()) {
         if (view.poller) { clearInterval(view.poller); view.poller = null; }
@@ -1155,15 +1174,31 @@ function renderPaneSurface(force = false) {
         if (view.flushRaf) { cancelAnimationFrame(view.flushRaf); view.flushRaf = null; }
         view.readBusy = false;
         view.outputQueue = "";
+        view.inputFlushScheduled = false;
+        view.inputFlushInFlight = false;
+        view.pendingInput = "";
+        view._boundToStream = false; // force rebind on restore
       }
       state.workspacePaneViewCache.set(state._lastRenderedWorkspaceId, new Map(state.paneViews));
+      state.workspacePaneSessionCache.set(state._lastRenderedWorkspaceId, { ...state.paneSessions });
       state.paneViews.clear();
     }
-    // Restore incoming workspace's cached views (if any)
-    const cached = state.workspacePaneViewCache.get(renderingWorkspaceId);
-    if (cached) {
-      for (const [paneId, view] of cached.entries()) {
+    // Restore incoming workspace's cached views and session mappings (if any)
+    const cachedViews = state.workspacePaneViewCache.get(renderingWorkspaceId);
+    if (cachedViews) {
+      for (const [paneId, view] of cachedViews.entries()) {
         state.paneViews.set(paneId, view);
+      }
+      restoredFromWorkspaceSwitch = true;
+    }
+    const cachedSessions = state.workspacePaneSessionCache.get(renderingWorkspaceId);
+    if (cachedSessions) {
+      // Merge cached session mappings back — but don't overwrite entries that
+      // tryRestorePaneSessions already assigned from the authoritative backend response.
+      for (const [paneId, sessionId] of Object.entries(cachedSessions)) {
+        if (!state.paneSessions[paneId]) {
+          state.paneSessions[paneId] = sessionId;
+        }
       }
     }
     state._lastRenderedWorkspaceId = renderingWorkspaceId;
@@ -1193,6 +1228,7 @@ function renderPaneSurface(force = false) {
   const rootNode = renderPaneNode(root, paneMap, hosts);
   paneSurface.appendChild(rootNode);
 
+  const restoredFromCache = new Set();
   for (const item of hosts) {
     const existing = state.paneViews.get(item.paneId);
     if (existing) {
@@ -1211,6 +1247,8 @@ function renderPaneSurface(force = false) {
       });
       observer.observe(item.host);
       existing.observer = observer;
+      // Only replay session buffer for views that actually came back from another workspace's cache
+      if (restoredFromWorkspaceSwitch && existing.renderedSessionId) restoredFromCache.add(item.paneId);
     } else {
       createPaneView(item.paneId, item.host);
     }
@@ -1223,6 +1261,25 @@ function renderPaneSurface(force = false) {
     fitAllPanes();
     // Second pass after any CSS transitions settle
     setTimeout(() => fitAllPanes(), 80);
+    // For views restored from workspace cache: replay session buffer so terminal isn't blank
+    if (restoredFromCache.size > 0) {
+      setTimeout(() => {
+        for (const paneId of restoredFromCache) {
+          const view = state.paneViews.get(paneId);
+          if (!view?.sessionId) continue;
+          const replayId = view.sessionId;
+          rpc("session.read", { session_id: replayId, max_bytes: 65536 })
+            .then((res) => {
+              if (res?.output && view.sessionId === replayId) {
+                view.term.reset();
+                view.term.write(normalizeTerminalOutput(res.output));
+                view.renderedSessionId = replayId;
+              }
+            })
+            .catch(() => {});
+        }
+      }, 120);
+    }
   });
 }
 
@@ -1245,6 +1302,7 @@ function renderPaneEmptyState(title, description) {
 function refreshPaneBindings() {
   const runningMap = new Map(runningSessions().map((s) => [s.id, s]));
   const leafCount = leafPanes().length;
+  console.debug("[refreshBindings] called, running sessions:", [...runningMap.keys()].map(s=>s.slice(0,8)), "paneSessions:", Object.entries(state.paneSessions).map(([p,s])=>`${p.slice(0,8)}→${s?.slice(0,8)}`));
 
   for (const pane of leafPanes()) {
     const paneId = pane.pane_id;
