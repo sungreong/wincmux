@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { BASE_SCHEMA_SQL, MIGRATIONS } from "./schema";
-import type { NotificationRow, SessionRow, SessionStatus, WorkspaceRow } from "./types";
+import type { AiSessionRow, NotificationRow, SessionRow, SessionStatus, WorkspaceRow } from "./types";
 
 export class DbStore {
   readonly db: Database.Database;
@@ -73,8 +73,10 @@ export class DbStore {
   insertSession(row: SessionRow): void {
     this.db
       .prepare(
-        `INSERT INTO sessions (id, workspace_id, pid, status, started_at, ended_at, exit_code)
-         VALUES (@id, @workspace_id, @pid, @status, @started_at, @ended_at, @exit_code)`
+        `INSERT INTO sessions (id, workspace_id, pid, status, started_at, ended_at, exit_code,
+                               spawn_cmd, spawn_args, spawn_cwd)
+         VALUES (@id, @workspace_id, @pid, @status, @started_at, @ended_at, @exit_code,
+                 @spawn_cmd, @spawn_args, @spawn_cwd)`
       )
       .run(row);
   }
@@ -87,6 +89,58 @@ export class DbStore {
     return this.db
       .prepare("SELECT * FROM sessions WHERE workspace_id = ? ORDER BY started_at DESC")
       .all(workspaceId) as SessionRow[];
+  }
+
+  listAllSessions(workspaceId: string): SessionRow[] {
+    return this.db
+      .prepare("SELECT * FROM sessions WHERE workspace_id = ? ORDER BY started_at DESC LIMIT 50")
+      .all(workspaceId) as SessionRow[];
+  }
+
+  getSession(sessionId: string): SessionRow | null {
+    return (this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(sessionId) as SessionRow | undefined) ?? null;
+  }
+
+  savePaneSessionBinding(workspaceId: string, paneId: string, sessionId: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO pane_session_bindings (workspace_id, pane_id, session_id, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(workspace_id, pane_id) DO UPDATE SET
+           session_id = excluded.session_id,
+           updated_at = excluded.updated_at`
+      )
+      .run(workspaceId, paneId, sessionId, new Date().toISOString());
+  }
+
+  loadPaneSessionBindings(workspaceId: string): Array<{ pane_id: string; session_id: string }> {
+    return this.db
+      .prepare("SELECT pane_id, session_id FROM pane_session_bindings WHERE workspace_id = ?")
+      .all(workspaceId) as Array<{ pane_id: string; session_id: string }>;
+  }
+
+  deletePaneSessionBinding(workspaceId: string, paneId: string): void {
+    this.db.prepare("DELETE FROM pane_session_bindings WHERE workspace_id = ? AND pane_id = ?").run(workspaceId, paneId);
+  }
+
+  clearPaneSessionBindingBySession(sessionId: string): void {
+    this.db.prepare("DELETE FROM pane_session_bindings WHERE session_id = ?").run(sessionId);
+  }
+
+  upsertAiSession(row: AiSessionRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO ai_sessions (id, workspace_id, pty_session_id, tool, resume_cmd, cwd, detected_at)
+         VALUES (@id, @workspace_id, @pty_session_id, @tool, @resume_cmd, @cwd, @detected_at)
+         ON CONFLICT(id) DO UPDATE SET detected_at = excluded.detected_at, cwd = excluded.cwd`
+      )
+      .run(row);
+  }
+
+  listAiSessions(workspaceId: string): AiSessionRow[] {
+    return this.db
+      .prepare("SELECT * FROM ai_sessions WHERE workspace_id = ? ORDER BY detected_at DESC LIMIT 50")
+      .all(workspaceId) as AiSessionRow[];
   }
 
   insertNotification(row: NotificationRow): void {

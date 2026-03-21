@@ -78,5 +78,37 @@ export const MIGRATIONS: Record<number, string[]> = {
     "UPDATE notifications SET source_kind = 'pattern' WHERE source LIKE 'assistant_prompt|%'",
     "UPDATE notifications SET source_kind = 'cli' WHERE source_kind IS NULL OR source_kind = ''",
     "INSERT OR IGNORE INTO schema_versions(version, applied_at) VALUES (2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+  ],
+  3: [
+    "ALTER TABLE sessions ADD COLUMN spawn_cmd TEXT",
+    "ALTER TABLE sessions ADD COLUMN spawn_args TEXT",
+    "ALTER TABLE sessions ADD COLUMN spawn_cwd TEXT",
+    `CREATE TABLE IF NOT EXISTS pane_session_bindings (
+      workspace_id TEXT NOT NULL,
+      pane_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (workspace_id, pane_id),
+      FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+    )`,
+    "INSERT OR IGNORE INTO schema_versions(version, applied_at) VALUES (3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+  ],
+  4: [
+    `CREATE TABLE IF NOT EXISTS ai_sessions (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      pty_session_id TEXT NOT NULL,
+      tool TEXT NOT NULL,
+      resume_cmd TEXT NOT NULL,
+      cwd TEXT,
+      detected_at TEXT NOT NULL,
+      FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+    )`,
+    "CREATE INDEX IF NOT EXISTS idx_ai_sessions_workspace ON ai_sessions(workspace_id, detected_at DESC)",
+    "INSERT OR IGNORE INTO schema_versions(version, applied_at) VALUES (4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+  ],
+  5: [
+    "ALTER TABLE ai_sessions ADD COLUMN cwd TEXT",
+    "INSERT OR IGNORE INTO schema_versions(version, applied_at) VALUES (5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
   ]
 };

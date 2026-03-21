@@ -45,6 +45,9 @@ export interface SessionRow {
   started_at: string;
   ended_at: string | null;
   exit_code: number | null;
+  spawn_cmd: string | null;
+  spawn_args: string | null;
+  spawn_cwd: string | null;
 }
 
 export interface NotificationRow {
@@ -64,6 +67,16 @@ export interface NotificationRow {
   dedup_key: string | null;
   signature_hash: string | null;
   source: string;
+}
+
+export interface AiSessionRow {
+  id: string;
+  workspace_id: string;
+  pty_session_id: string;
+  tool: string;
+  resume_cmd: string;
+  cwd: string | null;
+  detected_at: string;
 }
 
 export interface PaneNode {

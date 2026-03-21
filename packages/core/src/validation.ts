@@ -146,3 +146,13 @@ export const layoutCloseSchema = z.object({
 export const layoutListSchema = z.object({
   workspace_id: z.string().uuid()
 });
+
+export const paneSessionBindSchema = z.object({
+  workspace_id: z.string().uuid(),
+  pane_id: z.string().uuid(),
+  session_id: z.string().uuid()
+});
+
+export const workspaceIdSchema = z.object({
+  workspace_id: z.string().uuid()
+});
