@@ -260,7 +260,9 @@ const state = {
     dropped_frames: 0,
     input_latency_ms: [],
     stream_queue_depth: 0
-  }
+  },
+  // Cache of paneViews per workspace so xterm buffers survive workspace switching
+  workspacePaneViewCache: new Map()
 };
 if (!localStorage.getItem(STORAGE_KEYS.terminalDefaultShell)) {
   localStorage.setItem(STORAGE_KEYS.terminalDefaultShell, state.terminal.default_shell);

@@ -88,6 +88,10 @@ function enqueueStreamOutput(paneId, output) {
     return;
   }
 
+  // Mark which session produced this output (for workspace-switch reset guard)
+  if (view.sessionId) {
+    view.renderedSessionId = view.sessionId;
+  }
   view.outputQueue += output;
   if (view.outputQueue.length > 256_000) {
     view.outputQueue = view.outputQueue.slice(-180_000);
@@ -118,6 +122,7 @@ function flushPaneOutput(paneId) {
   const isScrolledUp = buf.viewportY < buf.baseY;
   const savedViewportY = isScrolledUp ? buf.viewportY : null;
 
+  view.renderedSessionId = view.sessionId;
   view.term.write(normalizeTerminalOutput(chunk), () => {
     if (savedViewportY !== null) {
       view.term.scrollToLine(savedViewportY);
@@ -132,7 +137,7 @@ function currentLayoutHash() {
   const stable = state.panes
     .map((p) => `${p.pane_id}:${p.parent_id ?? "root"}:${p.split ? `${p.split.direction}:${p.split.first}:${p.split.second}` : "leaf"}`)
     .sort();
-  return stable.join("|");
+  return `${state.selectedWorkspaceId ?? ""}|${stable.join("|")}`;
 }
 
 function ensureSelectedPane() {
@@ -272,6 +277,14 @@ function disposeAllViews() {
     disposeView(view);
   }
   state.paneViews.clear();
+  // Also dispose cached views from other workspaces
+  for (const cachedMap of state.workspacePaneViewCache.values()) {
+    for (const view of cachedMap.values()) {
+      disposeView(view);
+    }
+  }
+  state.workspacePaneViewCache.clear();
+  state._lastRenderedWorkspaceId = null;
 }
 
 function fitAllPanes() {
@@ -587,14 +600,20 @@ function writeToPane(paneId, data) {
 
 function bindViewToSession(view, sessionId) {
   const nextSession = sessionId ?? null;
-  if (view.sessionId === nextSession) {
+
+  // If same session and polling is already running, still sync PTY size
+  // (e.g. view was restored from workspace cache — size must be re-sent to server)
+  if (view.sessionId === nextSession && (view.poller || state.useStream)) {
+    syncPaneSize(view.paneId).catch(() => {});
     return;
   }
+
   const previousSession = view.sessionId;
   if (previousSession && previousSession !== nextSession) {
     clearPromptDetectorSession(previousSession);
   }
 
+  // Stop any existing polling/timers
   if (view.poller) {
     clearInterval(view.poller);
     view.poller = null;
@@ -614,7 +633,14 @@ function bindViewToSession(view, sessionId) {
   view.outputQueue = "";
   view.readBusy = false;
   view.sessionId = nextSession;
-  view.term.reset();
+
+  // If the xterm buffer already contains this session's output (e.g. returning to a workspace
+  // after the view was stashed in the workspace cache), skip term.reset() to preserve content.
+  const sameRendered = nextSession !== null && nextSession === view.renderedSessionId;
+  if (!sameRendered) {
+    view.term.reset();
+    view.renderedSessionId = nextSession;
+  }
 
   if (view.sessionId) {
     if (!state.useStream) {
@@ -649,6 +675,7 @@ function startPanePolling(view) {
         const buf = view.term.buffer.active;
         const isScrolledUp = buf.viewportY < buf.baseY;
         const savedViewportY = isScrolledUp ? buf.viewportY : null;
+        view.renderedSessionId = activeSessionId;
         view.term.write(normalizeTerminalOutput(res.output), () => {
           if (savedViewportY !== null) {
             view.term.scrollToLine(savedViewportY);
@@ -971,6 +998,7 @@ function createPaneView(paneId, host) {
     term,
     fitAddon,
     sessionId: null,
+    renderedSessionId: null,  // tracks which session's output is actually in the xterm buffer
     poller: null,
     observer: null,
     pendingInput: "",
@@ -1116,7 +1144,32 @@ function renderPaneSurface(force = false) {
     return;
   }
 
-  // Preserve existing views so scrollback buffers survive layout changes
+  // On workspace switch: stash current workspace's views into cache, restore returning workspace's views
+  const renderingWorkspaceId = state.selectedWorkspaceId;
+  if (state._lastRenderedWorkspaceId !== renderingWorkspaceId) {
+    // Save outgoing workspace's live views into cache (stop polling first)
+    if (state._lastRenderedWorkspaceId) {
+      for (const view of state.paneViews.values()) {
+        if (view.poller) { clearInterval(view.poller); view.poller = null; }
+        if (view.flushTimer) { clearTimeout(view.flushTimer); view.flushTimer = null; }
+        if (view.flushRaf) { cancelAnimationFrame(view.flushRaf); view.flushRaf = null; }
+        view.readBusy = false;
+        view.outputQueue = "";
+      }
+      state.workspacePaneViewCache.set(state._lastRenderedWorkspaceId, new Map(state.paneViews));
+      state.paneViews.clear();
+    }
+    // Restore incoming workspace's cached views (if any)
+    const cached = state.workspacePaneViewCache.get(renderingWorkspaceId);
+    if (cached) {
+      for (const [paneId, view] of cached.entries()) {
+        state.paneViews.set(paneId, view);
+      }
+    }
+    state._lastRenderedWorkspaceId = renderingWorkspaceId;
+  }
+
+  // Preserve existing views so scrollback buffers survive layout changes within same workspace
   const survivingPaneIds = new Set(leafPanes().map((p) => p.pane_id));
   const preservedViews = new Map();
   for (const [paneId, view] of state.paneViews.entries()) {
@@ -1143,9 +1196,11 @@ function renderPaneSurface(force = false) {
   for (const item of hosts) {
     const existing = state.paneViews.get(item.paneId);
     if (existing) {
-      // Reuse existing xterm — just move its host element into the new slot
-      while (existing.host.firstChild) {
-        item.host.appendChild(existing.host.firstChild);
+      // Reuse existing xterm — append xterm's own root element into the new slot.
+      // Using term.element (the .xterm div) preserves xterm's internal _element reference
+      // so fitAddon.fit() measures the correct container after workspace switch.
+      if (existing.term.element) {
+        item.host.appendChild(existing.term.element);
       }
       existing.host = item.host;
       existing.observer?.disconnect();
