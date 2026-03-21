@@ -50,6 +50,7 @@ The screenshot above shows two active workspaces with a horizontal split:
 | Pane action overflow menu (compact/tight responsive layout) | Done |
 | Pane auto-resize toggle (persisted to localStorage) | Done |
 | Terminal scrollback preserved across layout changes | Done |
+| xterm buffer cached per workspace (scrollback survives workspace switch) | Done |
 | Workspace transition guard (prevents stale async race on switch) | Done |
 | Orphan session cleanup on workspace switch | Done |
 | Git branch/dirty-flag polling (3s interval) | Done |
