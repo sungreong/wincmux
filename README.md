@@ -19,12 +19,13 @@ On macOS/Linux, developers use `tmux` or `cmux` to manage multiple terminal sess
 
 ## Screenshot
 
-The screenshot above shows two active workspaces:
-- **Left pane**: Claude Code (Sonnet 3.6) running in `C:\Users\leesu\Downloads`
-- **Right pane**: OpenAI Codex (gpt-3.5-codex) running in the same directory
-- **Toolbar**: Split H / Split V / Restart / Close / Hide Pane controls per pane
-- **Notification panel** (right): Unread count, Refresh / Mark Latest / Clear buttons
-- **Status bar** (bottom): Active pane holder ID
+The screenshot above shows two active workspaces with a horizontal split:
+- **Left pane**: Claude Code (Sonnet 4.6) running in `C:\Users\leesu\Downloads`
+- **Right pane**: Sessions dropdown open — showing AI Sessions (claude/codex resume commands) and PTY Sessions with Attach buttons
+- **Toolbar**: A- / A+ / Split H / Split V / Restart / Sessions / Close / Hide Pane controls per pane
+- **Workspace sidebar** (left): Multiple workspaces with path, branch, and dirty-flag display; Notes section at bottom
+- **Top bar**: Hide Workspaces / Show Notifications / Hidden Panes / Selected Pane ID
+- **Status bar** (bottom): Split applied: horizontal
 
 ---
 
@@ -38,7 +39,7 @@ The screenshot above shows two active workspaces:
 | SQLite-backed workspace/session/notification/layout storage | Done |
 | Notification ingest (`notify.push`) + unread tracking | Done |
 | Notification delivery ACK + suppression tracking | Done |
-| Notification dedup via `dedup_key` + schema migration (v2) | Done |
+| Notification dedup via `dedup_key` + schema migration | Done |
 | Pattern-based terminal output detection (NotifyDetector) | Done |
 | Basic pane split/focus + snapshot persistence | Done |
 | Git branch/dirty-flag polling (3s interval) | Done |
@@ -48,8 +49,14 @@ The screenshot above shows two active workspaces:
 | Native toast delivery via Electron Notification API | Done |
 | Unread badge overlay icon on taskbar | Done |
 | Notification center UI (panel, unread count, mark/clear) | Done |
-| PTY output streaming to renderer pane (real-time) | In Progress |
-| Workspace rename/pin/reorder UI controls | In Progress |
+| PTY output streaming to renderer pane (real-time) | Done |
+| Pane session restore on app restart | Done |
+| AI session auto-detection (`claude --resume`, `codex resume`) | Done |
+| Sessions dropdown — AI Sessions + PTY Sessions with Attach | Done |
+| Clipboard paste (Ctrl+V) without double-input in AI CLIs | Done |
+| Font size per-pane adjustment (A- / A+) | Done |
+| Workspace notes panel | Done |
+| Workspace rename/pin/reorder UI controls | Done |
 | Notification center filter (level/workspace) + Jump-to-unread | In Progress |
 | Portable `.exe` smoke-test automation | In Progress |
 | Embedded browser engine (WebView2 panels) | Phase 2 |
@@ -140,7 +147,9 @@ Electron Main Process
     ├── NotifyDetector (pattern-based terminal output detection)
     ├── Layout Snapshot Engine
     ├── Git Metadata Poller
-    └── SQLite Storage (schema v2 with auto-migration)
+    ├── AI Session Detector (claude/codex resume command extraction)
+    ├── Pane Session Binding (persist pane↔session across restarts)
+    └── SQLite Storage (schema v5 with auto-migration)
 ```
 
 ---
