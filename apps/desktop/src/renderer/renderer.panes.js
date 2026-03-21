@@ -111,7 +111,17 @@ function flushPaneOutput(paneId) {
 
   const chunk = view.outputQueue.slice(0, 16_384);
   view.outputQueue = view.outputQueue.slice(16_384);
-  view.term.write(normalizeTerminalOutput(chunk));
+
+  // 사용자가 스크롤을 올려서 보고 있는 중이면 write 후 위치 유지
+  const buf = view.term.buffer.active;
+  const isScrolledUp = buf.viewportY < buf.baseY;
+  const savedViewportY = isScrolledUp ? buf.viewportY : null;
+
+  view.term.write(normalizeTerminalOutput(chunk), () => {
+    if (savedViewportY !== null) {
+      view.term.scrollToLine(savedViewportY);
+    }
+  });
 
   if (view.outputQueue.length > 0) {
     view.flushRaf = window.requestAnimationFrame(() => flushPaneOutput(paneId));
@@ -427,7 +437,14 @@ function startPanePolling(view) {
       });
       if (res?.output) {
         void maybeNotifyPromptFromOutput(activeSessionId, res.output, selectedWorkspace()?.id ?? null);
-        view.term.write(normalizeTerminalOutput(res.output));
+        const buf = view.term.buffer.active;
+        const isScrolledUp = buf.viewportY < buf.baseY;
+        const savedViewportY = isScrolledUp ? buf.viewportY : null;
+        view.term.write(normalizeTerminalOutput(res.output), () => {
+          if (savedViewportY !== null) {
+            view.term.scrollToLine(savedViewportY);
+          }
+        });
       }
     } catch (err) {
       const message = String(err?.message ?? err);
@@ -655,6 +672,9 @@ function createPaneView(paneId, host) {
     fontFamily: "Cascadia Mono, D2Coding, NanumGothicCoding, Noto Sans Mono CJK KR, Malgun Gothic, Consolas, monospace",
     fontSize,
     lineHeight: 1.2,
+    scrollback: 5000,
+    scrollOnUserInput: true,
+    scrollSensitivity: 1,
     theme: {
       background: "#060b11",
       foreground: "#e8edf7"
