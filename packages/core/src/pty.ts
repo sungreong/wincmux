@@ -64,9 +64,13 @@ export class PtyManager {
     const pid = pty.pid;
     try {
       if (process.platform === "win32") {
+        // taskkill kills the process tree; skip pty.kill() afterwards to avoid
+        // AttachConsole failure in node-pty's conpty_console_list_agent when the
+        // console is already gone.
         spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+      } else {
+        pty.kill();
       }
-      pty.kill();
     } finally {
       this.sessions.delete(sessionId);
     }
