@@ -307,6 +307,66 @@ function fitAllPanes() {
   }
 }
 
+function countLeaves(node, paneMap) {
+  if (!node.split) {
+    return 1;
+  }
+  const first = paneMap.get(node.split.first);
+  const second = paneMap.get(node.split.second);
+  return (first ? countLeaves(first, paneMap) : 1) + (second ? countLeaves(second, paneMap) : 1);
+}
+
+function applyEqualFlex(node, paneMap, el) {
+  if (!node.split) {
+    return;
+  }
+  const firstChild = paneMap.get(node.split.first);
+  const secondChild = paneMap.get(node.split.second);
+  const firstLeaves = firstChild ? countLeaves(firstChild, paneMap) : 1;
+  const secondLeaves = secondChild ? countLeaves(secondChild, paneMap) : 1;
+
+  // Children of this split are the first and second .pane-split-item elements
+  const items = Array.from(el.children).filter((c) => c.classList.contains("pane-split-item"));
+  if (items.length === 2) {
+    items[0].style.flex = `${firstLeaves} 1 0`;
+    items[1].style.flex = `${secondLeaves} 1 0`;
+  }
+
+  // Recurse into sub-splits
+  if (firstChild?.split && items[0]) {
+    applyEqualFlex(firstChild, paneMap, items[0]);
+  }
+  if (secondChild?.split && items[1]) {
+    applyEqualFlex(secondChild, paneMap, items[1]);
+  }
+}
+
+function equalizePaneSizes() {
+  if (!state.panes || state.panes.length === 0) {
+    return;
+  }
+  // Reset stored ratios
+  state.splitRatios = {};
+  saveSplitRatios();
+
+  const paneMap = new Map(state.panes.map((p) => [p.pane_id, p]));
+  const root = state.panes.find((p) => p.parent_id === null);
+  if (!root) {
+    return;
+  }
+  const rootEl = paneSurface.firstElementChild;
+  if (!rootEl) {
+    return;
+  }
+  applyEqualFlex(root, paneMap, rootEl);
+
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      fitAllPanes();
+    });
+  });
+}
+
 function schedulePaneResize(view) {
   if (view.resizeTimer) {
     clearTimeout(view.resizeTimer);
@@ -477,17 +537,24 @@ function updatePaneActionLayout(paneId) {
   card.classList.toggle("pane-actions-compact", level > 0);
   card.classList.toggle("pane-actions-tight", level > 1);
 
-  const startFullLabel = meta.startBtn?.dataset?.fullLabel || meta.startBtn?.textContent || "Start";
+  const startFullLabel = meta.startBtn?.dataset?.fullLabel || "Start";
   if (meta.startBtn) {
+    const isRestart = /^restart$/i.test(startFullLabel.trim());
     if (level > 1) {
-      const isRestart = /^restart$/i.test(startFullLabel.trim());
-      meta.startBtn.textContent = isRestart ? "↻" : "▶";
+      // tight mode: icon-only with symbol (no SVG icon structure)
+      meta.startBtn.innerHTML = isRestart ? "↻" : "▶";
       meta.startBtn.classList.add("pane-btn-icon");
       meta.startBtn.title = isRestart ? "Restart" : "Start";
+      delete meta.startBtn.dataset.hasIcon;
     } else {
-      meta.startBtn.textContent = startFullLabel;
+      // normal mode: SVG icon + label
+      const iconSvg = isRestart
+        ? `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8A5 5 0 1 1 9 3.1"/><polyline points="9,1 9,4 12,4"/></svg>`
+        : `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="4,2 14,8 4,14" fill="currentColor" stroke="none" opacity="0.9"/></svg>`;
+      meta.startBtn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${iconSvg}</span><span class="pane-btn-label">${startFullLabel}</span>`;
+      meta.startBtn.dataset.hasIcon = "1";
       meta.startBtn.classList.remove("pane-btn-icon");
-      meta.startBtn.title = "";
+      meta.startBtn.title = startFullLabel;
     }
   }
 }
@@ -499,6 +566,37 @@ function setPaneAutoResizeEnabled(enabled) {
     updatePaneActionLayout(paneId);
   }
   fitAllPanes();
+}
+
+function setGlobalFontScale(scale, { resetPerPane = false } = {}) {
+  const clamped = Math.max(70, Math.min(150, Number(scale) || 100));
+  state.globalFontScale = clamped;
+  localStorage.setItem(STORAGE_KEYS.globalFontScale, String(clamped));
+
+  if (resetPerPane) {
+    state.paneFontSizes = {};
+    persistPaneFontSizes();
+  }
+
+  // Apply: default × scale% for all panes, ignoring per-pane stored delta
+  const targetSize = clampPaneFontSize(Math.round(PANE_FONT_LIMITS.default * clamped / 100));
+  for (const [paneId, view] of state.paneViews.entries()) {
+    // Update stored size so per-pane Font+/- works relative to scaled base
+    if (state.selectedWorkspaceId) {
+      setPaneFontSize(state.selectedWorkspaceId, paneId, targetSize);
+    }
+    if (Number(view.term.options.fontSize) !== targetSize) {
+      view.term.options.fontSize = targetSize;
+      view.fitAddon.fit();
+      schedulePaneResize(view);
+    }
+  }
+
+  // Sync select element
+  const sel = document.getElementById("fontScaleSelect");
+  if (sel) {
+    sel.value = String(clamped);
+  }
 }
 
 async function syncPaneSize(paneId) {
@@ -780,62 +878,117 @@ function createPaneLeaf(node, hosts) {
   actionsOverflowMenu.className = "pane-overflow-menu";
   actionsOverflowWrap.append(actionsOverflowBtn, actionsOverflowMenu);
   actions.append(actionsPrimary);
-  const makeBtn = (text, title, onClick, cls = "pane-btn") => {
+  const makeBtn = (text, title, onClick, cls = "pane-btn", iconHtml = "") => {
     const btn = document.createElement("button");
     btn.className = cls;
-    btn.textContent = text;
-    if (title) {
-      btn.title = title;
+    if (iconHtml) {
+      btn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${iconHtml}</span><span class="pane-btn-label">${text}</span>`;
+      btn.dataset.hasIcon = "1";
+    } else {
+      btn.textContent = text;
     }
+    btn.title = title || text;
     btn.addEventListener("click", onClick);
     return btn;
   };
-  const fontDownBtn = makeBtn("A-", "Decrease font size", (ev) => {
+  const fontDownBtn = makeBtn("Font −", "Decrease font size", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.adjustPaneFont(paneId, -PANE_FONT_LIMITS.step).catch((err) => setStatus(String(err), true));
-  });
-  const fontUpBtn = makeBtn("A+", "Increase font size", (ev) => {
+  }, "pane-btn",
+    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+      <text x="1" y="11" font-size="8" font-family="sans-serif" stroke="none" fill="currentColor" font-weight="bold">A</text>
+      <text x="9" y="14" font-size="6" font-family="sans-serif" stroke="none" fill="currentColor">a</text>
+      <line x1="6" y1="13" x2="10" y2="13"/>
+    </svg>`
+  );
+  const fontUpBtn = makeBtn("Font +", "Increase font size", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.adjustPaneFont(paneId, PANE_FONT_LIMITS.step).catch((err) => setStatus(String(err), true));
-  });
-  const splitHBtn = makeBtn("Split H", "Split horizontally", (ev) => {
+  }, "pane-btn",
+    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+      <text x="1" y="11" font-size="8" font-family="sans-serif" stroke="none" fill="currentColor" font-weight="bold">A</text>
+      <text x="9" y="14" font-size="6" font-family="sans-serif" stroke="none" fill="currentColor">a</text>
+      <line x1="8" y1="11" x2="8" y2="15"/>
+      <line x1="6" y1="13" x2="10" y2="13"/>
+    </svg>`
+  );
+  const splitHBtn = makeBtn("Split Right", "Split horizontally (add column)", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.splitPane(paneId, "horizontal").catch((err) => setStatus(String(err), true));
-  });
-  const splitVBtn = makeBtn("Split V", "Split vertically", (ev) => {
+  }, "pane-btn",
+    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+      <rect x="1" y="2" width="14" height="12" rx="1.5"/>
+      <line x1="8" y1="2" x2="8" y2="14"/>
+      <line x1="11" y1="7" x2="11" y2="9"/>
+      <line x1="10" y1="8" x2="12" y2="8"/>
+    </svg>`
+  );
+  const splitVBtn = makeBtn("Split Down", "Split vertically (add row)", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.splitPane(paneId, "vertical").catch((err) => setStatus(String(err), true));
-  });
-  const startBtn = makeBtn("Start", "", (ev) => {
+  }, "pane-btn",
+    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+      <rect x="1" y="2" width="14" height="12" rx="1.5"/>
+      <line x1="1" y1="9" x2="15" y2="9"/>
+      <line x1="7" y1="12" x2="9" y2="12"/>
+      <line x1="8" y1="11" x2="8" y2="13"/>
+    </svg>`
+  );
+  const startBtn = makeBtn("Start", "Start session", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.startSessionForPane(paneId, { force: true }).catch((err) => setStatus(String(err), true));
-  });
-  const sessionPickerBtn = makeBtn("Sessions v", "View and attach session history", (ev) => {
+  }, "pane-btn");
+  startBtn.dataset.fullLabel = "Start";
+  const sessionPickerBtn = makeBtn("Sessions", "View and attach session history", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     openSessionPicker(paneId, sessionPickerBtn);
-  });
+  }, "pane-btn",
+    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+      <rect x="2" y="2" width="12" height="3" rx="1"/>
+      <rect x="2" y="7" width="12" height="3" rx="1"/>
+      <line x1="2" y1="13" x2="10" y2="13"/>
+      <polyline points="11,12 13,14 15,11" stroke-width="1.5"/>
+    </svg>`
+  );
   sessionPickerBtn.className = "pane-btn session-picker-btn";
-  const closeBtn = makeBtn("Close", "", (ev) => {
+  const closeBtn = makeBtn("Close Session", "", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.closeSessionForPane(paneId).catch((err) => setStatus(String(err), true));
-  });
+  }, "pane-btn",
+    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+      <rect x="2" y="3" width="12" height="10" rx="1.5"/>
+      <line x1="6" y1="7" x2="10" y2="9"/>
+      <line x1="10" y1="7" x2="6" y2="9"/>
+    </svg>`
+  );
   const closePaneBtn = makeBtn("Close Pane", "", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.closePane(paneId).catch((err) => setStatus(String(err), true));
-  }, "pane-btn pane-btn-danger");
+  }, "pane-btn pane-btn-danger",
+    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+      <polyline points="2,4 8,2 14,4 14,13 8,15 2,13"/>
+      <line x1="8" y1="2" x2="8" y2="15"/>
+      <line x1="5" y1="8" x2="11" y2="8"/>
+    </svg>`
+  );
   const hidePaneBtn = makeBtn("Hide Pane", "Hide this pane without ending session", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.hidePane(paneId).catch((err) => setStatus(String(err), true));
-  });
+  }, "pane-btn",
+    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+      <path d="M1 8 C4 4 12 4 15 8"/>
+      <line x1="2" y1="3" x2="14" y2="13"/>
+    </svg>`
+  );
   const quickBtn = makeBtn("", "Quick command", () => {});
   quickBtn.classList.add("quickcmd-toggle");
   quickBtn.setAttribute("aria-label", "Quick command");
@@ -1327,12 +1480,10 @@ function refreshPaneBindings() {
       if (sessionId) {
         const session = runningMap.get(sessionId);
         meta.statusEl.textContent = session ? `Running - pid ${session.pid}` : "Attached";
-        meta.startBtn.textContent = "Restart";
         meta.startBtn.dataset.fullLabel = "Restart";
         meta.closeBtn.disabled = false;
       } else {
         meta.statusEl.textContent = "No session";
-        meta.startBtn.textContent = "Start";
         meta.startBtn.dataset.fullLabel = "Start";
         meta.closeBtn.disabled = true;
       }
@@ -1683,4 +1834,6 @@ globalThis.renderPaneSurface = renderPaneSurface;
 globalThis.refreshPaneBindings = refreshPaneBindings;
 globalThis.selectPane = selectPane;
 globalThis.fitAllPanes = fitAllPanes;
+globalThis.equalizePaneSizes = equalizePaneSizes;
+globalThis.setGlobalFontScale = setGlobalFontScale;
 globalThis.writeToPane = writeToPane;

@@ -18,7 +18,8 @@ const STORAGE_KEYS = {
   quickPresetSeedVersion: "wincmux.quickPresets.seedVersion",
   rendererPromptFallback: "wincmux.features.rendererPromptFallback",
   selectedWorkspaceId: "wincmux.selectedWorkspaceId",
-  workspaceNotes: "wincmux.workspaceNotes"
+  workspaceNotes: "wincmux.workspaceNotes",
+  globalFontScale: "wincmux.globalFontScale"
 };
 
 function parseStoredMap(storageKey) {
@@ -243,6 +244,7 @@ const state = {
   splitRatios: parseStoredMap(STORAGE_KEYS.splitRatios),
   paneFontSizes: parseStoredMap(STORAGE_KEYS.paneFontSizes),
   paneAutoResize: localStorage.getItem(STORAGE_KEYS.paneAutoResize) !== "0",
+  globalFontScale: Number(localStorage.getItem(STORAGE_KEYS.globalFontScale) ?? 100),
   workspaceNotes: parseStoredMap(STORAGE_KEYS.workspaceNotes),
   hiddenPanesByWorkspace: {},
   quickPresets: loadQuickPresets(),
@@ -300,6 +302,9 @@ const wsPathInput = $("wsPathInput");
 const openInVscodeBtn = $("openInVscodeBtn");
 const toggleWorkspacePanelBtn = $("toggleWorkspacePanelBtn");
 const toggleNotificationPanelBtn = $("toggleNotificationPanelBtn");
+const equalizePanesBtn = $("equalizePanesBtn");
+const fontScaleSelect = $("fontScaleSelect");
+const fontScaleResetBtn = $("fontScaleResetBtn");
 
 function setStatus(message, isError = false, options = {}) {
   const now = Date.now();
@@ -654,18 +659,22 @@ function applyPanelWidths() {
   appGrid.style.setProperty("--right-panel-width", `${right}px`);
 }
 
+function setToolbarBtnLabel(btn, text) {
+  if (!btn) return;
+  const span = btn.querySelector(".toolbar-btn-label") ?? btn;
+  span.textContent = text;
+}
+
 function applyPanelVisibility() {
   appGrid.classList.toggle("left-collapsed", state.leftCollapsed);
   appGrid.classList.toggle("right-collapsed", state.rightCollapsed);
 
-  if (toggleWorkspacePanelBtn) {
-    toggleWorkspacePanelBtn.textContent = state.leftCollapsed ? "Show Workspaces" : "Hide Workspaces";
-  }
+  setToolbarBtnLabel(toggleWorkspacePanelBtn, state.leftCollapsed ? "Show Workspaces" : "Hide Workspaces");
   if (toggleNotificationPanelBtn) {
     const unread = state.notifications.length;
-    toggleNotificationPanelBtn.textContent = state.rightCollapsed
+    setToolbarBtnLabel(toggleNotificationPanelBtn, state.rightCollapsed
       ? `Show Notifications (${unread})`
-      : "Hide Notifications";
+      : "Hide Notifications");
   }
 }
 
@@ -900,9 +909,7 @@ function renderWorkspaces() {
     });
     workspaceList.appendChild(li);
   }
-  if (toggleWorkspacePanelBtn) {
-    toggleWorkspacePanelBtn.textContent = state.leftCollapsed ? "Show Workspaces" : "Hide Workspaces";
-  }
+  setToolbarBtnLabel(toggleWorkspacePanelBtn, state.leftCollapsed ? "Show Workspaces" : "Hide Workspaces");
   if (openInVscodeBtn) {
     openInVscodeBtn.disabled = !selectedWorkspace();
   }
@@ -923,11 +930,7 @@ function renderNotifications() {
     empty.textContent = "No unread notifications";
     notificationList.appendChild(empty);
     notifTitle.textContent = "Notifications (0 unread)";
-    if (toggleNotificationPanelBtn) {
-      toggleNotificationPanelBtn.textContent = state.rightCollapsed
-        ? "Show Notifications (0)"
-        : "Hide Notifications";
-    }
+    setToolbarBtnLabel(toggleNotificationPanelBtn, state.rightCollapsed ? "Show Notifications (0)" : "Hide Notifications");
     return;
   }
 
@@ -978,9 +981,7 @@ function renderNotifications() {
   }
 
   notifTitle.textContent = `Notifications (${state.notifications.length} unread)`;
-  if (toggleNotificationPanelBtn) {
-    toggleNotificationPanelBtn.textContent = state.rightCollapsed
-      ? `Show Notifications (${state.notifications.length})`
-      : "Hide Notifications";
-  }
+  setToolbarBtnLabel(toggleNotificationPanelBtn, state.rightCollapsed
+    ? `Show Notifications (${state.notifications.length})`
+    : "Hide Notifications");
 }

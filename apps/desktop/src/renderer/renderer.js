@@ -86,6 +86,16 @@ const paneApi = {
       globalThis.fitAllPanes();
     }
   },
+  equalizePaneSizes: () => {
+    if (typeof globalThis.equalizePaneSizes === "function") {
+      globalThis.equalizePaneSizes();
+    }
+  },
+  setGlobalFontScale: (scale, opts) => {
+    if (typeof globalThis.setGlobalFontScale === "function") {
+      globalThis.setGlobalFontScale(scale, opts);
+    }
+  },
   writeToPane: (...args) => {
     if (typeof globalThis.writeToPane === "function") {
       globalThis.writeToPane(...args);
@@ -1508,7 +1518,96 @@ function bindEvents() {
   toggleNotificationPanelBtn.addEventListener("click", () =>
     toggleNotificationPanel(),
   );
+  if (equalizePanesBtn) {
+    equalizePanesBtn.addEventListener("click", () => {
+      paneApi.equalizePaneSizes();
+      setStatus("Pane sizes equalized");
+    });
+  }
+  if (fontScaleSelect) {
+    fontScaleSelect.addEventListener("change", () => {
+      const scale = Number(fontScaleSelect.value);
+      if (scale) {
+        paneApi.setGlobalFontScale(scale);
+      }
+    });
+  }
+  if (fontScaleResetBtn) {
+    fontScaleResetBtn.addEventListener("click", () => {
+      paneApi.setGlobalFontScale(100, { resetPerPane: true });
+      setStatus("Font sizes reset to default");
+    });
+  }
   bindWsInfoPanel();
+  bindKeyboardShortcuts();
+}
+
+const FONT_SCALE_STEPS = [80, 85, 90, 95, 100, 110, 120];
+
+function bindKeyboardShortcuts() {
+  document.addEventListener("keydown", (ev) => {
+    // Skip if focus is inside a text input / textarea (but NOT xterm canvas)
+    const tag = document.activeElement?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+    const ctrl = ev.ctrlKey || ev.metaKey;
+    const shift = ev.shiftKey;
+
+    // Ctrl+B — toggle Workspace panel
+    if (ctrl && !shift && ev.key === "b") {
+      ev.preventDefault();
+      toggleWorkspacePanel();
+      return;
+    }
+
+    // Ctrl+Shift+N — toggle Notifications panel
+    if (ctrl && shift && ev.key === "N") {
+      ev.preventDefault();
+      toggleNotificationPanel();
+      return;
+    }
+
+    // Ctrl+Shift+H — toggle Hidden Panes popover
+    if (ctrl && shift && ev.key === "H") {
+      ev.preventDefault();
+      hiddenPanesBtn?.click();
+      return;
+    }
+
+    // Ctrl+Shift+E — equalize panes
+    if (ctrl && shift && ev.key === "E") {
+      ev.preventDefault();
+      paneApi.equalizePaneSizes();
+      setStatus("Pane sizes equalized");
+      return;
+    }
+
+    // Ctrl+= or Ctrl+Shift+= — font scale up (next step)
+    if (ctrl && (ev.code === "Equal" || ev.code === "NumpadAdd")) {
+      ev.preventDefault();
+      const cur = state.globalFontScale;
+      const next = FONT_SCALE_STEPS.find((s) => s > cur) ?? FONT_SCALE_STEPS.at(-1);
+      paneApi.setGlobalFontScale(next);
+      return;
+    }
+
+    // Ctrl+- or Ctrl+Shift+- — font scale down (prev step)
+    if (ctrl && (ev.code === "Minus" || ev.code === "NumpadSubtract")) {
+      ev.preventDefault();
+      const cur = state.globalFontScale;
+      const prev = [...FONT_SCALE_STEPS].reverse().find((s) => s < cur) ?? FONT_SCALE_STEPS[0];
+      paneApi.setGlobalFontScale(prev);
+      return;
+    }
+
+    // Ctrl+0 — font scale reset
+    if (ctrl && !shift && ev.code === "Digit0") {
+      ev.preventDefault();
+      paneApi.setGlobalFontScale(100, { resetPerPane: true });
+      setStatus("Font sizes reset to default");
+      return;
+    }
+  });
 }
 async function bootstrap() {
   try {
@@ -1519,6 +1618,10 @@ async function bootstrap() {
     applyPanelVisibility();
     initResizeHandles(() => paneApi.fitAllPanes());
     bindEvents();
+    // Restore saved font scale selection
+    if (fontScaleSelect) {
+      fontScaleSelect.value = String(state.globalFontScale);
+    }
     bindNotepadEvents();
     loadNotepadForWorkspace(state.selectedWorkspaceId);
     const paneHandlersBound = paneApi.setPaneHandlers({

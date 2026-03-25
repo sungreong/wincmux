@@ -230,6 +230,69 @@ button:disabled {
   padding-bottom: 2px;
   row-gap: 6px;
   position: relative;
+  align-items: center;
+}
+
+.toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.toolbar-btn-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+.toolbar-divider {
+  width: 1px;
+  height: 22px;
+  background: var(--border);
+  margin: 0 2px;
+  flex-shrink: 0;
+}
+
+.font-scale-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.font-scale-select {
+  background: #18283b;
+  border: 1px solid #355069;
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 4px 6px;
+  cursor: pointer;
+  outline: none;
+}
+
+.font-scale-select:hover {
+  filter: brightness(1.12);
+}
+
+.font-scale-select:focus {
+  border-color: var(--accent);
+}
+
+.font-scale-reset-btn {
+  padding: 4px 6px;
+  opacity: 0.7;
+}
+
+.font-scale-reset-btn:hover {
+  opacity: 1;
+}
+
+.toolbar-pane-label {
+  margin-left: 4px;
 }
 
 ul {
@@ -610,8 +673,58 @@ li.active .ws-rename-btn {
 }
 
 .pane-overflow-menu .pane-btn {
-  width: 100%;
+  width: 100% !important;
+  min-width: 0 !important;
   text-align: left;
+  display: flex !important;
+  align-items: center;
+  justify-content: flex-start !important;
+  gap: 8px;
+  padding: 5px 8px !important;
+}
+
+/* overflow menu: always show label and reset primary-bar icon-only sizing */
+.pane-overflow-menu .pane-btn .pane-btn-label {
+  display: inline-block !important;
+  flex: 1;
+}
+
+/* overflow menu: indent icon-less buttons to align text with icon+label buttons */
+.pane-overflow-menu .pane-btn:not([data-has-icon="1"]) {
+  padding-left: calc(16px + 8px + 8px) !important;
+}
+
+/* primary bar: icon-only for buttons that have an icon */
+.pane-actions-primary .pane-btn[data-has-icon="1"] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  width: 32px;
+  padding: 5px 0;
+}
+
+.pane-actions-primary .pane-btn[data-has-icon="1"] .pane-btn-label {
+  display: none;
+}
+
+.pane-btn-icon-svg {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  opacity: 0.85;
+}
+
+.pane-btn-icon-svg svg {
+  width: 16px;
+  height: 16px;
+}
+
+.pane-btn-label {
+  flex: 1;
 }
 
 .pane-btn-auto {
@@ -898,9 +1011,14 @@ li.active .ws-rename-btn {
     grid-template-columns: minmax(200px, var(--left-panel-width)) 6px minmax(0, 1fr) 6px minmax(220px, var(--right-panel-width));
   }
 
-  .toolbar button {
-    padding: 6px 9px;
-    font-size: 13px;
+  .toolbar-btn {
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+
+  .font-scale-select {
+    font-size: 11px;
+    padding: 3px 5px;
   }
 
   .notif-actions {

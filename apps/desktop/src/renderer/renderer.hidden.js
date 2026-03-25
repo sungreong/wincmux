@@ -199,7 +199,7 @@ function renderHiddenPanesPopover() {
 
 function refreshHiddenPanesUi() {
   if (hiddenPanesBtn) {
-    hiddenPanesBtn.textContent = `Hidden Panes (${hiddenPanesForWorkspace().length})`;
+    setToolbarBtnLabel(hiddenPanesBtn, `Hidden Panes (${hiddenPanesForWorkspace().length})`);
   }
   if (hiddenPanesPopover?.classList.contains("open")) {
     renderHiddenPanesPopover();
