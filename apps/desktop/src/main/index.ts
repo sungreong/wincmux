@@ -2,6 +2,7 @@ import path from "node:path";
 import net from "node:net";
 import fs from "node:fs";
 import os from "node:os";
+import zlib from "node:zlib";
 import { pathToFileURL } from "node:url";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { app, BrowserWindow, ipcMain, dialog, clipboard, Menu, shell, nativeImage, Notification as ElectronNotification, type NativeImage, type OpenDialogOptions, type WebContents } from "electron";
@@ -41,14 +42,18 @@ type IpcEnvelope<T> =
   | { ok: false; error: string };
 
 const PIPE_NAME = "\\\\.\\pipe\\wincmux-rpc";
+const APP_USER_MODEL_ID = "ai.manaflow.wincmux";
 let coreProc: ChildProcess | null = null;
 let coreExitReason: string | null = null;
 let coreStderrTail = "";
 let coreRuntimeHint = "";
 const streamConnections = new Map<string, { socket: net.Socket; subscriptionId: string; webContents: WebContents }>();
 let streamRequestSeq = 1;
+let rpcRequestSeq = 1;
 let unreadBadgeCount = 0;
 const badgeIconCache = new Map<string, NativeImage>();
+let badgeReapplyTimers: NodeJS.Timeout[] = [];
+const activeNotificationToasts = new Map<string, ElectronNotification>();
 let appWindowIcon: NativeImage | null = null;
 let notifyStreamSocket: net.Socket | null = null;
 let notifyStreamSubscriptionId: string | null = null;
@@ -87,19 +92,10 @@ function normalizeUnreadCount(input: unknown): number {
 }
 
 function badgeLabel(count: number): string {
-  if (count >= 100) {
-    return "99+";
+  if (count >= 10) {
+    return "9+";
   }
   return String(count);
-}
-
-function escapeSvgText(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
 }
 
 function overlayIconForCount(count: number): NativeImage | null {
@@ -113,18 +109,144 @@ function overlayIconForCount(count: number): NativeImage | null {
     return cached;
   }
 
-  const text = escapeSvgText(label);
-  const fontSize = label.length >= 3 ? 12 : 15;
-  const svg = `
-<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32">
-  <circle cx="16" cy="16" r="15" fill="#d94848" />
-  <text x="16" y="21" text-anchor="middle" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="${fontSize}" font-weight="700">${text}</text>
-</svg>`.trim();
-
-  const dataUrl = `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
-  const icon = nativeImage.createFromDataURL(dataUrl).resize({ width: 16, height: 16 });
+  const icon = nativeImage.createFromBuffer(renderBadgePng(label));
   badgeIconCache.set(label, icon);
   return icon;
+}
+
+const DIGITS: Record<string, string[]> = {
+  "0": ["111", "101", "101", "101", "111"],
+  "1": ["010", "110", "010", "010", "111"],
+  "2": ["111", "001", "111", "100", "111"],
+  "3": ["111", "001", "111", "001", "111"],
+  "4": ["101", "101", "111", "001", "001"],
+  "5": ["111", "100", "111", "001", "111"],
+  "6": ["111", "100", "111", "101", "111"],
+  "7": ["111", "001", "010", "010", "010"],
+  "8": ["111", "101", "111", "101", "111"],
+  "9": ["111", "101", "111", "001", "111"],
+  "+": ["010", "010", "111", "010", "010"]
+};
+
+function renderBadgePng(label: string): Buffer {
+  const size = 16;
+  const rgba = Buffer.alloc(size * size * 4);
+  const centerX = 10.7;
+  const centerY = 10.7;
+  const radius = 5.2;
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const idx = (y * size + x) * 4;
+      const dx = x + 0.5 - centerX;
+      const dy = y + 0.5 - centerY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist <= radius) {
+        rgba[idx] = 229;
+        rgba[idx + 1] = 72;
+        rgba[idx + 2] = 77;
+        rgba[idx + 3] = 255;
+      }
+      if (dist >= radius - 1.2 && dist <= radius) {
+        rgba[idx] = 255;
+        rgba[idx + 1] = 255;
+        rgba[idx + 2] = 255;
+        rgba[idx + 3] = 255;
+      }
+    }
+  }
+
+  const text = label.length > 2 ? "9+" : label;
+  const fallbackGlyph = DIGITS["0"] ?? ["111", "101", "101", "101", "111"];
+  const glyphs = [...text].map((ch) => DIGITS[ch] ?? fallbackGlyph);
+  const scale = 1;
+  const glyphWidth = 3 * scale;
+  const glyphHeight = 5 * scale;
+  const totalWidth = glyphs.length * glyphWidth + Math.max(0, glyphs.length - 1) * scale;
+  const startX = Math.max(1, Math.round(centerX - totalWidth / 2));
+  const startY = Math.round(centerY - glyphHeight / 2);
+
+  glyphs.forEach((glyph, glyphIndex) => {
+    const glyphX = startX + glyphIndex * (glyphWidth + scale);
+    for (let gy = 0; gy < glyph.length; gy += 1) {
+      const row = glyph[gy] ?? "";
+      for (let gx = 0; gx < row.length; gx += 1) {
+        if (row[gx] !== "1") {
+          continue;
+        }
+        for (let sy = 0; sy < scale; sy += 1) {
+          for (let sx = 0; sx < scale; sx += 1) {
+            const x = glyphX + gx * scale + sx;
+            const y = startY + gy * scale + sy;
+            if (x < 0 || x >= size || y < 0 || y >= size) {
+              continue;
+            }
+            const idx = (y * size + x) * 4;
+            rgba[idx] = 255;
+            rgba[idx + 1] = 255;
+            rgba[idx + 2] = 255;
+            rgba[idx + 3] = 255;
+          }
+        }
+      }
+    }
+  });
+
+  return encodePng(size, size, rgba);
+}
+
+function encodePng(width: number, height: number, rgba: Buffer): Buffer {
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+
+  const stride = width * 4;
+  const raw = Buffer.alloc((stride + 1) * height);
+  for (let y = 0; y < height; y += 1) {
+    raw[y * (stride + 1)] = 0;
+    rgba.copy(raw, y * (stride + 1) + 1, y * stride, y * stride + stride);
+  }
+
+  return Buffer.concat([
+    signature,
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", zlib.deflateSync(raw)),
+    pngChunk("IEND", Buffer.alloc(0))
+  ]);
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const typeBuffer = Buffer.from(type, "ascii");
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length, 0);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([typeBuffer, data])), 0);
+  return Buffer.concat([length, typeBuffer, data, crc]);
+}
+
+let crcTable: number[] | null = null;
+
+function crc32(buffer: Buffer): number {
+  if (!crcTable) {
+    crcTable = Array.from({ length: 256 }, (_, index) => {
+      let c = index;
+      for (let k = 0; k < 8; k += 1) {
+        c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+      }
+      return c >>> 0;
+    });
+  }
+  const table = crcTable;
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc = ((table[(crc ^ byte) & 0xff] ?? 0) ^ (crc >>> 8)) >>> 0;
+  }
+  return (crc ^ 0xffffffff) >>> 0;
 }
 
 function createTerminalAppIcon(): NativeImage | null {
@@ -195,7 +317,18 @@ function broadcastToAllWindows(channel: string, payload: unknown): void {
 
 function applyUnreadBadge(count: number): void {
   unreadBadgeCount = normalizeUnreadCount(count);
+  if (app.isReady()) {
+    app.setBadgeCount(unreadBadgeCount);
+  }
 
+  cancelBadgeReapplyTimers();
+  applyUnreadBadgeToWindows();
+  if (unreadBadgeCount > 0) {
+    scheduleUnreadBadgeReapply();
+  }
+}
+
+function applyUnreadBadgeToWindows(): void {
   if (process.platform !== "win32") {
     return;
   }
@@ -208,6 +341,23 @@ function applyUnreadBadge(count: number): void {
     }
     win.setOverlayIcon(icon, description);
   }
+}
+
+function scheduleUnreadBadgeReapply(): void {
+  cancelBadgeReapplyTimers();
+  if (process.platform !== "win32") {
+    return;
+  }
+  for (const delay of [150, 750, 2000]) {
+    badgeReapplyTimers.push(setTimeout(() => applyUnreadBadgeToWindows(), delay));
+  }
+}
+
+function cancelBadgeReapplyTimers(): void {
+  for (const timer of badgeReapplyTimers) {
+    clearTimeout(timer);
+  }
+  badgeReapplyTimers = [];
 }
 
 function createWindow(): void {
@@ -232,6 +382,8 @@ function createWindow(): void {
   win.on("blur", () => {
     activeContext.app_focused = false;
   });
+  win.on("show", () => applyUnreadBadge(unreadBadgeCount));
+  win.webContents.once("did-finish-load", () => applyUnreadBadge(unreadBadgeCount));
   applyUnreadBadge(unreadBadgeCount);
 }
 
@@ -244,42 +396,147 @@ function toIpcEnvelope<T>(fn: () => Promise<T>): Promise<IpcEnvelope<T>> {
     }));
 }
 
-function pipeCallOnce(payload: RpcPayload): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const client = net.createConnection(PIPE_NAME);
-    let buffer = "";
+class PipeRpcClient {
+  private socket: net.Socket | null = null;
+  private buffer = "";
+  private connecting: Promise<void> | null = null;
+  private readonly pending = new Map<number, {
+    resolve: (value: unknown) => void;
+    reject: (err: Error) => void;
+    timer: NodeJS.Timeout;
+  }>();
 
-    client.once("error", reject);
+  async call(payload: RpcPayload): Promise<unknown> {
+    await this.ensureConnected();
+    const socket = this.socket;
+    if (!socket || socket.destroyed) {
+      throw Object.assign(new Error("core pipe is not connected"), { code: "ENOENT" });
+    }
 
-    client.on("data", (chunk: Buffer) => {
-      buffer += chunk.toString("utf8");
-      if (!buffer.includes("\n")) {
-        return;
+    const requestId = rpcRequestSeq++;
+    const request = {
+      jsonrpc: "2.0",
+      id: requestId,
+      method: payload.method,
+      params: payload.params ?? {}
+    };
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(requestId);
+        reject(new Error(`RPC timeout: ${payload.method}`));
+      }, 15_000);
+      this.pending.set(requestId, { resolve, reject, timer });
+      try {
+        socket.write(`${JSON.stringify(request)}\n`);
+      } catch (err) {
+        clearTimeout(timer);
+        this.pending.delete(requestId);
+        reject(err instanceof Error ? err : new Error(String(err)));
       }
-      const line = buffer.split("\n")[0]?.trim() ?? "";
-      client.end();
-      if (!line) {
-        reject(new Error("empty response"));
-        return;
-      }
-      const response = JSON.parse(line) as { result?: unknown; error?: { message: string } };
-      if (response.error) {
-        reject(new Error(response.error.message));
-        return;
-      }
-      resolve(response.result);
     });
+  }
 
-    client.on("connect", () => {
-      const request = {
-        jsonrpc: "2.0",
-        id: Date.now(),
-        method: payload.method,
-        params: payload.params ?? {}
+  destroy(): void {
+    this.rejectAll(new Error("core pipe disconnected"));
+    if (this.socket && !this.socket.destroyed) {
+      this.socket.destroy();
+    }
+    this.socket = null;
+    this.buffer = "";
+    this.connecting = null;
+  }
+
+  private ensureConnected(): Promise<void> {
+    if (this.socket && !this.socket.destroyed) {
+      return Promise.resolve();
+    }
+    if (this.connecting) {
+      return this.connecting;
+    }
+
+    this.connecting = new Promise((resolve, reject) => {
+      const socket = net.createConnection(PIPE_NAME);
+      let settled = false;
+      const finish = (fn: () => void) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        fn();
       };
-      client.write(`${JSON.stringify(request)}\n`);
+
+      socket.once("connect", () => {
+        this.socket = socket;
+        this.buffer = "";
+        this.connecting = null;
+        finish(resolve);
+      });
+      socket.once("error", (err) => {
+        this.connecting = null;
+        socket.destroy();
+        finish(() => reject(err));
+      });
+      socket.on("close", () => {
+        if (this.socket === socket) {
+          this.socket = null;
+          this.buffer = "";
+        }
+        this.rejectAll(new Error("core pipe disconnected"));
+      });
+      socket.on("data", (chunk: Buffer) => this.handleData(chunk));
     });
-  });
+
+    return this.connecting;
+  }
+
+  private handleData(chunk: Buffer): void {
+    this.buffer += chunk.toString("utf8");
+    let index = this.buffer.indexOf("\n");
+    while (index >= 0) {
+      const line = this.buffer.slice(0, index).trim();
+      this.buffer = this.buffer.slice(index + 1);
+      if (line.length > 0) {
+        this.handleLine(line);
+      }
+      index = this.buffer.indexOf("\n");
+    }
+  }
+
+  private handleLine(line: string): void {
+    let response: { id?: unknown; result?: unknown; error?: { message?: string } };
+    try {
+      response = JSON.parse(line) as { id?: unknown; result?: unknown; error?: { message?: string } };
+    } catch {
+      return;
+    }
+    const id = Number(response.id);
+    const pending = Number.isFinite(id) ? this.pending.get(id) : null;
+    if (!pending) {
+      return;
+    }
+    this.pending.delete(id);
+    clearTimeout(pending.timer);
+    if (response.error) {
+      pending.reject(new Error(response.error.message ?? "RPC failed"));
+      return;
+    }
+    pending.resolve(response.result);
+  }
+
+  private rejectAll(err: Error): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(err);
+    }
+    this.pending.clear();
+  }
+}
+
+const rpcClient = new PipeRpcClient();
+
+function pipeCallOnce(payload: RpcPayload): Promise<unknown> {
+  return rpcClient.call(payload);
 }
 
 async function pipeCall(payload: RpcPayload, attempt = 0): Promise<unknown> {
@@ -287,7 +544,8 @@ async function pipeCall(payload: RpcPayload, attempt = 0): Promise<unknown> {
     return await pipeCallOnce(payload);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" && attempt < 3) {
+    const message = err instanceof Error ? err.message : String(err);
+    if ((code === "ENOENT" || message.includes("core pipe disconnected")) && attempt < 3) {
       await respawnCore().catch(() => {});
       await new Promise<void>((r) => setTimeout(r, 150 * (attempt + 1)));
       return pipeCall(payload, attempt + 1);
@@ -406,6 +664,35 @@ async function ackNotificationDelivery(notificationId: string, delivered: boolea
   }).catch(() => {});
 }
 
+async function refreshUnreadBadgeFromCore(): Promise<void> {
+  const result = await pipeCall({
+    method: "notify.unread",
+    params: {}
+  });
+  const count = typeof result === "object" && result !== null && "count" in result
+    ? Number((result as { count?: unknown }).count)
+    : NaN;
+  if (Number.isFinite(count)) {
+    applyUnreadBadge(count);
+  }
+}
+
+function dismissNotificationToasts(ids?: string[]): void {
+  const targetIds = ids?.length ? ids : [...activeNotificationToasts.keys()];
+  for (const id of targetIds) {
+    const toast = activeNotificationToasts.get(id);
+    if (!toast) {
+      continue;
+    }
+    activeNotificationToasts.delete(id);
+    try {
+      toast.close();
+    } catch {
+      // Windows may have already dismissed this toast.
+    }
+  }
+}
+
 async function handleNotifyCreated(notification: NotificationRecord): Promise<void> {
   if (!notification?.id) {
     return;
@@ -424,6 +711,12 @@ async function handleNotifyCreated(notification: NotificationRecord): Promise<vo
     toast.on("show", () => {
       void ackNotificationDelivery(notification.id, true, false);
     });
+    toast.once("close", () => {
+      activeNotificationToasts.delete(notification.id);
+    });
+    toast.once("failed", () => {
+      activeNotificationToasts.delete(notification.id);
+    });
     toast.on("click", () => {
       for (const win of BrowserWindow.getAllWindows()) {
         if (win.isDestroyed()) {
@@ -435,14 +728,17 @@ async function handleNotifyCreated(notification: NotificationRecord): Promise<vo
         win.show();
         win.focus();
         win.webContents.send("wincmux:notification-open", {
-          notification_id: notification.id
+          notification_id: notification.id,
+          notification
         });
       }
     });
+    activeNotificationToasts.set(notification.id, toast);
     toast.show();
   }
 
   applyUnreadBadge(unreadBadgeCount + 1);
+  void refreshUnreadBadgeFromCore().catch(() => {});
 
   // Flash taskbar icon when app is not focused
   if (!activeContext.app_focused) {
@@ -651,6 +947,7 @@ function resolveFallbackCoreRuntime(): { command: string; env: NodeJS.ProcessEnv
 }
 
 function startCoreProcess(entry: string, runtime: { command: string; env: NodeJS.ProcessEnv }): void {
+  rpcClient.destroy();
   if (coreProc && !coreProc.killed) {
     coreProc.kill();
   }
@@ -941,6 +1238,19 @@ function registerIpcHandlers(): void {
     applyUnreadBadge(payload?.count ?? 0);
     return { ok: true };
   });
+  ipcMain.handle("wincmux:dismiss-notifications", async (_event, payload: { ids?: string[]; all?: boolean }) => {
+    if (payload?.all) {
+      dismissNotificationToasts();
+      applyUnreadBadge(0);
+    } else {
+      const ids = payload?.ids?.filter((id) => typeof id === "string") ?? [];
+      if (ids.length > 0) {
+        dismissNotificationToasts(ids);
+      }
+      void refreshUnreadBadgeFromCore().catch(() => {});
+    }
+    return { ok: true };
+  });
   ipcMain.handle("wincmux:update-active-context", async (_event, payload: {
     workspace_id?: string | null;
     pane_id?: string | null;
@@ -959,7 +1269,7 @@ function registerIpcHandlers(): void {
 
 app.whenReady()
   .then(async () => {
-    app.setAppUserModelId("wincmux.dev");
+    app.setAppUserModelId(APP_USER_MODEL_ID);
     try {
       await ensureCoreReady();
     } catch (err) {
@@ -1025,10 +1335,16 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   appIsQuitting = true;
+  for (const timer of badgeReapplyTimers) {
+    clearTimeout(timer);
+  }
+  badgeReapplyTimers = [];
+  dismissNotificationToasts();
   for (const subscriptionId of [...streamConnections.keys()]) {
     void closeStream(subscriptionId);
   }
   void stopNotifyStream();
+  rpcClient.destroy();
   if (coreProc && !coreProc.killed) {
     coreProc.kill();
   }
