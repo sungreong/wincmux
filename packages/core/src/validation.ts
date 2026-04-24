@@ -47,6 +47,11 @@ export const sessionReadSchema = z.object({
   max_bytes: z.number().int().positive().optional()
 });
 
+export const sessionTailSchema = z.object({
+  session_id: z.string().uuid(),
+  max_bytes: z.number().int().positive().optional()
+});
+
 export const streamTopicSchema = z.enum(["session", "notify"]);
 
 export const sessionStreamSubscribeSchema = z

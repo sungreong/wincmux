@@ -2,7 +2,7 @@ import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { z } from "zod";
 import { DbStore } from "./db";
 import { LayoutStore } from "./layout";
@@ -10,6 +10,7 @@ import {
   computeCompletionDedupKey,
   computePromptDedupKey,
   extractAiResumeMarker,
+  extractAssistantResponsePreview,
   extractAssistantReadyMarker,
   extractPromptMarker,
   hasAssistantPromptContext,
@@ -35,6 +36,7 @@ import {
   sessionListSchema,
   sessionReadSchema,
   sessionRunSchema,
+  sessionTailSchema,
   sessionStreamSubscribeSchema,
   sessionStreamUnsubscribeSchema,
   sessionWriteSchema,
@@ -62,32 +64,59 @@ interface StreamSubscription {
   topics: StreamTopic[];
 }
 
+interface SessionOutputBatch {
+  workspace_id: string;
+  chunks: string[];
+  timer: NodeJS.Timeout;
+}
+
+interface GitStatusResult {
+  branch: string | null;
+  dirty: boolean;
+}
+
+interface PromptDetectorState {
+  buffer: string;
+  input_buffer: string;
+  assistant_session: boolean;
+  last_notified_at: number;
+  last_signature: string;
+  response_active: boolean;
+  response_turn_id: number;
+  last_completion_notified_at: number;
+  last_output_at: number;
+  user_input_seen_at: number;
+  user_turn_id: number;
+  notified_turn_id: number;
+  ready_visible: boolean;
+  bootstrapped_ready: boolean;
+  completion_timer: NodeJS.Timeout | null;
+}
+
 export class CoreEngine {
   private readonly db: DbStore;
   private readonly layout = new LayoutStore();
   private readonly pty = new PtyManager();
-  private readonly outputBuffers = new Map<string, string>();
+  private readonly drainBuffers = new Map<string, string>();
+  private readonly tailBuffers = new Map<string, string>();
   private readonly sessionWorkspace = new Map<string, string>();
   private readonly streamSubscriptions = new Map<string, StreamSubscription>();
   private readonly socketSubscriptions = new Map<net.Socket, Set<string>>();
+  private readonly sessionOutputBatches = new Map<string, SessionOutputBatch>();
+  private readonly gitNextDue = new Map<string, number>();
   // Tracks resume_cmd strings already recorded per PTY session to avoid per-chunk re-upserts
   private readonly seenAiResumeCmds = new Map<string, Set<string>>();
-  private readonly promptDetector = new Map<string, {
-    buffer: string;
-    last_notified_at: number;
-    last_signature: string;
-    response_active: boolean;
-    last_completion_notified_at: number;
-    ready_visible: boolean;
-    bootstrapped_ready: boolean;
-  }>();
+  private readonly promptDetector = new Map<string, PromptDetectorState>();
   private readonly server: net.Server;
   private gitTimer?: NodeJS.Timeout;
+  private gitInFlight = 0;
+  private activeWorkspaceId: string | null = null;
+  private stopped = false;
 
   constructor(private readonly options: CoreOptions) {
     this.db = new DbStore(options.dbPath);
     this.server = net.createServer((socket) => this.handleSocket(socket));
-    this.gitTimer = setInterval(() => this.refreshGitStatus(), 3000);
+    this.gitTimer = setInterval(() => { void this.refreshGitStatus(); }, 3000);
   }
 
   async start(): Promise<void> {
@@ -103,13 +132,25 @@ export class CoreEngine {
   }
 
   stop(): void {
+    this.stopped = true;
     this.gitTimer && clearInterval(this.gitTimer);
+    for (const batch of this.sessionOutputBatches.values()) {
+      clearTimeout(batch.timer);
+    }
+    for (const detectorState of this.promptDetector.values()) {
+      if (detectorState.completion_timer) {
+        clearTimeout(detectorState.completion_timer);
+      }
+    }
     this.pty.closeAll();
-    this.outputBuffers.clear();
+    this.drainBuffers.clear();
+    this.tailBuffers.clear();
     this.sessionWorkspace.clear();
     this.promptDetector.clear();
     this.streamSubscriptions.clear();
     this.socketSubscriptions.clear();
+    this.sessionOutputBatches.clear();
+    this.gitNextDue.clear();
     this.server.close();
     this.db.close();
   }
@@ -143,6 +184,8 @@ export class CoreEngine {
           return this.ok(req.id, this.workspacePin(req.params));
         case "workspace.reorder":
           return this.ok(req.id, this.workspaceReorder(req.params));
+        case "workspace.activate":
+          return this.ok(req.id, this.workspaceActivate(req.params));
         case "session.run":
           return this.ok(req.id, this.sessionRun(req.params));
         case "session.list":
@@ -157,6 +200,8 @@ export class CoreEngine {
           return this.ok(req.id, this.sessionWrite(req.params));
         case "session.read":
           return this.ok(req.id, this.sessionRead(req.params));
+        case "session.tail":
+          return this.ok(req.id, this.sessionTail(req.params));
         case "session.stream.subscribe":
           return this.ok(req.id, this.sessionStreamSubscribe(req.params, socket));
         case "session.stream.unsubscribe":
@@ -239,8 +284,10 @@ export class CoreEngine {
     const sessions = this.db.listSessions(p.id);
     for (const s of sessions) {
       this.pty.close(s.id);
-      this.outputBuffers.delete(s.id);
-      this.promptDetector.delete(s.id);
+      this.drainBuffers.delete(s.id);
+      this.tailBuffers.delete(s.id);
+      this.clearPromptDetector(s.id);
+      this.clearSessionOutputBatch(s.id);
     }
     this.db.deleteWorkspace(p.id);
     return { ok: true };
@@ -255,6 +302,14 @@ export class CoreEngine {
   private workspaceReorder(params: unknown): { ok: true } {
     const p = workspaceReorderSchema.parse(params ?? {});
     this.db.reorderWorkspace(p.id, p.sort_order);
+    return { ok: true };
+  }
+
+  private workspaceActivate(params: unknown): { ok: true } {
+    const p = workspaceIdSchema.parse(params ?? {});
+    this.activeWorkspaceId = p.workspace_id;
+    this.gitNextDue.set(p.workspace_id, 0);
+    void this.refreshGitStatus();
     return { ok: true };
   }
 
@@ -283,15 +338,24 @@ export class CoreEngine {
     this.db.insertSession(row);
     this.db.pruneRedundantSessionHistory(p.workspace_id);
     this.sessionWorkspace.set(sessionId, p.workspace_id);
-    this.outputBuffers.set(sessionId, "");
+    this.drainBuffers.set(sessionId, "");
+    this.tailBuffers.set(sessionId, "");
     this.promptDetector.set(sessionId, {
       buffer: "",
+      input_buffer: "",
+      assistant_session: isAssistantCommand(p.cmd, p.args ?? []),
       last_notified_at: 0,
       last_signature: "",
       response_active: false,
+      response_turn_id: 0,
       last_completion_notified_at: 0,
+      last_output_at: 0,
+      user_input_seen_at: 0,
+      user_turn_id: 0,
+      notified_turn_id: 0,
       ready_visible: false,
-      bootstrapped_ready: false
+      bootstrapped_ready: false,
+      completion_timer: null
     });
     this.emitStreamEvent("session.state_changed", {
       session_id: sessionId,
@@ -300,14 +364,8 @@ export class CoreEngine {
       pid: pty.pid
     });
     pty.onData((chunk) => {
-      const prev = this.outputBuffers.get(sessionId) ?? "";
-      const next = `${prev}${chunk}`;
-      this.outputBuffers.set(sessionId, next.slice(-200_000));
-      this.emitStreamEvent("session.output", {
-        session_id: sessionId,
-        workspace_id: p.workspace_id,
-        output: chunk
-      });
+      this.appendSessionOutput(sessionId, chunk);
+      this.queueSessionOutput(sessionId, p.workspace_id, chunk);
       this.maybeIngestPromptPattern({
         workspace_id: p.workspace_id,
         session_id: sessionId,
@@ -315,7 +373,7 @@ export class CoreEngine {
       });
       // Scan the recent tail of the buffer (not just the chunk) so resume markers
       // split across multiple chunks are still detected.
-      const recentBuffer = this.outputBuffers.get(sessionId)?.slice(-2000) ?? chunk;
+      const recentBuffer = this.tailBuffers.get(sessionId)?.slice(-2000) ?? chunk;
       this.maybeRecordAiResume({
         workspace_id: p.workspace_id,
         session_id: sessionId,
@@ -326,7 +384,7 @@ export class CoreEngine {
       this.db.updateSessionResult(sessionId, exitCode === 0 ? "exited" : "failed", new Date().toISOString(), exitCode);
       this.db.pruneRedundantSessionHistory(p.workspace_id);
       // Scan the full output buffer before deleting — catches resume markers split across chunks
-      const finalBuffer = this.outputBuffers.get(sessionId) ?? "";
+      const finalBuffer = this.tailBuffers.get(sessionId) ?? "";
       if (finalBuffer.length >= 20) {
         this.maybeRecordAiResume({
           workspace_id: p.workspace_id,
@@ -336,9 +394,10 @@ export class CoreEngine {
       }
       // Process has already exited — remove from map without re-killing
       this.pty.remove(sessionId);
-      this.outputBuffers.delete(sessionId);
-      this.promptDetector.delete(sessionId);
+      this.drainBuffers.delete(sessionId);
+      this.clearPromptDetector(sessionId);
       this.seenAiResumeCmds.delete(sessionId);
+      this.flushSessionOutputBatch(sessionId);
       this.emitStreamEvent("session.exit", {
         session_id: sessionId,
         workspace_id: p.workspace_id,
@@ -365,9 +424,11 @@ export class CoreEngine {
     const p = sessionCloseSchema.parse(params ?? {});
     const workspaceId = this.sessionWorkspace.get(p.session_id) ?? null;
     this.pty.close(p.session_id);
-    this.outputBuffers.delete(p.session_id);
-    this.promptDetector.delete(p.session_id);
+    this.drainBuffers.delete(p.session_id);
+    this.tailBuffers.delete(p.session_id);
+    this.clearPromptDetector(p.session_id);
     this.seenAiResumeCmds.delete(p.session_id);
+    this.flushSessionOutputBatch(p.session_id);
     this.db.updateSessionResult(p.session_id, "exited", new Date().toISOString(), 0);
     this.db.clearPaneSessionBindingBySession(p.session_id);
     if (workspaceId) {
@@ -402,25 +463,35 @@ export class CoreEngine {
 
   private sessionWrite(params: unknown): { ok: true } {
     const p = sessionWriteSchema.parse(params ?? {});
+    this.noteSessionInput(p.session_id, p.data);
     this.pty.write(p.session_id, p.data);
     return { ok: true };
   }
 
   private sessionRead(params: unknown): { output: string } {
     const p = sessionReadSchema.parse(params ?? {});
-    const existing = this.outputBuffers.get(p.session_id) ?? "";
+    const existing = this.drainBuffers.get(p.session_id) ?? "";
     if (existing.length === 0) {
       return { output: "" };
     }
 
     if (!p.max_bytes || existing.length <= p.max_bytes) {
-      this.outputBuffers.set(p.session_id, "");
+      this.drainBuffers.set(p.session_id, "");
       return { output: existing };
     }
 
     const chunk = existing.slice(0, p.max_bytes);
-    this.outputBuffers.set(p.session_id, existing.slice(p.max_bytes));
+    this.drainBuffers.set(p.session_id, existing.slice(p.max_bytes));
     return { output: chunk };
+  }
+
+  private sessionTail(params: unknown): { output: string } {
+    const p = sessionTailSchema.parse(params ?? {});
+    const existing = this.tailBuffers.get(p.session_id) ?? "";
+    if (!p.max_bytes || existing.length <= p.max_bytes) {
+      return { output: existing };
+    }
+    return { output: existing.slice(-p.max_bytes) };
   }
 
   private sessionStreamSubscribe(params: unknown, socket?: net.Socket): { subscription_id: string } {
@@ -573,18 +644,32 @@ export class CoreEngine {
       return;
     }
 
+    const nowMs = Date.now();
     detectorState.buffer = `${detectorState.buffer} ${text}`.slice(-5000);
-    if (!hasAssistantPromptContext(detectorState.buffer)) {
+    detectorState.last_output_at = nowMs;
+    const hasAssistantContext = detectorState.assistant_session || hasAssistantPromptContext(detectorState.buffer);
+    if (!hasAssistantContext) {
       return;
     }
-    if (hasAssistantResponseActivity(text)) {
+    const outputLooksLikeResponse = hasAssistantResponseActivity(text)
+      || (
+        detectorState.assistant_session
+        && detectorState.user_turn_id > detectorState.notified_turn_id
+        && text.length >= 16
+      );
+    if (outputLooksLikeResponse && detectorState.user_turn_id > detectorState.notified_turn_id) {
       detectorState.response_active = true;
+      detectorState.response_turn_id = detectorState.user_turn_id;
+      this.scheduleAssistantCompletionIdleCheck({
+        workspace_id: input.workspace_id,
+        session_id: input.session_id,
+        observed_at: nowMs
+      });
     }
 
     const marker = extractPromptMarker(detectorState.buffer);
     if (marker) {
       const signature = marker.snippet.toLowerCase();
-      const nowMs = Date.now();
       if (nowMs - detectorState.last_notified_at >= 30_000 || detectorState.last_signature !== signature) {
         detectorState.last_notified_at = nowMs;
         detectorState.last_signature = signature;
@@ -605,12 +690,8 @@ export class CoreEngine {
     }
 
     const readyMarker = extractAssistantReadyMarker(detectorState.buffer);
-    const nowMs = Date.now();
     if (!readyMarker) {
       detectorState.ready_visible = false;
-      return;
-    }
-    if (detectorState.ready_visible) {
       return;
     }
     detectorState.ready_visible = true;
@@ -622,12 +703,91 @@ export class CoreEngine {
     if (!detectorState.response_active) {
       return;
     }
-    if (nowMs - detectorState.last_completion_notified_at < 20_000) {
+    this.notifyAssistantCompletion({
+      workspace_id: input.workspace_id,
+      session_id: input.session_id,
+      ready_marker: readyMarker
+    });
+  }
+
+  private scheduleAssistantCompletionIdleCheck(input: {
+    workspace_id: string;
+    session_id: string;
+    observed_at: number;
+  }): void {
+    const detectorState = this.promptDetector.get(input.session_id);
+    if (!detectorState) {
+      return;
+    }
+    if (detectorState.completion_timer) {
+      clearTimeout(detectorState.completion_timer);
+    }
+    detectorState.completion_timer = setTimeout(() => {
+      this.maybeNotifyAssistantIdleCompletion(input);
+    }, 3500);
+  }
+
+  private maybeNotifyAssistantIdleCompletion(input: {
+    workspace_id: string;
+    session_id: string;
+    observed_at: number;
+  }): void {
+    const detectorState = this.promptDetector.get(input.session_id);
+    if (!detectorState) {
+      return;
+    }
+    detectorState.completion_timer = null;
+    if (!detectorState.response_active || detectorState.last_output_at !== input.observed_at) {
+      return;
+    }
+    if (!hasAssistantPromptContext(detectorState.buffer)) {
+      if (!detectorState.assistant_session) {
+        return;
+      }
+    }
+    if (!detectorState.bootstrapped_ready
+      && !extractAssistantReadyMarker(detectorState.buffer)
+      && !(detectorState.assistant_session && detectorState.user_input_seen_at > 0)) {
+      return;
+    }
+    if (extractPromptMarker(detectorState.buffer)) {
+      return;
+    }
+    this.notifyAssistantCompletion({
+      workspace_id: input.workspace_id,
+      session_id: input.session_id,
+      ready_marker: extractAssistantReadyMarker(detectorState.buffer) ?? "idle_quiet"
+    });
+  }
+
+  private notifyAssistantCompletion(input: {
+    workspace_id: string;
+    session_id: string;
+    ready_marker: string;
+  }): void {
+    const detectorState = this.promptDetector.get(input.session_id);
+    if (!detectorState?.response_active) {
+      return;
+    }
+    const turnId = detectorState.response_turn_id || detectorState.user_turn_id;
+    if (turnId <= 0 || turnId <= detectorState.notified_turn_id) {
+      detectorState.response_active = false;
+      return;
+    }
+    const nowMs = Date.now();
+    if (nowMs - detectorState.last_completion_notified_at < 1500) {
       return;
     }
     detectorState.last_completion_notified_at = nowMs;
+    detectorState.notified_turn_id = turnId;
     detectorState.response_active = false;
+    detectorState.response_turn_id = 0;
+    if (detectorState.completion_timer) {
+      clearTimeout(detectorState.completion_timer);
+      detectorState.completion_timer = null;
+    }
     const shortSession = input.session_id.slice(0, 8);
+    const preview = extractAssistantResponsePreview(detectorState.buffer);
     this.notifyPush({
       workspace_id: input.workspace_id,
       session_id: input.session_id,
@@ -635,11 +795,33 @@ export class CoreEngine {
       kind: "task_done",
       source_kind: "pattern",
       title: "Assistant response completed",
-      body: `session ${shortSession}: response is ready`,
+      body: preview ?? `session ${shortSession}: response is ready`,
       level: "success",
       source: "core-pattern-detector",
-      dedup_key: computeCompletionDedupKey(input.session_id, readyMarker)
+      dedup_key: computeCompletionDedupKey(input.session_id, `turn:${turnId}`)
     });
+  }
+
+  private noteSessionInput(sessionId: string, data: string): void {
+    const detectorState = this.promptDetector.get(sessionId);
+    if (!detectorState) {
+      return;
+    }
+    const normalizedInput = data
+      .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+      .replace(/\r\n|\r|\n/g, "\n")
+      .replace(/[^\S\n]+/g, " ");
+    detectorState.input_buffer = `${detectorState.input_buffer}${normalizedInput}`.slice(-800);
+    if (/\b(?:claude|codex)\b/i.test(detectorState.input_buffer)) {
+      detectorState.assistant_session = true;
+    }
+    if (/\r|\n/.test(data)) {
+      detectorState.user_turn_id += 1;
+      detectorState.user_input_seen_at = Date.now();
+      detectorState.response_active = false;
+      detectorState.response_turn_id = 0;
+      detectorState.ready_visible = false;
+    }
   }
 
   private paneSessionBind(params: unknown): { ok: true } {
@@ -729,13 +911,99 @@ export class CoreEngine {
     this.db.saveLayoutSnapshot(workspaceId, this.layout.serialize(workspaceId), new Date().toISOString());
   }
 
-  private refreshGitStatus(): void {
-    const workspaces = this.db.listWorkspaces();
-    for (const ws of workspaces) {
-      const branch = runGit(ws.path, ["rev-parse", "--abbrev-ref", "HEAD"]);
-      const dirtyText = runGit(ws.path, ["status", "--porcelain"]);
-      this.db.updateWorkspaceGit(ws.id, branch ?? null, Boolean(dirtyText && dirtyText.trim().length));
+  private async refreshGitStatus(): Promise<void> {
+    if (this.stopped || this.gitInFlight > 0) {
+      return;
     }
+    const workspaces = this.db.listWorkspaces().sort((a, b) => {
+      if (a.id === this.activeWorkspaceId) return -1;
+      if (b.id === this.activeWorkspaceId) return 1;
+      return 0;
+    });
+    const now = Date.now();
+    for (const ws of workspaces) {
+      const nextDue = this.gitNextDue.get(ws.id) ?? 0;
+      if (nextDue > now) {
+        continue;
+      }
+      if (this.gitInFlight >= 2) {
+        break;
+      }
+      this.gitInFlight += 1;
+      this.gitNextDue.set(ws.id, now + (ws.id === this.activeWorkspaceId ? 5_000 : 30_000));
+      void readGitStatus(ws.path)
+        .then((status) => {
+          if (this.stopped) {
+            return;
+          }
+          this.db.updateWorkspaceGit(ws.id, status.branch, status.dirty);
+        })
+        .catch(() => {
+          if (this.stopped) {
+            return;
+          }
+          this.db.updateWorkspaceGit(ws.id, null, false);
+        })
+        .finally(() => {
+          this.gitInFlight = Math.max(0, this.gitInFlight - 1);
+        });
+    }
+  }
+
+  private appendSessionOutput(sessionId: string, chunk: string): void {
+    const drain = `${this.drainBuffers.get(sessionId) ?? ""}${chunk}`;
+    const tail = `${this.tailBuffers.get(sessionId) ?? ""}${chunk}`;
+    this.drainBuffers.set(sessionId, drain.slice(-200_000));
+    this.tailBuffers.set(sessionId, tail.slice(-200_000));
+  }
+
+  private queueSessionOutput(sessionId: string, workspaceId: string, chunk: string): void {
+    const existing = this.sessionOutputBatches.get(sessionId);
+    if (existing) {
+      existing.chunks.push(chunk);
+      return;
+    }
+    const timer = setTimeout(() => this.flushSessionOutputBatch(sessionId), 20);
+    this.sessionOutputBatches.set(sessionId, {
+      workspace_id: workspaceId,
+      chunks: [chunk],
+      timer
+    });
+  }
+
+  private flushSessionOutputBatch(sessionId: string): void {
+    const batch = this.sessionOutputBatches.get(sessionId);
+    if (!batch) {
+      return;
+    }
+    clearTimeout(batch.timer);
+    this.sessionOutputBatches.delete(sessionId);
+    const output = batch.chunks.join("");
+    if (!output) {
+      return;
+    }
+    this.emitStreamEvent("session.output", {
+      session_id: sessionId,
+      workspace_id: batch.workspace_id,
+      output
+    });
+  }
+
+  private clearSessionOutputBatch(sessionId: string): void {
+    const batch = this.sessionOutputBatches.get(sessionId);
+    if (!batch) {
+      return;
+    }
+    clearTimeout(batch.timer);
+    this.sessionOutputBatches.delete(sessionId);
+  }
+
+  private clearPromptDetector(sessionId: string): void {
+    const detectorState = this.promptDetector.get(sessionId);
+    if (detectorState?.completion_timer) {
+      clearTimeout(detectorState.completion_timer);
+    }
+    this.promptDetector.delete(sessionId);
   }
 
   private handleSocket(socket: net.Socket): void {
@@ -859,16 +1127,57 @@ export class CoreEngine {
   }
 }
 
-function runGit(cwd: string, args: string[]): string | null {
-  try {
-    const out = spawnSync("git", args, { cwd, encoding: "utf8", windowsHide: true });
-    if (out.status !== 0) {
-      return null;
-    }
-    return out.stdout.trim();
-  } catch {
-    return null;
-  }
+async function readGitStatus(cwd: string): Promise<GitStatusResult> {
+  const [branch, dirtyText] = await Promise.all([
+    runGit(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]),
+    runGit(cwd, ["status", "--porcelain"])
+  ]);
+  return {
+    branch,
+    dirty: Boolean(dirtyText && dirtyText.trim().length)
+  };
+}
+
+function runGit(cwd: string, args: string[], timeoutMs = 4000): Promise<string | null> {
+  return new Promise((resolve) => {
+    const child = spawn("git", args, { cwd, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+    let stdout = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      child.kill();
+      resolve(null);
+    }, timeoutMs);
+
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout = `${stdout}${chunk}`.slice(-20_000);
+    });
+    child.once("error", () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(null);
+    });
+    child.once("exit", (code) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(code === 0 ? stdout.trim() : null);
+    });
+  });
+}
+
+function isAssistantCommand(cmd: string, args: string[]): boolean {
+  const commandText = [cmd, ...args].join(" ");
+  return /\b(?:claude|codex)\b/i.test(commandText);
 }
 
 function tryParse(line: string): unknown {

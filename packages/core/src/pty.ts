@@ -43,7 +43,7 @@ export class PtyManager {
   write(sessionId: string, data: string): void {
     const pty = this.sessions.get(sessionId);
     if (!pty) {
-      return;
+      throw new Error(`PTY session not attached: ${sessionId}`);
     }
     pty.write(data);
   }
@@ -51,7 +51,7 @@ export class PtyManager {
   resize(sessionId: string, cols: number, rows: number): void {
     const pty = this.sessions.get(sessionId);
     if (!pty) {
-      return;
+      throw new Error(`PTY session not attached: ${sessionId}`);
     }
     pty.resize(cols, rows);
   }
