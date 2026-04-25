@@ -1633,7 +1633,6 @@ const AGENT_ASSET_CATEGORY_LABELS = {
   commands: "Commands",
   settings: "Settings",
   mcp: "MCP",
-  other: "Other",
 };
 
 const AGENT_ASSET_PROVIDER_DEFS = [
@@ -1661,7 +1660,33 @@ function htmlEscape(value) {
 const LONG_PASTE_BYTES = 2048;
 const LONG_PASTE_LINES = 20;
 const INPUT_ASSET_INSERT_CHUNK = 4096;
+const ASSET_MODE_KEYS = {
+  agent: "wincmux.agentAssets.mode",
+  input: "wincmux.inputAssets.mode"
+};
 let pendingInputAssetPrompt = null;
+
+function normalizeAssetMode(mode) {
+  return mode === "detail" ? "detail" : "brief";
+}
+
+function storedAssetMode(kind) {
+  return normalizeAssetMode(localStorage.getItem(ASSET_MODE_KEYS[kind]));
+}
+
+function persistAssetMode(kind, mode) {
+  const normalized = normalizeAssetMode(mode);
+  localStorage.setItem(ASSET_MODE_KEYS[kind], normalized);
+  return normalized;
+}
+
+function renderAssetModeToggle(actionName, mode) {
+  const current = normalizeAssetMode(mode);
+  return `<div class="asset-view-toggle" aria-label="Asset list density">
+    <button data-${actionName}="asset-mode" data-mode="brief" class="${current === "brief" ? "active" : ""}">Brief</button>
+    <button data-${actionName}="asset-mode" data-mode="detail" class="${current === "detail" ? "active" : ""}">Detail</button>
+  </div>`;
+}
 
 function textByteLength(text) {
   return new Blob([String(text ?? "")]).size;
@@ -1874,37 +1899,50 @@ async function handlePaneClipboardPaste(paneId) {
   showInputAssetImagePrompt({ paneId, image });
 }
 
-function renderInputAssetItem(asset) {
+function renderInputAssetItem(asset, mode = "brief") {
+  const brief = normalizeAssetMode(mode) === "brief";
   const icon = asset.type === "image" ? "Image" : "Text";
   const date = asset.created_at ? new Date(asset.created_at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
-  return `<div class="input-asset-item" data-input-asset-id="${htmlEscape(asset.id)}">
+  const actions = brief
+    ? [
+      ["view", "View"],
+      ["insert", "Insert"],
+      ["insert-path", "Path"],
+      ["copy", "Copy"]
+    ]
+    : [
+      ["view", "View"],
+      ["insert", "Insert"],
+      ["insert-path", "Path"],
+      ["copy", "Copy"],
+      ["rename", "Rename"],
+      ["reveal", "Explorer"],
+      ["delete", "Delete", "danger"]
+    ];
+  return `<div class="input-asset-item ${brief ? "input-asset-item-brief" : "input-asset-item-detail"}" data-input-asset-id="${htmlEscape(asset.id)}">
     <div class="input-asset-item-main">
       <div class="input-asset-row">
         <span class="input-asset-type">${icon}</span>
         <span class="input-asset-name" title="${htmlEscape(asset.title)}">${htmlEscape(asset.title)}</span>
+        <span class="input-asset-meta input-asset-meta-inline">${htmlEscape(inputAssetFormatSize(asset.size))}</span>
       </div>
       <div class="input-asset-path" title="${htmlEscape(asset.relative_path)}">${htmlEscape(asset.relative_path)}</div>
       <div class="input-asset-preview" title="${htmlEscape(asset.preview)}">${htmlEscape(asset.preview || "-")}</div>
       <div class="input-asset-meta">${htmlEscape(inputAssetFormatSize(asset.size))}${date ? ` · ${htmlEscape(date)}` : ""}</div>
     </div>
     <div class="input-asset-actions">
-      <button data-input-action="view">View</button>
-      <button data-input-action="insert">Insert</button>
-      <button data-input-action="insert-path">Path</button>
-      <button data-input-action="copy">Copy</button>
-      <button data-input-action="rename">Rename</button>
-      <button data-input-action="reveal">Explorer</button>
-      <button data-input-action="delete" class="danger">Delete</button>
+      ${actions.map(([action, label, cls]) => `<button data-input-action="${action}"${cls ? ` class="${cls}"` : ""}>${label}</button>`).join("")}
     </div>
   </div>`;
 }
 
-function renderInputAssets(result) {
+function renderInputAssets(result, mode = storedAssetMode("input")) {
+  const currentMode = normalizeAssetMode(mode);
   const assets = result?.assets ?? [];
   const textCount = assets.filter((asset) => asset.type === "text").length;
   const imageCount = assets.filter((asset) => asset.type === "image").length;
   const body = assets.length
-    ? assets.map(renderInputAssetItem).join("")
+    ? assets.map((asset) => renderInputAssetItem(asset, currentMode)).join("")
     : '<div class="input-asset-empty">No input assets yet. Long paste snippets and imported images will appear here.</div>';
   return `<div class="input-asset-toolbar">
     <div>
@@ -1912,12 +1950,13 @@ function renderInputAssets(result) {
       <div class="input-asset-subtitle">Saved in .wincmux/input-assets · text ${textCount} · images ${imageCount}</div>
     </div>
     <div class="input-asset-toolbar-actions">
+      ${renderAssetModeToggle("input-action", currentMode)}
       <button data-input-action="new-text">New Text</button>
       <button data-input-action="import-image">Import Image</button>
       <button data-input-action="refresh">Refresh</button>
     </div>
   </div>
-  <div class="input-assets-layout">
+  <div class="input-assets-layout input-assets-${currentMode}">
     <div id="inputAssetBrowser" class="input-asset-browser">${body}</div>
     <div id="inputAssetViewer" class="input-asset-viewer">
       <div class="input-asset-viewer-empty">
@@ -1977,7 +2016,8 @@ async function loadInputAssets(ws) {
   try {
     const result = await window.wincmux.inputAssetsList(ws.path);
     area.dataset.assets = JSON.stringify(result?.assets ?? []);
-    area.innerHTML = renderInputAssets(result);
+    area.dataset.mode = area.dataset.mode || storedAssetMode("input");
+    area.innerHTML = renderInputAssets(result, area.dataset.mode);
     area.onclick = (ev) => handleInputAssetClick(ev, ws);
     area.ondragover = (ev) => {
       ev.preventDefault();
@@ -2022,6 +2062,13 @@ async function handleInputAssetClick(ev, ws) {
   const action = button.dataset.inputAction;
   if (action === "refresh") {
     await refreshInputAssets(ws);
+    return;
+  }
+  if (action === "asset-mode") {
+    const area = $("wsInputAssets");
+    if (!area) return;
+    area.dataset.mode = persistAssetMode("input", button.dataset.mode);
+    area.innerHTML = renderInputAssets({ assets: currentInputAssetList() }, area.dataset.mode);
     return;
   }
   if (action === "new-text") {
@@ -2169,8 +2216,9 @@ function summarizeAgentAssetItems(items) {
 }
 
 function renderAgentAssetProviderTabs(items, activeProvider) {
+  const visibleItems = items.filter((item) => item.category !== "other");
   return AGENT_ASSET_PROVIDER_DEFS.map(({ id, label }) => {
-    const scopedItems = filterAgentAssetsByProvider(items, id);
+    const scopedItems = filterAgentAssetsByProvider(visibleItems, id);
     const count = scopedItems.filter((item) => item.exists).length;
     const active = id === activeProvider ? " active" : "";
     return `<button class="agent-asset-scope-tab${active}" data-agent-action="provider-filter" data-provider="${id}">
@@ -2192,8 +2240,8 @@ function renderAgentAssetSummaryCards(items) {
     ].filter(Boolean).join(" · ");
     return `<div class="agent-asset-card${warn}" data-agent-category="${category}">
       <div class="agent-asset-card-title">${label}</div>
-      <div class="agent-asset-card-count">${info.count}</div>
       <div class="agent-asset-card-meta">${htmlEscape(meta || "ok")}</div>
+      <div class="agent-asset-card-count">${info.count}</div>
     </div>`;
   }).join("");
 }
@@ -2208,7 +2256,8 @@ function renderAgentAssetBadges(item) {
   return badges.map(([cls, text]) => `<span class="agent-asset-badge ${cls}">${text}</span>`).join("");
 }
 
-function renderAgentAssetItem(item) {
+function renderAgentAssetItem(item, mode = "brief") {
+  const brief = normalizeAssetMode(mode) === "brief";
   const providers = agentAssetProviders(item);
   const details = Object.entries(item.details ?? {})
     .map(([key, value]) => {
@@ -2221,7 +2270,20 @@ function renderAgentAssetItem(item) {
   const viewLabel = item.exists ? "View" : "Create";
   const canCreate = !item.exists && item.editable;
   const canView = item.exists && !item.large;
-  return `<div class="agent-asset-item${item.invalid ? " invalid" : ""}" data-path="${htmlEscape(item.relativePath)}">
+  const actions = brief
+    ? [
+      [canCreate ? "create" : "view", viewLabel, canView || canCreate],
+      ["insert-summary", "Insert", true],
+      ["copy-path", "Path", true]
+    ]
+    : [
+      [canCreate ? "create" : "view", viewLabel, canView || canCreate],
+      ["copy-summary", "Copy Summary", true],
+      ["insert-summary", "Insert", true],
+      ["copy-path", "Copy Path", true],
+      ["reveal", "Explorer", true]
+    ];
+  return `<div class="agent-asset-item ${brief ? "agent-asset-item-brief" : "agent-asset-item-detail"}${item.invalid ? " invalid" : ""}" data-path="${htmlEscape(item.relativePath)}">
     <div class="agent-asset-item-main">
       <div class="agent-asset-row">
         <span class="agent-asset-name">${htmlEscape(item.name)}</span>
@@ -2234,17 +2296,16 @@ function renderAgentAssetItem(item) {
       ${warnings}
     </div>
     <div class="agent-asset-actions">
-      <button data-agent-action="${canCreate ? "create" : "view"}" ${canView || canCreate ? "" : "disabled"}>${viewLabel}</button>
-      <button data-agent-action="copy-summary">Copy Summary</button>
-      <button data-agent-action="insert-summary">Insert</button>
-      <button data-agent-action="copy-path">Copy Path</button>
-      <button data-agent-action="reveal">Explorer</button>
+      ${actions.map(([action, label, enabled]) => `<button data-agent-action="${action}" ${enabled ? "" : "disabled"}>${label}</button>`).join("")}
     </div>
   </div>`;
 }
 
-function renderAgentAssetList(result, activeProvider = "all") {
-  const scopedItems = filterAgentAssetsByProvider(result.items ?? [], activeProvider);
+function renderAgentAssetList(result, activeProvider = "all", mode = storedAssetMode("agent")) {
+  const currentMode = normalizeAssetMode(mode);
+  const brief = currentMode === "brief";
+  const visibleItems = (result.items ?? []).filter((item) => item.category !== "other");
+  const scopedItems = filterAgentAssetsByProvider(visibleItems, activeProvider);
   const byCategory = {};
   for (const item of scopedItems) {
     (byCategory[item.category] ||= []).push(item);
@@ -2252,6 +2313,7 @@ function renderAgentAssetList(result, activeProvider = "all") {
   const sections = Object.entries(AGENT_ASSET_CATEGORY_LABELS).map(([category, label]) => {
     const items = byCategory[category] ?? [];
     if (items.length === 0) {
+      if (brief) return "";
       return `<section class="agent-asset-section">
         <div class="agent-asset-section-title">${label}</div>
         <div class="agent-asset-empty">No ${label.toLowerCase()} assets found.</div>
@@ -2259,11 +2321,11 @@ function renderAgentAssetList(result, activeProvider = "all") {
     }
     return `<section class="agent-asset-section">
       <div class="agent-asset-section-title">${label} (${items.filter((i) => i.exists).length})</div>
-      <div class="agent-asset-list">${items.map(renderAgentAssetItem).join("")}</div>
+      <div class="agent-asset-list">${items.map((item) => renderAgentAssetItem(item, currentMode)).join("")}</div>
     </section>`;
   }).join("");
-  return `<div class="agent-asset-scope-tabs">${renderAgentAssetProviderTabs(result.items ?? [], activeProvider)}</div>
-    <div class="agent-assets-grid">${renderAgentAssetSummaryCards(scopedItems)}</div>
+  return `<div class="agent-asset-scope-tabs">${renderAgentAssetProviderTabs(visibleItems, activeProvider)}</div>
+    ${brief ? "" : `<div class="agent-assets-grid">${renderAgentAssetSummaryCards(scopedItems)}</div>`}
     ${sections}`;
 }
 
@@ -2312,17 +2374,21 @@ async function loadAgentAssets(ws) {
     const result = await window.wincmux.agentAssetsScan(ws.path);
     area.dataset.scan = JSON.stringify(result);
     area.dataset.provider = area.dataset.provider || "all";
+    area.dataset.mode = area.dataset.mode || storedAssetMode("agent");
     area.innerHTML = `
       <div class="agent-asset-toolbar">
         <div>
           <div class="agent-asset-title">Agent Assets</div>
           <div class="agent-asset-subtitle">Provider registry 기반으로 Claude, Codex, Gemini, Cursor, Kiro, opencode 자산을 나눠 봅니다.</div>
         </div>
-        <button data-agent-action="refresh">Refresh</button>
+        <div class="agent-asset-toolbar-actions">
+          ${renderAssetModeToggle("agent-action", area.dataset.mode)}
+          <button data-agent-action="refresh">Refresh</button>
+        </div>
       </div>
-      <div class="agent-assets-layout">
+      <div class="agent-assets-layout agent-assets-${normalizeAssetMode(area.dataset.mode)}">
         <div id="agentAssetBrowser" class="agent-asset-browser">
-          ${renderAgentAssetList(result, area.dataset.provider)}
+          ${renderAgentAssetList(result, area.dataset.provider, area.dataset.mode)}
         </div>
         <div id="agentAssetViewer" class="agent-asset-viewer">
           <div class="agent-asset-viewer-empty">
@@ -2362,12 +2428,29 @@ async function handleAgentAssetClick(ev, ws) {
     await loadAgentAssets(ws);
     return;
   }
+  if (action === "asset-mode") {
+    const area = $("wsAgentAssets");
+    const browser = $("agentAssetBrowser");
+    const layout = area?.querySelector(".agent-assets-layout");
+    if (!area || !browser) return;
+    area.dataset.mode = persistAssetMode("agent", button.dataset.mode);
+    browser.innerHTML = renderAgentAssetList(currentAgentAssetScan(), area.dataset.provider || "all", area.dataset.mode);
+    if (layout) {
+      layout.classList.toggle("agent-assets-brief", area.dataset.mode === "brief");
+      layout.classList.toggle("agent-assets-detail", area.dataset.mode === "detail");
+    }
+    const toolbar = area.querySelector(".asset-view-toggle");
+    if (toolbar) {
+      toolbar.outerHTML = renderAssetModeToggle("agent-action", area.dataset.mode);
+    }
+    return;
+  }
   if (action === "provider-filter") {
     const area = $("wsAgentAssets");
     const browser = $("agentAssetBrowser");
     if (!area || !browser) return;
     area.dataset.provider = button.dataset.provider || "all";
-    browser.innerHTML = renderAgentAssetList(currentAgentAssetScan(), area.dataset.provider);
+    browser.innerHTML = renderAgentAssetList(currentAgentAssetScan(), area.dataset.provider, area.dataset.mode || storedAssetMode("agent"));
     return;
   }
   if (action === "save-asset") {

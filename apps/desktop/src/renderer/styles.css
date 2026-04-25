@@ -756,8 +756,7 @@ li.active .ws-delete-btn {
 }
 
 #workspaceList li.ws-compact .ws-path,
-#workspaceList li.ws-compact .ws-branch,
-#workspaceList li.ws-compact .ws-info-btn {
+#workspaceList li.ws-compact .ws-branch {
   display: none;
 }
 
@@ -2240,6 +2239,14 @@ li.active .ws-info-btn {
   margin-bottom: 8px;
 }
 
+.agent-asset-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .agent-asset-title {
   font-size: 12px;
   font-weight: 700;
@@ -2263,6 +2270,30 @@ li.active .ws-info-btn {
   border-radius: 4px;
   padding: 4px 7px;
   cursor: pointer;
+}
+
+.asset-view-toggle {
+  display: inline-grid;
+  grid-template-columns: repeat(2, auto);
+  gap: 3px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(8, 15, 26, 0.72);
+}
+
+.asset-view-toggle button {
+  min-height: 22px;
+  padding: 3px 7px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.asset-view-toggle button.active {
+  border-color: #446482;
+  background: #17304d;
+  color: #f1f7ff;
 }
 
 .agent-asset-toolbar button:hover,
@@ -2327,17 +2358,25 @@ li.active .ws-info-btn {
 
 .agent-assets-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-  margin-bottom: 9px;
+  grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
+  gap: 5px;
+  margin-bottom: 8px;
 }
 
 .agent-asset-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "title count"
+    "meta count";
+  align-items: center;
+  column-gap: 8px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 5px;
   background: rgba(255, 255, 255, 0.035);
-  padding: 7px;
+  padding: 5px 7px;
   min-width: 0;
+  min-height: 42px;
 }
 
 .agent-asset-card.warn {
@@ -2345,18 +2384,24 @@ li.active .ws-info-btn {
 }
 
 .agent-asset-card-title {
+  grid-area: title;
   color: var(--muted);
   font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-asset-card-count {
+  grid-area: count;
   color: var(--fg);
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
-  line-height: 1.2;
+  line-height: 1;
 }
 
 .agent-asset-card-meta {
+  grid-area: meta;
   color: var(--muted);
   font-size: 9px;
   overflow: hidden;
@@ -2482,6 +2527,31 @@ li.active .ws-info-btn {
   align-content: start;
   gap: 4px;
   width: 158px;
+}
+
+.agent-asset-item-brief {
+  align-items: center;
+  padding-block: 6px;
+}
+
+.agent-asset-item-brief .agent-asset-row {
+  margin-bottom: 0;
+  flex-wrap: nowrap;
+}
+
+.agent-asset-item-brief .agent-asset-badge.scope,
+.agent-asset-item-brief .agent-asset-badge.editable,
+.agent-asset-item-brief .agent-asset-badge.readonly,
+.agent-asset-item-brief .agent-asset-path,
+.agent-asset-item-brief .agent-asset-summary,
+.agent-asset-item-brief .agent-asset-details,
+.agent-asset-item-brief .agent-asset-warning {
+  display: none;
+}
+
+.agent-asset-item-brief .agent-asset-actions {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: 174px;
 }
 
 .agent-asset-loading,
@@ -2640,6 +2710,22 @@ li.active .ws-info-btn {
   color: var(--accent);
 }
 
+.agent-asset-toolbar .asset-view-toggle button,
+.input-asset-toolbar .asset-view-toggle button {
+  min-height: 22px;
+  padding: 3px 7px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.agent-asset-toolbar .asset-view-toggle button.active,
+.input-asset-toolbar .asset-view-toggle button.active {
+  border-color: #446482;
+  background: #17304d;
+  color: #f1f7ff;
+}
+
 .input-asset-actions button.danger {
   border-color: rgba(248, 113, 113, 0.45);
   color: #fca5a5;
@@ -2672,6 +2758,11 @@ li.active .ws-info-btn {
   border: 1px solid var(--border);
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.035);
+}
+
+.input-asset-item-brief {
+  align-items: center;
+  padding-block: 6px;
 }
 
 .input-asset-item-main {
@@ -2709,6 +2800,12 @@ li.active .ws-info-btn {
   font-weight: 700;
 }
 
+.input-asset-meta-inline {
+  display: none;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
 .input-asset-path {
   color: var(--accent);
   font-size: 10px;
@@ -2726,6 +2823,25 @@ li.active .ws-info-btn {
   gap: 4px;
   align-content: start;
   width: 150px;
+}
+
+.input-asset-item-brief .input-asset-row {
+  min-height: 22px;
+}
+
+.input-asset-item-brief .input-asset-path,
+.input-asset-item-brief .input-asset-preview,
+.input-asset-item-brief .input-asset-item-main > .input-asset-meta:not(.input-asset-meta-inline) {
+  display: none;
+}
+
+.input-asset-item-brief .input-asset-meta-inline {
+  display: inline-flex;
+}
+
+.input-asset-item-brief .input-asset-actions {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  width: 216px;
 }
 
 .input-asset-viewer {
