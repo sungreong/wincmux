@@ -109,6 +109,18 @@ WinCMux/
 
 ## Quick Start
 
+### Windows development
+
+From Command Prompt or PowerShell:
+
+```bat
+.\dev.bat
+```
+
+`dev.bat` runs from the repository root, checks that `node` and `npm` are available, installs dependencies when `node_modules` is missing, then starts the Electron development app with the Node core auto-spawned.
+
+Equivalent manual commands:
+
 ```bash
 # Install dependencies
 npm install
@@ -125,6 +137,25 @@ npm --workspace @wincmux/core run dev
 # Electron desktop only (expects external core already running)
 npm --workspace @wincmux/desktop run dev
 ```
+
+---
+
+## Keyboard Shortcuts
+
+The app also has a `Shortcuts` button in the top toolbar. Press `Ctrl+/` to open the same help panel.
+
+| Action | Shortcut |
+|---|---|
+| Next / previous pane | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
+| Move by direction | `Ctrl+Alt+Arrow` |
+| Split right | `Ctrl+Alt+Backslash` |
+| Split down | `Ctrl+Alt+-` |
+| Start selected pane | `Ctrl+Alt+T` |
+| Restart selected pane | `Ctrl+Alt+R` |
+| Hide selected pane | `Ctrl+Alt+W` |
+| Close selected pane | `Ctrl+Alt+Q` |
+| Equalize pane sizes | `Ctrl+Shift+E` |
+| Toggle workspaces / notifications / hidden panes | `Ctrl+B` / `Ctrl+Shift+N` / `Ctrl+Shift+H` |
 
 ---
 
