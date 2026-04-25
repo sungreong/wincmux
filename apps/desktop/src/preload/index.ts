@@ -37,6 +37,7 @@ contextBridge.exposeInMainWorld("wincmux", {
   },
   clipboardRead: () => ipcRenderer.invoke("wincmux:clipboard-read"),
   clipboardWrite: (text: string) => ipcRenderer.invoke("wincmux:clipboard-write", { text }),
+  clipboardReadImage: () => ipcRenderer.invoke("wincmux:clipboard-read-image"),
   perfLog: (payload: unknown) => ipcRenderer.invoke("wincmux:perf-log", payload),
   showContextMenu: (hasSelection: boolean) => ipcRenderer.invoke("wincmux:show-context-menu", { has_selection: hasSelection }),
   pickFolder: () => ipcRenderer.invoke("wincmux:pick-folder"),
@@ -62,6 +63,24 @@ contextBridge.exposeInMainWorld("wincmux", {
     unwrapEnvelope(await ipcRenderer.invoke("wincmux:agent-asset-create", { path: workspacePath, relativePath, templateKind })),
   agentAssetReveal: async (workspacePath: string, relativePath: string) =>
     unwrapEnvelope(await ipcRenderer.invoke("wincmux:agent-asset-reveal", { path: workspacePath, relativePath })),
+  inputAssetsList: async (workspacePath: string) =>
+    unwrapEnvelope(await ipcRenderer.invoke("wincmux:input-assets-list", { path: workspacePath })),
+  inputAssetCreateText: async (workspacePath: string, payload: { title?: string; content: string; source?: unknown }) =>
+    unwrapEnvelope(await ipcRenderer.invoke("wincmux:input-asset-create-text", { path: workspacePath, ...payload })),
+  inputAssetCreateImage: async (workspacePath: string, payload: { title?: string; dataUrl: string; source?: unknown }) =>
+    unwrapEnvelope(await ipcRenderer.invoke("wincmux:input-asset-create-image", { path: workspacePath, ...payload })),
+  inputAssetImportFile: async (workspacePath: string, payload: { filePath: string; kind?: string }) =>
+    unwrapEnvelope(await ipcRenderer.invoke("wincmux:input-asset-import-file", { path: workspacePath, ...payload })),
+  inputAssetPickFile: async (workspacePath: string) =>
+    unwrapEnvelope(await ipcRenderer.invoke("wincmux:input-asset-pick-file", { path: workspacePath })),
+  inputAssetRead: async (workspacePath: string, assetId: string) =>
+    unwrapEnvelope(await ipcRenderer.invoke("wincmux:input-asset-read", { path: workspacePath, assetId })),
+  inputAssetRename: async (workspacePath: string, assetId: string, title: string) =>
+    unwrapEnvelope(await ipcRenderer.invoke("wincmux:input-asset-rename", { path: workspacePath, assetId, title })),
+  inputAssetDelete: async (workspacePath: string, assetId: string) =>
+    unwrapEnvelope(await ipcRenderer.invoke("wincmux:input-asset-delete", { path: workspacePath, assetId })),
+  inputAssetReveal: async (workspacePath: string, assetId: string) =>
+    unwrapEnvelope(await ipcRenderer.invoke("wincmux:input-asset-reveal", { path: workspacePath, assetId })),
   openInExplorer: async (workspacePath: string) =>
     unwrapEnvelope(await ipcRenderer.invoke("wincmux:open-in-explorer", { path: workspacePath })),
   gitInfo: async (workspacePath: string) =>

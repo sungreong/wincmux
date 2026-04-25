@@ -28,6 +28,7 @@ The screenshot above shows the current workspace-oriented UI:
 - **Workspace sidebar**: add workspaces, switch projects, delete individual workspaces, show branch/dirty status, and keep per-workspace notes.
 - **Workspace info panel**: editable description, git summary, long-file scan, scoped running sessions, AI session history, and Agent Assets inventory.
 - **Agent Assets**: inspect workspace-scoped Claude/Codex/Gemini/Cursor/Kiro/opencode files such as `CLAUDE.md`, `AGENTS.md`, `.claude/skills`, `.cursor/rules`, `.gemini`, `.kiro`, `.mcp.json`, and `.agents` without opening Explorer.
+- **Input Assets**: save long pasted text and imported images under `.wincmux/input-assets`, then preview, copy, reveal, or insert them into the selected pane.
 - **Notifications panel**: unread assistant completions grouped by workspace, with workspace mark-read and clear actions.
 - **Top toolbar**: workspace/notification visibility, hidden pane drawer, equalize panes, keyboard help, font scale, and selected pane ID.
 
@@ -42,6 +43,7 @@ The screenshot above shows the current workspace-oriented UI:
 | Workspace info popup panel (description, git, scan, sessions) | Done |
 | Workspace Agent Assets inventory with provider filters and preview/editor pane | Done |
 | Agent asset provider registry (Claude/Codex/Gemini/Cursor/Kiro/opencode/Shared) | Done |
+| Workspace Input Assets for long paste snippets and image path insertion | Done |
 | Session run via `node-pty` (ConPTY on Windows) | Done |
 | Session delete (non-running sessions) via IPC | Done |
 | Redundant session history pruning (dedup sequential runs) | Done |
@@ -230,6 +232,23 @@ The implementation is provider-registry based. To add a future tool, add its ins
 
 ---
 
+## Input Assets
+
+Open a workspace card's info panel, then click `Input Assets`.
+
+Input Assets are user-provided materials that you may want to send to a terminal or AI CLI without flooding the pane immediately.
+
+- Long paste detection triggers at about `2KB` or `20` lines.
+- When a long paste is detected, choose `Paste Directly`, `Save Asset`, or `Save + Insert`.
+- Text assets are stored as `.wincmux/input-assets/snippets/<id>.md`.
+- Image assets are imported to `.wincmux/input-assets/images/<id>.<ext>` and inserted as a workspace-relative path, not binary content.
+- The asset panel supports `View`, `Insert`, `Path`, `Copy`, `Rename`, `Explorer`, and `Delete`.
+- `.wincmux/.gitignore` is created with `input-assets/`, so these assets are private by default and do not appear in normal Git changes.
+
+This feature is separate from Agent Assets: Agent Assets are configuration/instruction files that tools read; Input Assets are temporary or reusable inputs that the user chooses to send to a pane.
+
+---
+
 ## Notifications
 
 WinCMux watches Claude/Codex terminal output and notifies when an assistant response is ready.
@@ -309,6 +328,7 @@ Electron Main Process
     ├── Named Pipe JSON-RPC client (auto-retry + core respawn on ENOENT)
     ├── Persistent stream sockets (session events / notify events)
     ├── Workspace Agent Assets scanner/editor IPC (provider registry + path safety)
+    ├── Workspace Input Assets store (long paste snippets + image imports)
     └── Native Toast + Taskbar Badge (Electron Notification API)
 @wincmux/core (Node.js)
     ├── Workspace Manager
@@ -342,6 +362,11 @@ Desktop IPC additions:
 | `agentAssetWrite(workspacePath, relativePath, content)` | Save an editable asset with validation and `.bak` backup |
 | `agentAssetCreate(workspacePath, relativePath, templateKind)` | Create a safe instruction/rule/command asset from a template |
 | `agentAssetReveal(workspacePath, relativePath)` | Reveal a scanned asset in Explorer |
+| `inputAssetsList(workspacePath)` | List saved long-paste snippets and imported images |
+| `inputAssetCreateText(workspacePath, payload)` | Save a text snippet under `.wincmux/input-assets` |
+| `inputAssetImportFile(workspacePath, payload)` | Copy an image into the workspace input asset store |
+| `inputAssetRead(workspacePath, assetId)` | Read snippet content or image preview data |
+| `inputAssetRename/Delete/Reveal(...)` | Manage saved input assets |
 
 ---
 

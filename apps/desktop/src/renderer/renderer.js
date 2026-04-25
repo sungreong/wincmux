@@ -379,11 +379,7 @@ function handleContextAction(event) {
     return;
   }
   if (event.action === "paste") {
-    void window.wincmux.clipboardRead().then((text) => {
-      if (text) {
-        paneApi.writeToPane(paneId, text);
-      }
-    });
+    void handlePaneClipboardPaste(paneId).catch((err) => setStatus(String(err?.message ?? err), true));
     return;
   }
   if (event.action === "clear-selection") {
@@ -1662,6 +1658,458 @@ function htmlEscape(value) {
     .replace(/'/g, "&#39;");
 }
 
+const LONG_PASTE_BYTES = 2048;
+const LONG_PASTE_LINES = 20;
+const INPUT_ASSET_INSERT_CHUNK = 4096;
+let pendingInputAssetPrompt = null;
+
+function textByteLength(text) {
+  return new Blob([String(text ?? "")]).size;
+}
+
+function isLongPasteText(text) {
+  const value = String(text ?? "");
+  return textByteLength(value) >= LONG_PASTE_BYTES || value.split(/\r?\n/).length >= LONG_PASTE_LINES;
+}
+
+function defaultInputAssetTitle(text) {
+  const first = String(text ?? "").split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  if (first) return first.slice(0, 80);
+  const d = new Date();
+  const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  return `Snippet ${stamp}`;
+}
+
+function inputAssetFormatSize(size) {
+  const bytes = Number(size ?? 0);
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+
+function inputAssetAbsolutePath(workspacePath, relativePath) {
+  const base = String(workspacePath ?? "").trim();
+  const rel = String(relativePath ?? "").trim();
+  if (!rel) return base;
+  if (/^[a-zA-Z]:[\\/]/.test(rel) || rel.startsWith("\\\\") || rel.startsWith("/")) {
+    return rel;
+  }
+  if (!base) return rel;
+  const sep = base.includes("\\") ? "\\" : "/";
+  return `${base.replace(/[\\/]+$/, "")}${sep}${rel.replace(/^[\\/]+/, "")}`;
+}
+
+function inputAssetReferenceText(asset, workspacePath) {
+  if (!asset) return "";
+  const assetPath = inputAssetAbsolutePath(workspacePath, asset.relative_path);
+  const label = asset.type === "image" ? "이미지 작업 문서 경로" : "작업 문서 경로";
+  const noun = asset.type === "image" ? "이미지 작업 문서" : "작업 문서";
+  return `${label}: ${assetPath}\n위의 경로에 적힌 ${noun}로 작업 진행해줘`;
+}
+
+function inputAssetInsertText(asset, content, mode = "reference", workspacePath = "") {
+  if (!asset) return "";
+  if (mode === "reference") {
+    return inputAssetReferenceText(asset, workspacePath);
+  }
+  if (mode === "path") {
+    return inputAssetAbsolutePath(workspacePath, asset.relative_path);
+  }
+  if (asset.type === "image") {
+    return inputAssetAbsolutePath(workspacePath, asset.relative_path);
+  }
+  return String(content ?? "");
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function writeTextToPaneChunked(paneId, text) {
+  const value = String(text ?? "");
+  if (!paneId || !value) return;
+  await ensurePaneSessionReady(state.selectedWorkspaceId, paneId);
+  if (value.length <= INPUT_ASSET_INSERT_CHUNK) {
+    paneApi.writeToPane(paneId, value);
+    return;
+  }
+  for (let offset = 0; offset < value.length; offset += INPUT_ASSET_INSERT_CHUNK) {
+    paneApi.writeToPane(paneId, value.slice(offset, offset + INPUT_ASSET_INSERT_CHUNK));
+    await delay(8);
+  }
+}
+
+function showInputAssetPrompt({ paneId, text }) {
+  const overlay = $("inputAssetPromptOverlay");
+  const title = $("inputAssetPromptTitle");
+  const meta = $("inputAssetPromptMeta");
+  const titleInput = $("inputAssetPromptTitleInput");
+  const preview = $("inputAssetPromptPreview");
+  const imagePreview = $("inputAssetImagePreview");
+  const imagePreviewImg = $("inputAssetImagePreviewImg");
+  const pasteDirectBtn = $("inputAssetPasteDirectBtn");
+  if (!overlay || !meta || !titleInput || !preview) {
+    return false;
+  }
+  pendingInputAssetPrompt = { kind: "text", paneId, text };
+  if (title) title.textContent = "Long paste detected";
+  titleInput.value = defaultInputAssetTitle(text);
+  meta.textContent = `${inputAssetFormatSize(textByteLength(text))} · ${String(text).split(/\r?\n/).length} lines`;
+  preview.value = String(text).slice(0, 4000);
+  preview.readOnly = true;
+  preview.hidden = false;
+  if (imagePreview) imagePreview.hidden = true;
+  if (imagePreviewImg) imagePreviewImg.removeAttribute("src");
+  if (pasteDirectBtn) pasteDirectBtn.hidden = false;
+  overlay.hidden = false;
+  titleInput.focus();
+  titleInput.select();
+  return true;
+}
+
+function showInputAssetImagePrompt({ paneId, image }) {
+  const overlay = $("inputAssetPromptOverlay");
+  const title = $("inputAssetPromptTitle");
+  const meta = $("inputAssetPromptMeta");
+  const titleInput = $("inputAssetPromptTitleInput");
+  const preview = $("inputAssetPromptPreview");
+  const imagePreview = $("inputAssetImagePreview");
+  const imagePreviewImg = $("inputAssetImagePreviewImg");
+  const pasteDirectBtn = $("inputAssetPasteDirectBtn");
+  if (!overlay || !meta || !titleInput || !imagePreview || !imagePreviewImg || !image?.dataUrl) {
+    return false;
+  }
+  pendingInputAssetPrompt = { kind: "image", paneId, image };
+  if (title) title.textContent = "Image paste detected";
+  const stamp = new Date().toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  titleInput.value = `Image ${stamp}`;
+  meta.textContent = `${inputAssetFormatSize(image.size)} · ${image.width}×${image.height}`;
+  if (preview) {
+    preview.value = "";
+    preview.hidden = true;
+  }
+  imagePreviewImg.src = image.dataUrl;
+  imagePreview.hidden = false;
+  if (pasteDirectBtn) pasteDirectBtn.hidden = true;
+  overlay.hidden = false;
+  titleInput.focus();
+  titleInput.select();
+  return true;
+}
+
+function closeInputAssetPrompt() {
+  const overlay = $("inputAssetPromptOverlay");
+  if (overlay) overlay.hidden = true;
+  pendingInputAssetPrompt = null;
+}
+
+async function savePendingInputAsset(insertAfterSave = false) {
+  if (!pendingInputAssetPrompt) return;
+  const ws = selectedWorkspace();
+  const titleInput = $("inputAssetPromptTitleInput");
+  const preview = $("inputAssetPromptPreview");
+  const { paneId } = pendingInputAssetPrompt;
+  const content = preview && !preview.readOnly ? preview.value : pendingInputAssetPrompt.text;
+  if (!ws?.path) {
+    setStatus("Workspace path is required to save input assets.", true);
+    return;
+  }
+  try {
+    const source = {
+      pane_id: paneId ?? null,
+      session_id: paneId ? (state.paneSessions[paneId] ?? null) : null
+    };
+    const result = pendingInputAssetPrompt.kind === "image"
+      ? await window.wincmux.inputAssetCreateImage(ws.path, {
+        title: titleInput?.value || "Image asset",
+        dataUrl: pendingInputAssetPrompt.image?.dataUrl ?? "",
+        source
+      })
+      : await window.wincmux.inputAssetCreateText(ws.path, {
+        title: titleInput?.value || defaultInputAssetTitle(content),
+        content,
+        source
+      });
+    closeInputAssetPrompt();
+    setStatus(`Input asset saved: ${result?.asset?.title ?? "snippet"}`);
+    if (insertAfterSave && paneId && result?.asset) {
+      await writeTextToPaneChunked(paneId, inputAssetReferenceText(result.asset, ws.path));
+    }
+    const inputArea = $("wsInputAssets");
+    if (inputArea && inputArea.style.display !== "none") {
+      inputArea.style.display = "none";
+      await loadInputAssets(ws);
+    }
+  } catch (err) {
+    setStatus(String(err?.message ?? err), true);
+  }
+}
+
+async function handlePanePasteText(paneId, text, options = {}) {
+  if (!paneId || !text) return;
+  if (!options.forceDirect && isLongPasteText(text) && showInputAssetPrompt({ paneId, text })) {
+    return;
+  }
+  await writeTextToPaneChunked(paneId, text);
+}
+
+async function handlePaneClipboardPaste(paneId) {
+  if (!paneId) return;
+  const text = await window.wincmux.clipboardRead();
+  if (text) {
+    await handlePanePasteText(paneId, text);
+    return;
+  }
+  if (typeof window.wincmux.clipboardReadImage !== "function") {
+    return;
+  }
+  const image = await window.wincmux.clipboardReadImage();
+  if (!image?.hasImage) {
+    return;
+  }
+  if (image.tooLarge) {
+    setStatus(`Clipboard image is too large: ${inputAssetFormatSize(image.size)}`, true);
+    return;
+  }
+  showInputAssetImagePrompt({ paneId, image });
+}
+
+function renderInputAssetItem(asset) {
+  const icon = asset.type === "image" ? "Image" : "Text";
+  const date = asset.created_at ? new Date(asset.created_at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+  return `<div class="input-asset-item" data-input-asset-id="${htmlEscape(asset.id)}">
+    <div class="input-asset-item-main">
+      <div class="input-asset-row">
+        <span class="input-asset-type">${icon}</span>
+        <span class="input-asset-name" title="${htmlEscape(asset.title)}">${htmlEscape(asset.title)}</span>
+      </div>
+      <div class="input-asset-path" title="${htmlEscape(asset.relative_path)}">${htmlEscape(asset.relative_path)}</div>
+      <div class="input-asset-preview" title="${htmlEscape(asset.preview)}">${htmlEscape(asset.preview || "-")}</div>
+      <div class="input-asset-meta">${htmlEscape(inputAssetFormatSize(asset.size))}${date ? ` · ${htmlEscape(date)}` : ""}</div>
+    </div>
+    <div class="input-asset-actions">
+      <button data-input-action="view">View</button>
+      <button data-input-action="insert">Insert</button>
+      <button data-input-action="insert-path">Path</button>
+      <button data-input-action="copy">Copy</button>
+      <button data-input-action="rename">Rename</button>
+      <button data-input-action="reveal">Explorer</button>
+      <button data-input-action="delete" class="danger">Delete</button>
+    </div>
+  </div>`;
+}
+
+function renderInputAssets(result) {
+  const assets = result?.assets ?? [];
+  const textCount = assets.filter((asset) => asset.type === "text").length;
+  const imageCount = assets.filter((asset) => asset.type === "image").length;
+  const body = assets.length
+    ? assets.map(renderInputAssetItem).join("")
+    : '<div class="input-asset-empty">No input assets yet. Long paste snippets and imported images will appear here.</div>';
+  return `<div class="input-asset-toolbar">
+    <div>
+      <div class="input-asset-title">Input Assets</div>
+      <div class="input-asset-subtitle">Saved in .wincmux/input-assets · text ${textCount} · images ${imageCount}</div>
+    </div>
+    <div class="input-asset-toolbar-actions">
+      <button data-input-action="new-text">New Text</button>
+      <button data-input-action="import-image">Import Image</button>
+      <button data-input-action="refresh">Refresh</button>
+    </div>
+  </div>
+  <div class="input-assets-layout">
+    <div id="inputAssetBrowser" class="input-asset-browser">${body}</div>
+    <div id="inputAssetViewer" class="input-asset-viewer">
+      <div class="input-asset-viewer-empty">
+        <div class="input-asset-viewer-empty-title">Select an input asset</div>
+        <div>긴 텍스트는 전체 내용 확인 후 삽입하고, 이미지는 경로를 삽입합니다.</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function currentInputAssetList() {
+  const area = $("wsInputAssets");
+  if (!area?.dataset.assets) return [];
+  try {
+    return JSON.parse(area.dataset.assets);
+  } catch {
+    return [];
+  }
+}
+
+function findInputAsset(assetId) {
+  return currentInputAssetList().find((asset) => asset.id === assetId);
+}
+
+async function loadInputAssets(ws) {
+  const area = $("wsInputAssets");
+  if (!area || !ws?.path) return;
+  if (area.style.display !== "none" && area.dataset.wsId === ws.id) {
+    area.style.display = "none";
+    const panel = $("wsInfoPanel");
+    if (panel) panel.classList.remove("ws-info-panel-input-assets");
+    const summaryEl = $("wsSessionSummary");
+    if (summaryEl) summaryEl.style.display = "";
+    return;
+  }
+  const panel = $("wsInfoPanel");
+  if (panel) {
+    panel.classList.add("ws-info-panel-input-assets");
+    requestAnimationFrame(() => {
+      const rect = panel.getBoundingClientRect();
+      if (rect.right > window.innerWidth - 8) {
+        panel.style.left = `${Math.max(8, window.innerWidth - rect.width - 8)}px`;
+      }
+    });
+  }
+  const summaryEl = $("wsSessionSummary");
+  if (summaryEl) summaryEl.style.display = "none";
+  const scanArea = $("wsScanArea");
+  if (scanArea) scanArea.style.display = "none";
+  const gitArea = $("wsGitSummary");
+  if (gitArea) gitArea.style.display = "none";
+  const agentArea = $("wsAgentAssets");
+  if (agentArea) agentArea.style.display = "none";
+  area.dataset.wsId = ws.id;
+  area.style.display = "";
+  area.innerHTML = '<div class="input-asset-loading">Loading input assets...</div>';
+  try {
+    const result = await window.wincmux.inputAssetsList(ws.path);
+    area.dataset.assets = JSON.stringify(result?.assets ?? []);
+    area.innerHTML = renderInputAssets(result);
+    area.onclick = (ev) => handleInputAssetClick(ev, ws);
+    area.ondragover = (ev) => {
+      ev.preventDefault();
+      area.classList.add("drag-over");
+    };
+    area.ondragleave = () => area.classList.remove("drag-over");
+    area.ondrop = async (ev) => {
+      ev.preventDefault();
+      area.classList.remove("drag-over");
+      const file = ev.dataTransfer?.files?.[0];
+      const filePath = file?.path;
+      if (filePath) {
+        await importInputAssetByPath(ws, filePath);
+      } else {
+        setStatus("Use Import Image for this file source.", true);
+      }
+    };
+  } catch (err) {
+    area.innerHTML = `<div class="input-asset-loading">Input assets unavailable: ${htmlEscape(String(err?.message ?? err))}</div>`;
+  }
+}
+
+async function refreshInputAssets(ws) {
+  const area = $("wsInputAssets");
+  if (area) area.style.display = "none";
+  await loadInputAssets(ws);
+}
+
+async function importInputAssetByPath(ws, filePath) {
+  try {
+    await window.wincmux.inputAssetImportFile(ws.path, { filePath, kind: "image" });
+    setStatus("Image input asset imported");
+    await refreshInputAssets(ws);
+  } catch (err) {
+    setStatus(String(err?.message ?? err), true);
+  }
+}
+
+async function handleInputAssetClick(ev, ws) {
+  const button = ev.target.closest("[data-input-action]");
+  if (!button) return;
+  const action = button.dataset.inputAction;
+  if (action === "refresh") {
+    await refreshInputAssets(ws);
+    return;
+  }
+  if (action === "new-text") {
+    showInputAssetPrompt({ paneId: state.selectedPaneId, text: "" });
+    const preview = $("inputAssetPromptPreview");
+    if (preview) preview.readOnly = false;
+    return;
+  }
+  if (action === "import-image") {
+    try {
+      const result = await window.wincmux.inputAssetPickFile(ws.path);
+      if (result?.asset) {
+        setStatus("Image input asset imported");
+        await refreshInputAssets(ws);
+      }
+    } catch (err) {
+      setStatus(String(err?.message ?? err), true);
+    }
+    return;
+  }
+  if (action === "save-viewer-title") {
+    const viewer = $("inputAssetViewer");
+    const input = viewer?.querySelector(".input-asset-title-edit");
+    if (!viewer?.dataset.assetId || !input) return;
+    await window.wincmux.inputAssetRename(ws.path, viewer.dataset.assetId, input.value).catch((err) => setStatus(String(err?.message ?? err), true));
+    await refreshInputAssets(ws);
+    return;
+  }
+  const itemEl = ev.target.closest("[data-input-asset-id]");
+  const assetId = itemEl?.dataset.inputAssetId;
+  const asset = assetId ? findInputAsset(assetId) : null;
+  if (!asset) return;
+  if (action === "view") {
+    await openInputAssetViewer(ws, asset);
+  } else if (action === "insert" || action === "insert-path") {
+    const paneId = state.selectedPaneId;
+    if (!paneId) {
+      setStatus("Select a pane before inserting an input asset.", true);
+      return;
+    }
+    const result = await window.wincmux.inputAssetRead(ws.path, asset.id);
+    const text = inputAssetInsertText(result.asset, result.content, action === "insert-path" ? "path" : "reference", ws.path);
+    await writeTextToPaneChunked(paneId, text);
+    setStatus(action === "insert-path" ? "Input asset path inserted" : "Input asset work prompt inserted");
+  } else if (action === "copy") {
+    const result = await window.wincmux.inputAssetRead(ws.path, asset.id);
+    const text = inputAssetInsertText(result.asset, result.content, "reference", ws.path);
+    await window.wincmux.clipboardWrite(text).catch(() => {});
+    setStatus("Input asset copied");
+  } else if (action === "rename") {
+    await openInputAssetViewer(ws, asset);
+    const input = $("inputAssetViewer")?.querySelector(".input-asset-title-edit");
+    input?.focus();
+    input?.select();
+  } else if (action === "reveal") {
+    await window.wincmux.inputAssetReveal(ws.path, asset.id).catch((err) => setStatus(String(err?.message ?? err), true));
+  } else if (action === "delete") {
+    await window.wincmux.inputAssetDelete(ws.path, asset.id).catch((err) => setStatus(String(err?.message ?? err), true));
+    setStatus("Input asset deleted");
+    await refreshInputAssets(ws);
+  }
+}
+
+async function openInputAssetViewer(ws, asset) {
+  const viewer = $("inputAssetViewer");
+  if (!viewer) return;
+  viewer.dataset.assetId = asset.id;
+  viewer.innerHTML = `<div class="input-asset-loading">Loading ${htmlEscape(asset.title)}...</div>`;
+  try {
+    const result = await window.wincmux.inputAssetRead(ws.path, asset.id);
+    const row = result.asset;
+    const preview = row.type === "image"
+      ? `<div class="input-asset-image-wrap"><img src="${htmlEscape(result.data_url ?? "")}" alt="${htmlEscape(row.title)}" /></div>`
+      : `<textarea class="input-asset-editor" readonly spellcheck="false">${htmlEscape(result.content ?? "")}</textarea>`;
+    viewer.innerHTML = `<div class="input-asset-viewer-header">
+      <div class="input-asset-viewer-title-group">
+        <input class="input-asset-title-edit" value="${htmlEscape(row.title)}" />
+        <div class="input-asset-viewer-meta">${htmlEscape(row.relative_path)} · ${htmlEscape(inputAssetFormatSize(row.size))}</div>
+      </div>
+      <div class="input-asset-viewer-actions">
+        <button data-input-action="save-viewer-title">Save Title</button>
+      </div>
+    </div>${preview}`;
+  } catch (err) {
+    viewer.innerHTML = `<div class="input-asset-loading">Preview unavailable: ${htmlEscape(String(err?.message ?? err))}</div>`;
+  }
+}
+
 function agentAssetDetailText(value) {
   if (value == null || value === "") return "";
   if (Array.isArray(value)) return value.map((v) => typeof v === "object" ? JSON.stringify(v) : String(v)).join(", ");
@@ -1840,6 +2288,7 @@ async function loadAgentAssets(ws) {
   }
   const panel = $("wsInfoPanel");
   if (panel) {
+    panel.classList.remove("ws-info-panel-input-assets");
     panel.classList.add("ws-info-panel-agent-assets");
     requestAnimationFrame(() => {
       const rect = panel.getBoundingClientRect();
@@ -1854,6 +2303,8 @@ async function loadAgentAssets(ws) {
   if (scanArea) scanArea.style.display = "none";
   const gitArea = $("wsGitSummary");
   if (gitArea) gitArea.style.display = "none";
+  const inputArea = $("wsInputAssets");
+  if (inputArea) inputArea.style.display = "none";
   area.dataset.wsId = ws.id;
   area.style.display = "";
   area.innerHTML = '<div class="agent-asset-loading">Scanning agent assets...</div>';
@@ -2025,7 +2476,7 @@ function openWsInfoPanel(ws, anchorEl) {
   const summaryEl = $("wsSessionSummary");
   if (!overlay || !panel) return;
 
-  panel.classList.remove("ws-info-panel-agent-assets");
+  panel.classList.remove("ws-info-panel-agent-assets", "ws-info-panel-input-assets");
   titleEl.textContent = ws.name;
   descInput.value = ws.description ?? "";
   overlay.style.display = "";
@@ -2039,6 +2490,7 @@ function openWsInfoPanel(ws, anchorEl) {
       { label: "VSCode",   title: "Open in VSCode",        fn: () => window.wincmux.openInVscode(ws.path).catch((e) => setStatus(String(e), true)) },
       { label: "Git",      title: "Show git log & status", fn: () => loadGitSummary(ws) },
       { label: "Agent Assets", title: "Inspect Claude/Codex workspace assets", fn: () => loadAgentAssets(ws) },
+      { label: "Input Assets", title: "Manage long paste snippets and image paths", fn: () => loadInputAssets(ws) },
       { label: "+ Terminal",  title: "New PTY in selected pane", fn: () => { closeWsInfoPanel(); startSessionForPane(state.selectedPaneId, { force: true, workspaceId: ws.id }).catch((e) => setStatus(String(e), true)); } },
     ];
     for (const a of actions) {
@@ -2077,6 +2529,8 @@ function openWsInfoPanel(ws, anchorEl) {
   if (gitArea) { gitArea.style.display = "none"; gitArea.innerHTML = ""; }
   const agentArea = $("wsAgentAssets");
   if (agentArea) { agentArea.style.display = "none"; agentArea.innerHTML = ""; agentArea.dataset.wsId = ""; agentArea.dataset.scan = ""; agentArea.dataset.provider = "all"; }
+  const inputArea = $("wsInputAssets");
+  if (inputArea) { inputArea.style.display = "none"; inputArea.innerHTML = ""; inputArea.dataset.wsId = ""; inputArea.dataset.assets = ""; }
   summaryEl.style.display = "";
 
   // Load session summary
@@ -2233,8 +2687,10 @@ async function loadGitSummary(ws) {
   if (!gitArea || !ws?.path) return;
   const agentArea = $("wsAgentAssets");
   if (agentArea) agentArea.style.display = "none";
+  const inputArea = $("wsInputAssets");
+  if (inputArea) inputArea.style.display = "none";
   const panel = $("wsInfoPanel");
-  if (panel) panel.classList.remove("ws-info-panel-agent-assets");
+  if (panel) panel.classList.remove("ws-info-panel-agent-assets", "ws-info-panel-input-assets");
   const summaryEl = $("wsSessionSummary");
   if (summaryEl) summaryEl.style.display = "";
 
@@ -2348,6 +2804,33 @@ function bindWsInfoPanel() {
 
 globalThis.openWsInfoPanel = openWsInfoPanel;
 
+function bindInputAssetPrompt() {
+  $("inputAssetPromptCloseBtn")?.addEventListener("click", () => closeInputAssetPrompt());
+  $("inputAssetPasteDirectBtn")?.addEventListener("click", () => {
+    const pending = pendingInputAssetPrompt;
+    closeInputAssetPrompt();
+    if (pending?.paneId && pending.text) {
+      writeTextToPaneChunked(pending.paneId, pending.text).catch((err) => setStatus(String(err?.message ?? err), true));
+    }
+  });
+  $("inputAssetSaveOnlyBtn")?.addEventListener("click", () => {
+    savePendingInputAsset(false).catch((err) => setStatus(String(err?.message ?? err), true));
+  });
+  $("inputAssetSaveInsertBtn")?.addEventListener("click", () => {
+    savePendingInputAsset(true).catch((err) => setStatus(String(err?.message ?? err), true));
+  });
+  $("inputAssetPromptOverlay")?.addEventListener("click", (ev) => {
+    if (ev.target === $("inputAssetPromptOverlay")) closeInputAssetPrompt();
+  });
+  for (const id of ["inputAssetPromptTitleInput", "inputAssetPromptPreview"]) {
+    const el = $(id);
+    if (!el) continue;
+    for (const type of ["keydown", "keyup", "paste", "cut", "copy"]) {
+      el.addEventListener(type, (ev) => ev.stopPropagation());
+    }
+  }
+}
+
 // ?? Workspace Notepad ??????????????????????????????????????????
 let notepadSaveTimer = null;
 
@@ -2380,6 +2863,9 @@ function bindNotepadEvents() {
 }
 
 function bindEvents() {
+  toggleWorkspaceCreateBtn?.addEventListener("click", () => toggleWorkspaceCreate());
+  workspaceCompactBtn?.addEventListener("click", () => setWorkspaceListMode("compact"));
+  workspaceDetailBtn?.addEventListener("click", () => setWorkspaceListMode("detail"));
   $("createWorkspaceBtn").addEventListener("click", () =>
     onCreateWorkspace().catch((err) => setStatus(String(err), true)),
   );
@@ -2439,6 +2925,7 @@ function bindEvents() {
     });
   }
   bindWsInfoPanel();
+  bindInputAssetPrompt();
   bindKeyboardShortcuts();
 }
 
@@ -2456,6 +2943,13 @@ function bindKeyboardShortcuts() {
     if (ev.key === "Escape" && shortcutOverlay && !shortcutOverlay.hidden) {
       ev.preventDefault();
       hideShortcutHelp();
+      return;
+    }
+
+    const inputAssetOverlay = $("inputAssetPromptOverlay");
+    if (ev.key === "Escape" && inputAssetOverlay && !inputAssetOverlay.hidden) {
+      ev.preventDefault();
+      closeInputAssetPrompt();
       return;
     }
 
@@ -2712,5 +3206,7 @@ window.addEventListener("beforeunload", () => {
 });
 // Expose functions needed by renderer.panes.js (loaded before this file)
 globalThis.loadSessions = loadSessions;
+globalThis.handlePanePasteText = handlePanePasteText;
+globalThis.handlePaneClipboardPaste = handlePaneClipboardPaste;
 
 bootstrap();

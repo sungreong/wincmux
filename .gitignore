@@ -20,6 +20,7 @@ legacy-dotnet/**/obj/
 *.db
 *.db-journal
 logs/
+.wincmux/
 
 # VS Code
 .vscode/

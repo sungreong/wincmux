@@ -1858,10 +1858,20 @@ function createPaneView(paneId, host) {
     if (ev.ctrlKey && key === "v") {
       // Suppress onData immediately: xterm native paste fires before clipboardRead resolves.
       view.suppressOnData = true;
+      if (typeof globalThis.handlePaneClipboardPaste === "function") {
+        void globalThis.handlePaneClipboardPaste(paneId).finally(() => {
+          view.suppressOnData = false;
+        });
+        return false;
+      }
       void window.wincmux.clipboardRead().then((text) => {
         view.suppressOnData = false;
         if (text) {
-          queuePaneInput(view, text);
+          if (typeof globalThis.handlePanePasteText === "function") {
+            void globalThis.handlePanePasteText(paneId, text);
+          } else {
+            queuePaneInput(view, text);
+          }
         }
       });
       return false;

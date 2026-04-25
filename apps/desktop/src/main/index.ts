@@ -3,6 +3,7 @@ import net from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import zlib from "node:zlib";
+import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { app, BrowserWindow, ipcMain, dialog, clipboard, Menu, shell, nativeImage, Notification as ElectronNotification, type NativeImage, type OpenDialogOptions, type WebContents } from "electron";
@@ -1716,6 +1717,372 @@ function createAgentAsset(workspacePath: string, relativePath: string, templateK
   return { ok: true, content };
 }
 
+const INPUT_ASSET_MAX_TEXT_BYTES = 2 * 1024 * 1024;
+const INPUT_ASSET_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const INPUT_ASSET_PREVIEW_CHARS = 280;
+const INPUT_ASSET_IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
+
+type InputAssetType = "text" | "image";
+
+type InputAssetRow = {
+  id: string;
+  type: InputAssetType;
+  title: string;
+  relative_path: string;
+  preview: string;
+  size: number;
+  created_at: string;
+  updated_at: string;
+  source_pane_id?: string | null;
+  source_session_id?: string | null;
+};
+
+type InputAssetIndex = {
+  version: 1;
+  assets: InputAssetRow[];
+};
+
+function inputAssetsBaseRelative(): string {
+  return ".wincmux/input-assets";
+}
+
+function inputAssetsIndexRelative(): string {
+  return `${inputAssetsBaseRelative()}/index.json`;
+}
+
+function resolveInputAssetPath(root: string, relativePath: string): string {
+  const relative = normalizeRelativePath(relativePath);
+  if (!relative.startsWith(`${inputAssetsBaseRelative()}/`) && relative !== inputAssetsIndexRelative()) {
+    throw new Error(`input asset path is not allowed: ${relative}`);
+  }
+  const fullPath = path.resolve(root, relative);
+  assertInsideWorkspace(root, fullPath);
+  const rootReal = fs.realpathSync.native(root);
+  const realTarget = fs.realpathSync.native(fs.existsSync(fullPath) ? fullPath : nearestExistingAncestor(path.dirname(fullPath)));
+  assertInsideWorkspace(rootReal, realTarget);
+  return fullPath;
+}
+
+function ensureInputAssetStore(root: string): void {
+  const base = path.join(root, ".wincmux");
+  const assets = path.join(base, "input-assets");
+  const assertExistingSafe = (targetPath: string) => {
+    if (!fs.existsSync(targetPath)) return;
+    const rootReal = fs.realpathSync.native(root);
+    const targetReal = fs.realpathSync.native(targetPath);
+    assertInsideWorkspace(rootReal, targetReal);
+  };
+  assertExistingSafe(base);
+  assertExistingSafe(assets);
+  fs.mkdirSync(path.join(assets, "snippets"), { recursive: true });
+  fs.mkdirSync(path.join(assets, "images"), { recursive: true });
+  assertExistingSafe(path.join(assets, "snippets"));
+  assertExistingSafe(path.join(assets, "images"));
+  const gitignorePath = path.join(base, ".gitignore");
+  let existing = "";
+  try {
+    existing = fs.existsSync(gitignorePath) ? fs.readFileSync(gitignorePath, "utf8") : "";
+  } catch {
+    existing = "";
+  }
+  if (!/(^|\r?\n)input-assets\/?(\r?\n|$)/.test(existing)) {
+    const prefix = existing && !existing.endsWith("\n") ? "\n" : "";
+    fs.writeFileSync(gitignorePath, `${existing}${prefix}input-assets/\n`, "utf8");
+  }
+  const indexPath = path.join(assets, "index.json");
+  if (!fs.existsSync(indexPath)) {
+    writeInputAssetIndex(root, { version: 1, assets: [] });
+  }
+}
+
+function readInputAssetIndex(root: string): InputAssetIndex {
+  const indexPath = resolveInputAssetPath(root, inputAssetsIndexRelative());
+  if (!fs.existsSync(indexPath)) {
+    return { version: 1, assets: [] };
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(indexPath, "utf8")) as Partial<InputAssetIndex>;
+    const rows = Array.isArray(parsed.assets) ? parsed.assets : [];
+    return {
+      version: 1,
+      assets: rows
+        .filter((row): row is InputAssetRow => Boolean(row && typeof row.id === "string" && typeof row.relative_path === "string"))
+        .map((row) => ({
+          id: row.id,
+          type: row.type === "image" ? "image" : "text",
+          title: String(row.title || "Untitled"),
+          relative_path: String(row.relative_path),
+          preview: String(row.preview ?? ""),
+          size: Number(row.size ?? 0),
+          created_at: String(row.created_at ?? new Date().toISOString()),
+          updated_at: String(row.updated_at ?? row.created_at ?? new Date().toISOString()),
+          source_pane_id: row.source_pane_id ?? null,
+          source_session_id: row.source_session_id ?? null
+        }))
+    };
+  } catch (err) {
+    throw new Error(`input asset index is invalid: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function writeInputAssetIndex(root: string, index: InputAssetIndex): void {
+  const indexPath = resolveInputAssetPath(root, inputAssetsIndexRelative());
+  fs.mkdirSync(path.dirname(indexPath), { recursive: true });
+  const tmpPath = `${indexPath}.tmp-${Date.now()}`;
+  fs.writeFileSync(tmpPath, `${JSON.stringify(index, null, 2)}\n`, "utf8");
+  fs.renameSync(tmpPath, indexPath);
+}
+
+function inputAssetTitleFromText(text: string): string {
+  const firstLine = text.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  if (firstLine) {
+    return firstLine.slice(0, 80);
+  }
+  const stamp = new Date().toLocaleString("sv-SE", { hour12: false }).slice(0, 16);
+  return `Snippet ${stamp}`;
+}
+
+function inputAssetPreview(text: string): string {
+  return text.replace(/\s+/g, " ").trim().slice(0, INPUT_ASSET_PREVIEW_CHARS);
+}
+
+function inputAssetTitleFromImage(): string {
+  const stamp = new Date().toLocaleString("sv-SE", { hour12: false }).slice(0, 16);
+  return `Image ${stamp}`;
+}
+
+function inputAssetById(root: string, assetId: string): { index: InputAssetIndex; asset: InputAssetRow; fullPath: string } {
+  const index = readInputAssetIndex(root);
+  const asset = index.assets.find((row) => row.id === assetId);
+  if (!asset) {
+    throw new Error(`input asset not found: ${assetId}`);
+  }
+  const fullPath = resolveInputAssetPath(root, asset.relative_path);
+  return { index, asset, fullPath };
+}
+
+function listInputAssets(workspacePath: string): { assets: InputAssetRow[] } {
+  const root = validateWorkspacePath(workspacePath);
+  ensureInputAssetStore(root);
+  const index = readInputAssetIndex(root);
+  return { assets: index.assets.slice().sort((a, b) => b.created_at.localeCompare(a.created_at)) };
+}
+
+function createTextInputAsset(
+  workspacePath: string,
+  payload: { title?: string; content?: string; source?: { pane_id?: string | null; session_id?: string | null } }
+): { asset: InputAssetRow } {
+  const root = validateWorkspacePath(workspacePath);
+  ensureInputAssetStore(root);
+  const content = String(payload?.content ?? "");
+  if (!content.trim()) {
+    throw new Error("input asset content is required");
+  }
+  if (Buffer.byteLength(content, "utf8") > INPUT_ASSET_MAX_TEXT_BYTES) {
+    throw new Error("input asset text is too large");
+  }
+  const index = readInputAssetIndex(root);
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const relativePath = `${inputAssetsBaseRelative()}/snippets/${id}.md`;
+  const fullPath = resolveInputAssetPath(root, relativePath);
+  fs.writeFileSync(fullPath, content, "utf8");
+  const asset: InputAssetRow = {
+    id,
+    type: "text",
+    title: String(payload?.title || inputAssetTitleFromText(content)).trim().slice(0, 120) || inputAssetTitleFromText(content),
+    relative_path: relativePath,
+    preview: inputAssetPreview(content),
+    size: Buffer.byteLength(content, "utf8"),
+    created_at: now,
+    updated_at: now,
+    source_pane_id: payload?.source?.pane_id ?? null,
+    source_session_id: payload?.source?.session_id ?? null
+  };
+  index.assets.unshift(asset);
+  writeInputAssetIndex(root, index);
+  return { asset };
+}
+
+function createImageInputAssetFromBuffer(
+  root: string,
+  buffer: Buffer,
+  title: string,
+  source?: { pane_id?: string | null; session_id?: string | null }
+): { asset: InputAssetRow } {
+  if (buffer.length > INPUT_ASSET_MAX_IMAGE_BYTES) {
+    throw new Error("image is too large");
+  }
+  const index = readInputAssetIndex(root);
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const relativePath = `${inputAssetsBaseRelative()}/images/${id}.png`;
+  const fullPath = resolveInputAssetPath(root, relativePath);
+  fs.writeFileSync(fullPath, buffer);
+  const asset: InputAssetRow = {
+    id,
+    type: "image",
+    title: String(title || inputAssetTitleFromImage()).trim().slice(0, 120) || inputAssetTitleFromImage(),
+    relative_path: relativePath,
+    preview: relativePath,
+    size: buffer.length,
+    created_at: now,
+    updated_at: now,
+    source_pane_id: source?.pane_id ?? null,
+    source_session_id: source?.session_id ?? null
+  };
+  index.assets.unshift(asset);
+  writeInputAssetIndex(root, index);
+  return { asset };
+}
+
+function importInputAssetFile(workspacePath: string, payload: { filePath?: string; kind?: string }): { asset: InputAssetRow } {
+  const root = validateWorkspacePath(workspacePath);
+  ensureInputAssetStore(root);
+  const sourcePath = path.resolve(String(payload?.filePath ?? ""));
+  if (!sourcePath || !fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
+    throw new Error("image file is required");
+  }
+  const ext = path.extname(sourcePath).toLowerCase();
+  if (!INPUT_ASSET_IMAGE_EXTS.has(ext)) {
+    throw new Error("only png, jpg, jpeg, webp, and gif images are supported");
+  }
+  const stat = fs.statSync(sourcePath);
+  if (stat.size > INPUT_ASSET_MAX_IMAGE_BYTES) {
+    throw new Error("image is too large");
+  }
+  const index = readInputAssetIndex(root);
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const relativePath = `${inputAssetsBaseRelative()}/images/${id}${ext}`;
+  const fullPath = resolveInputAssetPath(root, relativePath);
+  fs.copyFileSync(sourcePath, fullPath);
+  const asset: InputAssetRow = {
+    id,
+    type: "image",
+    title: path.basename(sourcePath).slice(0, 120),
+    relative_path: relativePath,
+    preview: relativePath,
+    size: stat.size,
+    created_at: now,
+    updated_at: now,
+    source_pane_id: null,
+    source_session_id: null
+  };
+  index.assets.unshift(asset);
+  writeInputAssetIndex(root, index);
+  return { asset };
+}
+
+function createImageInputAsset(
+  workspacePath: string,
+  payload: { title?: string; dataUrl?: string; source?: { pane_id?: string | null; session_id?: string | null } }
+): { asset: InputAssetRow } {
+  const root = validateWorkspacePath(workspacePath);
+  ensureInputAssetStore(root);
+  const dataUrl = String(payload?.dataUrl ?? "");
+  if (!dataUrl.startsWith("data:image/")) {
+    throw new Error("image data is required");
+  }
+  const image = nativeImage.createFromDataURL(dataUrl);
+  if (image.isEmpty()) {
+    throw new Error("image data is invalid");
+  }
+  return createImageInputAssetFromBuffer(root, image.toPNG(), payload?.title ?? inputAssetTitleFromImage(), payload?.source);
+}
+
+function readClipboardImage(): { hasImage: false } | { hasImage: true; dataUrl: string; width: number; height: number; size: number; tooLarge: boolean } {
+  const image = clipboard.readImage();
+  if (image.isEmpty()) {
+    return { hasImage: false };
+  }
+  const size = image.getSize();
+  const buffer = image.toPNG();
+  return {
+    hasImage: true,
+    dataUrl: buffer.length <= INPUT_ASSET_MAX_IMAGE_BYTES ? `data:image/png;base64,${buffer.toString("base64")}` : "",
+    width: size.width,
+    height: size.height,
+    size: buffer.length,
+    tooLarge: buffer.length > INPUT_ASSET_MAX_IMAGE_BYTES
+  };
+}
+
+function mimeForImagePath(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".webp") return "image/webp";
+  if (ext === ".gif") return "image/gif";
+  return "image/png";
+}
+
+function readInputAsset(workspacePath: string, assetId: string): { asset: InputAssetRow; content?: string; data_url?: string } {
+  const root = validateWorkspacePath(workspacePath);
+  ensureInputAssetStore(root);
+  const { asset, fullPath } = inputAssetById(root, assetId);
+  if (!fs.existsSync(fullPath)) {
+    throw new Error("input asset file is missing");
+  }
+  if (asset.type === "image") {
+    const data = fs.readFileSync(fullPath);
+    return { asset, data_url: `data:${mimeForImagePath(fullPath)};base64,${data.toString("base64")}` };
+  }
+  return { asset, content: fs.readFileSync(fullPath, "utf8") };
+}
+
+function renameInputAsset(workspacePath: string, assetId: string, title: string): { ok: true } {
+  const root = validateWorkspacePath(workspacePath);
+  ensureInputAssetStore(root);
+  const index = readInputAssetIndex(root);
+  const asset = index.assets.find((row) => row.id === assetId);
+  if (!asset) throw new Error(`input asset not found: ${assetId}`);
+  asset.title = String(title ?? "").trim().slice(0, 120) || asset.title;
+  asset.updated_at = new Date().toISOString();
+  writeInputAssetIndex(root, index);
+  return { ok: true };
+}
+
+function deleteInputAsset(workspacePath: string, assetId: string): { ok: true } {
+  const root = validateWorkspacePath(workspacePath);
+  ensureInputAssetStore(root);
+  const index = readInputAssetIndex(root);
+  const asset = index.assets.find((row) => row.id === assetId);
+  if (!asset) return { ok: true };
+  const fullPath = resolveInputAssetPath(root, asset.relative_path);
+  if (fs.existsSync(fullPath)) {
+    fs.unlinkSync(fullPath);
+  }
+  index.assets = index.assets.filter((row) => row.id !== assetId);
+  writeInputAssetIndex(root, index);
+  return { ok: true };
+}
+
+function revealInputAsset(workspacePath: string, assetId: string): { ok: true } {
+  const root = validateWorkspacePath(workspacePath);
+  ensureInputAssetStore(root);
+  const { fullPath } = inputAssetById(root, assetId);
+  if (fs.existsSync(fullPath)) {
+    shell.showItemInFolder(fullPath);
+  } else {
+    shell.showItemInFolder(path.dirname(fullPath));
+  }
+  return { ok: true };
+}
+
+async function pickInputAssetFile(workspacePath: string): Promise<{ asset: InputAssetRow } | null> {
+  validateWorkspacePath(workspacePath);
+  const win = BrowserWindow.getFocusedWindow();
+  const options: OpenDialogOptions = {
+    properties: ["openFile"],
+    filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }]
+  };
+  const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+  return importInputAssetFile(workspacePath, { filePath: result.filePaths[0], kind: "image" });
+}
+
 function registerIpcHandlers(): void {
   ipcMain.handle("wincmux:rpc", async (_event, payload: RpcPayload) => toIpcEnvelope(() => pipeCall(payload)));
   ipcMain.handle("wincmux:stream-subscribe", async (event, payload: StreamFilter) =>
@@ -1733,6 +2100,7 @@ function registerIpcHandlers(): void {
     clipboard.writeText(payload?.text ?? "");
     return { ok: true };
   });
+  ipcMain.handle("wincmux:clipboard-read-image", () => readClipboardImage());
   ipcMain.handle("wincmux:perf-log", (_event, payload: unknown) => {
     appendPerfLog(payload);
     return { ok: true };
@@ -1798,6 +2166,33 @@ function registerIpcHandlers(): void {
       }
       return { ok: true };
     })
+  );
+  ipcMain.handle("wincmux:input-assets-list", async (_event, payload: { path: string }) =>
+    toIpcEnvelope(() => Promise.resolve(listInputAssets(payload?.path)))
+  );
+  ipcMain.handle("wincmux:input-asset-create-text", async (_event, payload: { path: string; title?: string; content: string; source?: { pane_id?: string | null; session_id?: string | null } }) =>
+    toIpcEnvelope(() => Promise.resolve(createTextInputAsset(payload?.path, payload)))
+  );
+  ipcMain.handle("wincmux:input-asset-create-image", async (_event, payload: { path: string; title?: string; dataUrl: string; source?: { pane_id?: string | null; session_id?: string | null } }) =>
+    toIpcEnvelope(() => Promise.resolve(createImageInputAsset(payload?.path, payload)))
+  );
+  ipcMain.handle("wincmux:input-asset-import-file", async (_event, payload: { path: string; filePath: string; kind?: string }) =>
+    toIpcEnvelope(() => Promise.resolve(importInputAssetFile(payload?.path, payload)))
+  );
+  ipcMain.handle("wincmux:input-asset-pick-file", async (_event, payload: { path: string }) =>
+    toIpcEnvelope(() => pickInputAssetFile(payload?.path))
+  );
+  ipcMain.handle("wincmux:input-asset-read", async (_event, payload: { path: string; assetId: string }) =>
+    toIpcEnvelope(() => Promise.resolve(readInputAsset(payload?.path, payload?.assetId)))
+  );
+  ipcMain.handle("wincmux:input-asset-rename", async (_event, payload: { path: string; assetId: string; title: string }) =>
+    toIpcEnvelope(() => Promise.resolve(renameInputAsset(payload?.path, payload?.assetId, payload?.title)))
+  );
+  ipcMain.handle("wincmux:input-asset-delete", async (_event, payload: { path: string; assetId: string }) =>
+    toIpcEnvelope(() => Promise.resolve(deleteInputAsset(payload?.path, payload?.assetId)))
+  );
+  ipcMain.handle("wincmux:input-asset-reveal", async (_event, payload: { path: string; assetId: string }) =>
+    toIpcEnvelope(() => Promise.resolve(revealInputAsset(payload?.path, payload?.assetId)))
   );
   ipcMain.handle("wincmux:open-in-explorer", async (_event, payload: { path: string }) =>
     toIpcEnvelope(async () => {
