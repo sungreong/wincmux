@@ -85,6 +85,10 @@ export const sessionDeleteSchema = z.object({
   session_id: z.string().uuid()
 });
 
+export const aiSessionDeleteSchema = z.object({
+  ai_session_id: z.string().min(1)
+});
+
 export const sessionResizeSchema = z.object({
   session_id: z.string().uuid(),
   cols: z.number().int().positive(),
@@ -157,6 +161,19 @@ export const layoutCloseSchema = z.object({
   pane_id: z.string().uuid()
 });
 
+export const layoutSwapSchema = z.object({
+  workspace_id: z.string().uuid(),
+  first_pane_id: z.string().uuid(),
+  second_pane_id: z.string().uuid()
+});
+
+export const layoutMoveSchema = z.object({
+  workspace_id: z.string().uuid(),
+  source_pane_id: z.string().uuid(),
+  target_pane_id: z.string().uuid(),
+  placement: z.enum(["left", "right", "above", "below"])
+});
+
 export const layoutListSchema = z.object({
   workspace_id: z.string().uuid()
 });
@@ -169,4 +186,26 @@ export const paneSessionBindSchema = z.object({
 
 export const workspaceIdSchema = z.object({
   workspace_id: z.string().uuid()
+});
+
+export const groupCreateSchema = z.object({
+  workspace_id: z.string().uuid(),
+  name: z.string().min(1),
+  color: z.string().min(1).optional().nullable()
+});
+
+export const groupRenameSchema = z.object({
+  group_id: z.string().uuid(),
+  name: z.string().min(1)
+});
+
+export const groupDeleteSchema = z.object({
+  group_id: z.string().uuid(),
+  move_to_group_id: z.string().uuid().optional().nullable()
+});
+
+export const sessionGroupSetSchema = z.object({
+  workspace_id: z.string().uuid(),
+  session_id: z.string().uuid(),
+  group_id: z.string().uuid()
 });

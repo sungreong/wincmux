@@ -75,6 +75,336 @@ describe("core engine", () => {
     engine.stop();
   });
 
+  test("layout.swap swaps sibling leaf pane positions", () => {
+    const engine = new CoreEngine({ dbPath: tempDbPath(), pipeName: "\\\\.\\pipe\\wincmux-test-layout-swap" });
+    const created = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "workspace.create",
+      params: { name: "layout", path: process.cwd(), backend: "codex" }
+    });
+    const workspaceId = (created.result as { workspace: { id: string }; root_pane_id: string }).workspace.id;
+    const rootPaneId = (created.result as { workspace: { id: string }; root_pane_id: string }).root_pane_id;
+    const split = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "layout.split",
+      params: { workspace_id: workspaceId, pane_id: rootPaneId, direction: "horizontal" }
+    });
+    const [firstPaneId, secondPaneId] = (split.result as { pane_ids: [string, string] }).pane_ids;
+
+    const swapped = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "layout.swap",
+      params: { workspace_id: workspaceId, first_pane_id: firstPaneId, second_pane_id: secondPaneId }
+    });
+    expect(swapped.error).toBeUndefined();
+
+    const listed = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "layout.list",
+      params: { workspace_id: workspaceId }
+    });
+    const panes = (listed.result as { panes: Array<{ pane_id: string; parent_id: string | null; split: null | { first: string; second: string } }> }).panes;
+    const root = panes.find((pane) => pane.pane_id === rootPaneId);
+    expect(root?.split?.first).toBe(secondPaneId);
+    expect(root?.split?.second).toBe(firstPaneId);
+    expect(panes.find((pane) => pane.pane_id === firstPaneId)?.parent_id).toBe(rootPaneId);
+    expect(panes.find((pane) => pane.pane_id === secondPaneId)?.parent_id).toBe(rootPaneId);
+    engine.stop();
+  });
+
+  test("layout.move places a leaf pane below another leaf pane", () => {
+    const engine = new CoreEngine({ dbPath: tempDbPath(), pipeName: "\\\\.\\pipe\\wincmux-test-layout-move" });
+    const created = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "workspace.create",
+      params: { name: "layout-move", path: process.cwd(), backend: "codex" }
+    });
+    const workspaceId = (created.result as { workspace: { id: string }; root_pane_id: string }).workspace.id;
+    const rootPaneId = (created.result as { workspace: { id: string }; root_pane_id: string }).root_pane_id;
+    const split = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "layout.split",
+      params: { workspace_id: workspaceId, pane_id: rootPaneId, direction: "horizontal" }
+    });
+    const [sourcePaneId, targetPaneId] = (split.result as { pane_ids: [string, string] }).pane_ids;
+
+    const moved = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "layout.move",
+      params: { workspace_id: workspaceId, source_pane_id: sourcePaneId, target_pane_id: targetPaneId, placement: "below" }
+    });
+    expect(moved.error).toBeUndefined();
+
+    const listed = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "layout.list",
+      params: { workspace_id: workspaceId }
+    });
+    const panes = (listed.result as { panes: Array<{ pane_id: string; parent_id: string | null; split: null | { direction: string; first: string; second: string } }> }).panes;
+    const target = panes.find((pane) => pane.pane_id === targetPaneId);
+    const source = panes.find((pane) => pane.pane_id === sourcePaneId);
+    expect(target?.parent_id).toBe(source?.parent_id);
+    const container = panes.find((pane) => pane.pane_id === target?.parent_id);
+    expect(container?.parent_id).toBeNull();
+    expect(container?.split).toEqual({ direction: "vertical", first: targetPaneId, second: sourcePaneId });
+    engine.stop();
+  });
+
+  test("workspace creates default pane groups and unbound sessions read as Default", () => {
+    const engine = new CoreEngine({ dbPath: tempDbPath(), pipeName: "\\\\.\\pipe\\wincmux-test-groups-a" });
+    const created = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "workspace.create",
+      params: { name: "groups", path: process.cwd(), backend: "codex" }
+    });
+    const workspaceId = (created.result as { workspace: { id: string } }).workspace.id;
+
+    const groupsRes = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "group.list",
+      params: { workspace_id: workspaceId }
+    });
+    const groups = (groupsRes.result as { groups: Array<{ id: string; name: string }> }).groups;
+    expect(groups.map((group) => group.name)).toEqual(["Default"]);
+
+    const sessionId = randomUUID();
+    const internals = engine as unknown as {
+      db: {
+        insertSession: (row: {
+          id: string;
+          workspace_id: string;
+          pid: number;
+          status: "running" | "exited" | "failed";
+          started_at: string;
+          ended_at: string | null;
+          exit_code: number | null;
+          spawn_cmd: string | null;
+          spawn_args: string | null;
+          spawn_cwd: string | null;
+        }) => void;
+      };
+    };
+    internals.db.insertSession({
+      id: sessionId,
+      workspace_id: workspaceId,
+      pid: 1234,
+      status: "running",
+      started_at: new Date().toISOString(),
+      ended_at: null,
+      exit_code: null,
+      spawn_cmd: "pwsh.exe",
+      spawn_args: "[]",
+      spawn_cwd: process.cwd()
+    });
+
+    const bindingsRes = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session.group.list",
+      params: { workspace_id: workspaceId }
+    });
+    const bindings = (bindingsRes.result as { bindings: Array<{ session_id: string; group_id: string }> }).bindings;
+    const defaultGroup = groups.find((group) => group.name === "Default");
+    expect(bindings.find((binding) => binding.session_id === sessionId)?.group_id).toBe(defaultGroup?.id);
+    engine.stop();
+  });
+
+  test("session.group.set moves sessions and group.delete falls back to Default", () => {
+    const engine = new CoreEngine({ dbPath: tempDbPath(), pipeName: "\\\\.\\pipe\\wincmux-test-groups-b" });
+    const created = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "workspace.create",
+      params: { name: "groups-move", path: process.cwd(), backend: "codex" }
+    });
+    const workspaceId = (created.result as { workspace: { id: string } }).workspace.id;
+    const groups = (engine.dispatch({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "group.list",
+      params: { workspace_id: workspaceId }
+    }).result as { groups: Array<{ id: string; name: string }> }).groups;
+    const defaultGroup = groups.find((group) => group.name === "Default")!;
+    const createdGroup = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "group.create",
+      params: { workspace_id: workspaceId, name: "AI" }
+    });
+    const aiGroup = (createdGroup.result as { group: { id: string; name: string } }).group;
+    const sessionId = randomUUID();
+    const internals = engine as unknown as {
+      db: {
+        insertSession: (row: {
+          id: string;
+          workspace_id: string;
+          pid: number;
+          status: "running" | "exited" | "failed";
+          started_at: string;
+          ended_at: string | null;
+          exit_code: number | null;
+          spawn_cmd: string | null;
+          spawn_args: string | null;
+          spawn_cwd: string | null;
+        }) => void;
+      };
+    };
+    internals.db.insertSession({
+      id: sessionId,
+      workspace_id: workspaceId,
+      pid: 4321,
+      status: "running",
+      started_at: new Date().toISOString(),
+      ended_at: null,
+      exit_code: null,
+      spawn_cmd: "claude",
+      spawn_args: "[]",
+      spawn_cwd: process.cwd()
+    });
+
+    const setRes = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "session.group.set",
+      params: { workspace_id: workspaceId, session_id: sessionId, group_id: aiGroup.id }
+    });
+    expect(setRes.error).toBeUndefined();
+    let bindings = (engine.dispatch({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session.group.list",
+      params: { workspace_id: workspaceId }
+    }).result as { bindings: Array<{ session_id: string; group_id: string }> }).bindings;
+    expect(bindings.find((binding) => binding.session_id === sessionId)?.group_id).toBe(aiGroup.id);
+
+    const deleteRes = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "group.delete",
+      params: { group_id: aiGroup.id }
+    });
+    expect(deleteRes.error).toBeUndefined();
+    bindings = (engine.dispatch({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "session.group.list",
+      params: { workspace_id: workspaceId }
+    }).result as { bindings: Array<{ session_id: string; group_id: string }> }).bindings;
+    expect(bindings.find((binding) => binding.session_id === sessionId)?.group_id).toBe(defaultGroup.id);
+    engine.stop();
+  });
+
+  test("ai.session.delete removes a saved resume record", () => {
+    const engine = new CoreEngine({ dbPath: tempDbPath(), pipeName: "\\\\.\\pipe\\wincmux-test-ai-delete" });
+    const created = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "workspace.create",
+      params: { name: "ai-delete", path: process.cwd(), backend: "codex" }
+    });
+    const workspaceId = (created.result as { workspace: { id: string } }).workspace.id;
+    const aiSessionId = "claude-test-resume";
+    const internals = engine as unknown as {
+      db: {
+        upsertAiSession: (row: {
+          id: string;
+          workspace_id: string;
+          pty_session_id: string;
+          tool: string;
+          resume_cmd: string;
+          cwd: string | null;
+          detected_at: string;
+        }) => void;
+      };
+    };
+    internals.db.upsertAiSession({
+      id: aiSessionId,
+      workspace_id: workspaceId,
+      pty_session_id: randomUUID(),
+      tool: "claude",
+      resume_cmd: "claude --resume 30ae6541-c5a7-47ab-bc93-354686339f5b",
+      cwd: process.cwd(),
+      detected_at: new Date().toISOString()
+    });
+
+    const deleted = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "ai.session.delete",
+      params: { ai_session_id: aiSessionId }
+    });
+    expect(deleted.error).toBeUndefined();
+    expect((deleted.result as { deleted: number }).deleted).toBe(1);
+
+    const listed = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "ai.sessions",
+      params: { workspace_id: workspaceId }
+    });
+    expect((listed.result as { sessions: unknown[] }).sessions).toHaveLength(0);
+    engine.stop();
+  });
+
+  test("failed AI resume output prunes the matching saved resume record", () => {
+    const engine = new CoreEngine({ dbPath: tempDbPath(), pipeName: "\\\\.\\pipe\\wincmux-test-ai-auto-delete" });
+    const created = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "workspace.create",
+      params: { name: "ai-auto-delete", path: process.cwd(), backend: "codex" }
+    });
+    const workspaceId = (created.result as { workspace: { id: string } }).workspace.id;
+    const token = "30ae6541-c5a7-47ab-bc93-354686339f5b";
+    const internals = engine as unknown as {
+      db: {
+        upsertAiSession: (row: {
+          id: string;
+          workspace_id: string;
+          pty_session_id: string;
+          tool: string;
+          resume_cmd: string;
+          cwd: string | null;
+          detected_at: string;
+        }) => void;
+      };
+      maybeDeleteFailedAiResume: (input: { workspace_id: string; output_chunk: string }) => void;
+    };
+    internals.db.upsertAiSession({
+      id: "claude-auto-delete",
+      workspace_id: workspaceId,
+      pty_session_id: randomUUID(),
+      tool: "claude",
+      resume_cmd: `claude --resume ${token}`,
+      cwd: process.cwd(),
+      detected_at: new Date().toISOString()
+    });
+
+    internals.maybeDeleteFailedAiResume({
+      workspace_id: workspaceId,
+      output_chunk: `No conversation found with session ID: ${token}`
+    });
+
+    const listed = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "ai.sessions",
+      params: { workspace_id: workspaceId }
+    });
+    expect((listed.result as { sessions: unknown[] }).sessions).toHaveLength(0);
+    engine.stop();
+  });
+
   test("named pipe rpc responds", async () => {
     const pipe = "\\\\.\\pipe\\wincmux-test-c";
     const engine = new CoreEngine({ dbPath: tempDbPath(), pipeName: pipe });

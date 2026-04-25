@@ -1,8 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { BASE_SCHEMA_SQL, MIGRATIONS } from "./schema";
-import type { AiSessionRow, NotificationRow, SessionRow, SessionStatus, WorkspaceRow } from "./types";
+import type { AiSessionRow, NotificationRow, PaneGroupRow, SessionGroupBindingRow, SessionRow, SessionStatus, WorkspaceRow } from "./types";
+
+export const DEFAULT_PANE_GROUPS: Array<{ name: string; color: string }> = [
+  { name: "Default", color: "#6b7c93" }
+];
 
 export class DbStore {
   readonly db: Database.Database;
@@ -47,6 +52,8 @@ export class DbStore {
   deleteWorkspace(id: string): void {
     const tx = this.db.transaction((workspaceId: string) => {
       this.db.prepare("DELETE FROM pane_session_bindings WHERE workspace_id = ?").run(workspaceId);
+      this.db.prepare("DELETE FROM session_group_bindings WHERE workspace_id = ?").run(workspaceId);
+      this.db.prepare("DELETE FROM pane_groups WHERE workspace_id = ?").run(workspaceId);
       this.db.prepare("DELETE FROM ai_sessions WHERE workspace_id = ?").run(workspaceId);
       this.db.prepare("DELETE FROM sessions WHERE workspace_id = ?").run(workspaceId);
       this.db.prepare("DELETE FROM notifications WHERE workspace_id = ?").run(workspaceId);
@@ -76,6 +83,151 @@ export class DbStore {
     this.db.prepare("UPDATE workspaces SET branch = ?, dirty = ? WHERE id = ?").run(branch, dirty ? 1 : 0, id);
   }
 
+  ensureDefaultPaneGroups(workspaceId: string): PaneGroupRow[] {
+    const existing = this.listPaneGroups(workspaceId);
+    if (existing.length > 0 && existing.some((group) => group.name === "Default")) {
+      this.pruneUnusedSeedPaneGroups(workspaceId);
+      return this.listPaneGroups(workspaceId);
+    }
+    const now = new Date().toISOString();
+    const insert = this.db.prepare(
+      `INSERT OR IGNORE INTO pane_groups (id, workspace_id, name, color, sort_order, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    );
+    const tx = this.db.transaction(() => {
+      const groupsToCreate = existing.length === 0
+        ? DEFAULT_PANE_GROUPS
+        : DEFAULT_PANE_GROUPS.filter((group) => group.name === "Default");
+      groupsToCreate.forEach((group, index) => {
+        insert.run(randomUUID(), workspaceId, group.name, group.color, existing.length === 0 ? index : 0, now);
+      });
+    });
+    tx();
+    this.pruneUnusedSeedPaneGroups(workspaceId);
+    return this.listPaneGroups(workspaceId);
+  }
+
+  private pruneUnusedSeedPaneGroups(workspaceId: string): void {
+    this.db
+      .prepare(
+        `DELETE FROM pane_groups
+         WHERE workspace_id = ?
+           AND name IN ('AI', 'Dev', 'Logs')
+           AND NOT EXISTS (
+             SELECT 1 FROM session_group_bindings b
+             WHERE b.workspace_id = pane_groups.workspace_id
+               AND b.group_id = pane_groups.id
+           )`
+      )
+      .run(workspaceId);
+  }
+
+  listPaneGroups(workspaceId: string): PaneGroupRow[] {
+    return this.db
+      .prepare("SELECT * FROM pane_groups WHERE workspace_id = ? ORDER BY sort_order ASC, created_at ASC")
+      .all(workspaceId) as PaneGroupRow[];
+  }
+
+  getPaneGroup(groupId: string): PaneGroupRow | null {
+    return (this.db.prepare("SELECT * FROM pane_groups WHERE id = ?").get(groupId) as PaneGroupRow | undefined) ?? null;
+  }
+
+  getDefaultPaneGroup(workspaceId: string): PaneGroupRow {
+    const groups = this.ensureDefaultPaneGroups(workspaceId);
+    return groups.find((group) => group.name === "Default") ?? groups[0]!;
+  }
+
+  createPaneGroup(workspaceId: string, name: string, color: string | null): PaneGroupRow {
+    this.ensureDefaultPaneGroups(workspaceId);
+    const existing = this.db
+      .prepare("SELECT * FROM pane_groups WHERE workspace_id = ? AND name = ?")
+      .get(workspaceId, name) as PaneGroupRow | undefined;
+    if (existing) {
+      return existing;
+    }
+    const nextSort = this.db
+      .prepare("SELECT COALESCE(MAX(sort_order), 0) + 1 AS next_sort FROM pane_groups WHERE workspace_id = ?")
+      .get(workspaceId) as { next_sort: number };
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO pane_groups (id, workspace_id, name, color, sort_order, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(id, workspaceId, name, color, nextSort.next_sort, new Date().toISOString());
+    return this.getPaneGroup(id)!;
+  }
+
+  renamePaneGroup(groupId: string, name: string): void {
+    const group = this.getPaneGroup(groupId);
+    if (!group) {
+      return;
+    }
+    if (group.name === "Default") {
+      throw new Error("Default group cannot be renamed");
+    }
+    this.db.prepare("UPDATE pane_groups SET name = ? WHERE id = ?").run(name, groupId);
+  }
+
+  deletePaneGroup(groupId: string, moveToGroupId?: string | null): void {
+    const group = this.getPaneGroup(groupId);
+    if (!group) {
+      return;
+    }
+    if (group.name === "Default") {
+      throw new Error("Default group cannot be deleted");
+    }
+    const fallback = moveToGroupId ? this.getPaneGroup(moveToGroupId) : this.getDefaultPaneGroup(group.workspace_id);
+    if (!fallback || fallback.workspace_id !== group.workspace_id || fallback.id === groupId) {
+      throw new Error("Invalid fallback group");
+    }
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare("UPDATE session_group_bindings SET group_id = ?, updated_at = ? WHERE group_id = ?")
+        .run(fallback.id, new Date().toISOString(), groupId);
+      this.db.prepare("DELETE FROM pane_groups WHERE id = ?").run(groupId);
+    });
+    tx();
+  }
+
+  setSessionGroup(workspaceId: string, sessionId: string, groupId: string): void {
+    const group = this.getPaneGroup(groupId);
+    if (!group || group.workspace_id !== workspaceId) {
+      throw new Error("group not found in workspace");
+    }
+    const session = this.getSession(sessionId);
+    if (!session || session.workspace_id !== workspaceId) {
+      throw new Error("session not found in workspace");
+    }
+    this.db
+      .prepare(
+        `INSERT INTO session_group_bindings (workspace_id, session_id, group_id, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(workspace_id, session_id) DO UPDATE SET
+           group_id = excluded.group_id,
+           updated_at = excluded.updated_at`
+      )
+      .run(workspaceId, sessionId, groupId, new Date().toISOString());
+  }
+
+  listSessionGroupBindings(workspaceId: string): SessionGroupBindingRow[] {
+    const defaultGroup = this.getDefaultPaneGroup(workspaceId);
+    return this.db
+      .prepare(
+        `SELECT
+           s.workspace_id AS workspace_id,
+           s.id AS session_id,
+           COALESCE(b.group_id, ?) AS group_id,
+           COALESCE(b.updated_at, s.started_at) AS updated_at
+         FROM sessions s
+         LEFT JOIN session_group_bindings b
+           ON b.workspace_id = s.workspace_id AND b.session_id = s.id
+         WHERE s.workspace_id = ?
+         ORDER BY s.started_at DESC`
+      )
+      .all(defaultGroup.id, workspaceId) as SessionGroupBindingRow[];
+  }
+
   insertSession(row: SessionRow): void {
     this.db
       .prepare(
@@ -92,6 +244,7 @@ export class DbStore {
   }
 
   deleteSession(sessionId: string): void {
+    this.db.prepare("DELETE FROM session_group_bindings WHERE session_id = ?").run(sessionId);
     this.db.prepare("DELETE FROM sessions WHERE id = ? AND status != 'running'").run(sessionId);
   }
 
@@ -173,9 +326,11 @@ export class DbStore {
 
     const tx = this.db.transaction((ids: string[]) => {
       const clearBinding = this.db.prepare("DELETE FROM pane_session_bindings WHERE session_id = ?");
+      const clearGroupBinding = this.db.prepare("DELETE FROM session_group_bindings WHERE session_id = ?");
       const deleteSession = this.db.prepare("DELETE FROM sessions WHERE id = ? AND status != 'running'");
       for (const id of ids) {
         clearBinding.run(id);
+        clearGroupBinding.run(id);
         deleteSession.run(id);
       }
     });
@@ -227,6 +382,18 @@ export class DbStore {
     return this.db
       .prepare("SELECT * FROM ai_sessions WHERE workspace_id = ? ORDER BY detected_at DESC LIMIT 50")
       .all(workspaceId) as AiSessionRow[];
+  }
+
+  deleteAiSession(aiSessionId: string): number {
+    const result = this.db.prepare("DELETE FROM ai_sessions WHERE id = ?").run(aiSessionId);
+    return Number(result.changes ?? 0);
+  }
+
+  deleteAiSessionByResumeToken(workspaceId: string, token: string): number {
+    const result = this.db
+      .prepare("DELETE FROM ai_sessions WHERE workspace_id = ? AND resume_cmd LIKE ?")
+      .run(workspaceId, `%${token}%`);
+    return Number(result.changes ?? 0);
   }
 
   insertNotification(row: NotificationRow): void {

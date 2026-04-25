@@ -20,10 +20,16 @@ import {
 import { PtyManager } from "./pty";
 import type { AiSessionRow, JsonRpcRequest, JsonRpcResponse, NotificationRow, SessionRow, StreamTopic, WorkspaceRow } from "./types";
 import {
+  aiSessionDeleteSchema,
+  groupCreateSchema,
+  groupDeleteSchema,
+  groupRenameSchema,
   layoutCloseSchema,
   layoutFocusSchema,
   layoutListSchema,
+  layoutMoveSchema,
   layoutSplitSchema,
+  layoutSwapSchema,
   notifyClearSchema,
   notifyDeliveryAckSchema,
   notifyUnreadSchema,
@@ -32,6 +38,7 @@ import {
   paneSessionBindSchema,
   sessionCloseSchema,
   sessionDeleteSchema,
+  sessionGroupSetSchema,
   sessionResizeSchema,
   sessionListSchema,
   sessionReadSchema,
@@ -186,6 +193,14 @@ export class CoreEngine {
           return this.ok(req.id, this.workspaceReorder(req.params));
         case "workspace.activate":
           return this.ok(req.id, this.workspaceActivate(req.params));
+        case "group.list":
+          return this.ok(req.id, this.groupList(req.params));
+        case "group.create":
+          return this.ok(req.id, this.groupCreate(req.params));
+        case "group.rename":
+          return this.ok(req.id, this.groupRename(req.params));
+        case "group.delete":
+          return this.ok(req.id, this.groupDelete(req.params));
         case "session.run":
           return this.ok(req.id, this.sessionRun(req.params));
         case "session.list":
@@ -194,6 +209,10 @@ export class CoreEngine {
           return this.ok(req.id, this.sessionClose(req.params));
         case "session.delete":
           return this.ok(req.id, this.sessionDelete(req.params));
+        case "session.group.set":
+          return this.ok(req.id, this.sessionGroupSet(req.params));
+        case "session.group.list":
+          return this.ok(req.id, this.sessionGroupList(req.params));
         case "session.resize":
           return this.ok(req.id, this.sessionResize(req.params));
         case "session.write":
@@ -222,6 +241,10 @@ export class CoreEngine {
           return this.ok(req.id, this.layoutFocus(req.params));
         case "layout.close":
           return this.ok(req.id, this.layoutClose(req.params));
+        case "layout.swap":
+          return this.ok(req.id, this.layoutSwap(req.params));
+        case "layout.move":
+          return this.ok(req.id, this.layoutMove(req.params));
         case "layout.list":
           return this.ok(req.id, this.layoutList(req.params));
         case "pane.session.bind":
@@ -232,6 +255,8 @@ export class CoreEngine {
           return this.ok(req.id, this.sessionHistory(req.params));
         case "ai.sessions":
           return this.ok(req.id, this.aiSessions(req.params));
+        case "ai.session.delete":
+          return this.ok(req.id, this.aiSessionDelete(req.params));
         default:
           return this.error(req.id, -32601, `method not found: ${req.method}`);
       }
@@ -258,6 +283,7 @@ export class CoreEngine {
     const id = randomUUID();
     const now = new Date().toISOString();
     const workspace = this.db.createWorkspace(id, p.name, normalizedPath, p.backend, now);
+    this.db.ensureDefaultPaneGroups(id);
     const snapshot = this.db.loadLayoutSnapshot(id);
     if (snapshot) {
       this.layout.hydrate(id, snapshot);
@@ -310,6 +336,28 @@ export class CoreEngine {
     this.activeWorkspaceId = p.workspace_id;
     this.gitNextDue.set(p.workspace_id, 0);
     void this.refreshGitStatus();
+    return { ok: true };
+  }
+
+  private groupList(params: unknown): { groups: ReturnType<DbStore["listPaneGroups"]> } {
+    const p = workspaceIdSchema.parse(params ?? {});
+    return { groups: this.db.ensureDefaultPaneGroups(p.workspace_id) };
+  }
+
+  private groupCreate(params: unknown): { group: ReturnType<DbStore["createPaneGroup"]> } {
+    const p = groupCreateSchema.parse(params ?? {});
+    return { group: this.db.createPaneGroup(p.workspace_id, p.name, p.color ?? null) };
+  }
+
+  private groupRename(params: unknown): { ok: true } {
+    const p = groupRenameSchema.parse(params ?? {});
+    this.db.renamePaneGroup(p.group_id, p.name);
+    return { ok: true };
+  }
+
+  private groupDelete(params: unknown): { ok: true } {
+    const p = groupDeleteSchema.parse(params ?? {});
+    this.db.deletePaneGroup(p.group_id, p.move_to_group_id ?? null);
     return { ok: true };
   }
 
@@ -369,6 +417,10 @@ export class CoreEngine {
       this.maybeIngestPromptPattern({
         workspace_id: p.workspace_id,
         session_id: sessionId,
+        output_chunk: chunk
+      });
+      this.maybeDeleteFailedAiResume({
+        workspace_id: p.workspace_id,
         output_chunk: chunk
       });
       // Scan the recent tail of the buffer (not just the chunk) so resume markers
@@ -453,6 +505,18 @@ export class CoreEngine {
     const p = sessionDeleteSchema.parse(params ?? {});
     this.db.deleteSession(p.session_id);
     return { ok: true };
+  }
+
+  private sessionGroupSet(params: unknown): { ok: true } {
+    const p = sessionGroupSetSchema.parse(params ?? {});
+    this.db.setSessionGroup(p.workspace_id, p.session_id, p.group_id);
+    return { ok: true };
+  }
+
+  private sessionGroupList(params: unknown): { bindings: ReturnType<DbStore["listSessionGroupBindings"]> } {
+    const p = workspaceIdSchema.parse(params ?? {});
+    this.db.ensureDefaultPaneGroups(p.workspace_id);
+    return { bindings: this.db.listSessionGroupBindings(p.workspace_id) };
   }
 
   private sessionResize(params: unknown): { ok: true } {
@@ -868,6 +932,32 @@ export class CoreEngine {
     return { sessions: this.db.listAiSessions(p.workspace_id) };
   }
 
+  private aiSessionDelete(params: unknown): { ok: true; deleted: number } {
+    const p = aiSessionDeleteSchema.parse(params ?? {});
+    return { ok: true, deleted: this.db.deleteAiSession(p.ai_session_id) };
+  }
+
+  private maybeDeleteFailedAiResume(input: { workspace_id: string; output_chunk: string }): void {
+    const text = input.output_chunk;
+    if (!/conversation\s+found|conversation\s+.*not\s+found|no\s+conversation/i.test(text)) {
+      return;
+    }
+    const match = text.match(/session\s+ID:\s*([0-9a-f][0-9a-f-]{7,})/i)
+      ?? text.match(/\b([0-9a-f]{8}-[0-9a-f-]{13,})\b/i);
+    const token = match?.[1];
+    if (!token) {
+      return;
+    }
+    const deleted = this.db.deleteAiSessionByResumeToken(input.workspace_id, token);
+    if (deleted > 0) {
+      this.emitStreamEvent("ai.session.deleted", {
+        workspace_id: input.workspace_id,
+        token,
+        deleted
+      });
+    }
+  }
+
   private layoutSplit(params: unknown): { pane_ids: [string, string] } {
     const p = layoutSplitSchema.parse(params ?? {});
     this.restoreLayoutIfNeeded(p.workspace_id);
@@ -890,6 +980,22 @@ export class CoreEngine {
     const focusPaneId = this.layout.close(p.workspace_id, p.pane_id);
     this.persistLayout(p.workspace_id);
     return { focus_pane_id: focusPaneId };
+  }
+
+  private layoutSwap(params: unknown): { ok: true } {
+    const p = layoutSwapSchema.parse(params ?? {});
+    this.restoreLayoutIfNeeded(p.workspace_id);
+    this.layout.swap(p.workspace_id, p.first_pane_id, p.second_pane_id);
+    this.persistLayout(p.workspace_id);
+    return { ok: true };
+  }
+
+  private layoutMove(params: unknown): { ok: true } {
+    const p = layoutMoveSchema.parse(params ?? {});
+    this.restoreLayoutIfNeeded(p.workspace_id);
+    this.layout.move(p.workspace_id, p.source_pane_id, p.target_pane_id, p.placement);
+    this.persistLayout(p.workspace_id);
+    return { ok: true };
   }
 
   private layoutList(params: unknown): { panes: ReturnType<LayoutStore["list"]> } {

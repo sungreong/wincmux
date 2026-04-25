@@ -114,5 +114,29 @@ export const MIGRATIONS: Record<number, string[]> = {
   6: [
     "ALTER TABLE workspaces ADD COLUMN description TEXT",
     "INSERT OR IGNORE INTO schema_versions(version, applied_at) VALUES (6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+  ],
+  7: [
+    `CREATE TABLE IF NOT EXISTS pane_groups (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      color TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      UNIQUE(workspace_id, name),
+      FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS session_group_bindings (
+      workspace_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      group_id TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (workspace_id, session_id),
+      FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
+      FOREIGN KEY(group_id) REFERENCES pane_groups(id)
+    )`,
+    "CREATE INDEX IF NOT EXISTS idx_pane_groups_workspace ON pane_groups(workspace_id, sort_order ASC)",
+    "CREATE INDEX IF NOT EXISTS idx_session_group_bindings_group ON session_group_bindings(group_id)",
+    "INSERT OR IGNORE INTO schema_versions(version, applied_at) VALUES (7, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
   ]
 };

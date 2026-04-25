@@ -80,6 +80,22 @@ export interface AiSessionRow {
   detected_at: string;
 }
 
+export interface PaneGroupRow {
+  id: string;
+  workspace_id: string;
+  name: string;
+  color: string | null;
+  sort_order: number;
+  created_at: string;
+}
+
+export interface SessionGroupBindingRow {
+  workspace_id: string;
+  session_id: string;
+  group_id: string;
+  updated_at: string;
+}
+
 export interface PaneNode {
   pane_id: string;
   parent_id: string | null;
