@@ -19,6 +19,8 @@ const STORAGE_KEYS = {
   rendererPromptFallback: "wincmux.features.rendererPromptFallback",
   selectedWorkspaceId: "wincmux.selectedWorkspaceId",
   workspaceNotes: "wincmux.workspaceNotes",
+  workspaceSelectedGroups: "wincmux.workspaceSelectedGroups",
+  workspacePaneGroupHints: "wincmux.workspacePaneGroupHints",
   globalFontScale: "wincmux.globalFontScale"
 };
 
@@ -215,6 +217,10 @@ const state = {
   selectedWorkspaceId: localStorage.getItem(STORAGE_KEYS.selectedWorkspaceId) ?? null,
   selectedPaneId: null,
   paneSessions: {},
+  paneGroups: [],
+  sessionGroupBindings: {},
+  selectedGroupId: null,
+  paneGroupHints: {},
   paneViews: new Map(),
   paneCards: new Map(),
   paneMeta: new Map(),
@@ -246,6 +252,8 @@ const state = {
   paneAutoResize: localStorage.getItem(STORAGE_KEYS.paneAutoResize) !== "0",
   globalFontScale: Number(localStorage.getItem(STORAGE_KEYS.globalFontScale) ?? 100),
   workspaceNotes: parseStoredMap(STORAGE_KEYS.workspaceNotes),
+  workspaceSelectedGroups: parseStoredMap(STORAGE_KEYS.workspaceSelectedGroups),
+  workspacePaneGroupHints: parseStoredMap(STORAGE_KEYS.workspacePaneGroupHints),
   hiddenPanesByWorkspace: {},
   quickPresets: loadQuickPresets(),
   quickHistory: loadQuickHistory(),
@@ -266,7 +274,8 @@ const state = {
   // Cache of paneViews per workspace so xterm buffers survive workspace switching
   workspacePaneViewCache: new Map(),
   // Cache of paneSessions per workspace so pane→session mappings survive workspace switching
-  workspacePaneSessionCache: new Map()
+  workspacePaneSessionCache: new Map(),
+  dormantPaneSessions: {}
 };
 if (!localStorage.getItem(STORAGE_KEYS.terminalDefaultShell)) {
   localStorage.setItem(STORAGE_KEYS.terminalDefaultShell, state.terminal.default_shell);
@@ -294,6 +303,7 @@ const notificationList = $("notificationList");
 const notifTitle = $("notifTitle");
 const statusBar = $("statusBar");
 const paneSurface = $("paneSurface");
+const groupBar = $("groupBar");
 const selectedPaneLabel = $("selectedPaneLabel");
 const hiddenPanesBtn = $("hiddenPanesBtn");
 const hiddenPanesPopover = $("hiddenPanesPopover");
@@ -303,6 +313,9 @@ const openInVscodeBtn = $("openInVscodeBtn");
 const toggleWorkspacePanelBtn = $("toggleWorkspacePanelBtn");
 const toggleNotificationPanelBtn = $("toggleNotificationPanelBtn");
 const equalizePanesBtn = $("equalizePanesBtn");
+const shortcutHelpBtn = $("shortcutHelpBtn");
+const shortcutOverlay = $("shortcutOverlay");
+const shortcutCloseBtn = $("shortcutCloseBtn");
 const fontScaleSelect = $("fontScaleSelect");
 const fontScaleResetBtn = $("fontScaleResetBtn");
 
@@ -349,6 +362,214 @@ function leafPanes(panes = state.panes) {
 
 function runningSessions() {
   return state.sessions.filter((s) => s.status === "running");
+}
+
+function defaultPaneGroup() {
+  return state.paneGroups.find((group) => group.name === "Default") ?? state.paneGroups[0] ?? null;
+}
+
+function aiPaneGroup() {
+  return state.paneGroups.find((group) => group.name === "AI") ?? null;
+}
+
+function paneGroupById(groupId) {
+  return state.paneGroups.find((group) => group.id === groupId) ?? null;
+}
+
+function groupIdForSession(sessionId) {
+  if (!sessionId) {
+    return null;
+  }
+  return state.sessionGroupBindings[sessionId] ?? defaultPaneGroup()?.id ?? null;
+}
+
+function groupForSession(sessionId) {
+  return sessionId ? (paneGroupById(groupIdForSession(sessionId)) ?? defaultPaneGroup()) : null;
+}
+
+function groupForPane(paneId) {
+  const sessionId = paneId ? state.paneSessions[paneId] : null;
+  const hintedGroupId = paneId ? state.paneGroupHints[paneId] : null;
+  return groupForSession(sessionId) ?? paneGroupById(hintedGroupId) ?? defaultPaneGroup();
+}
+
+function groupLabelForSession(sessionId) {
+  return groupForSession(sessionId)?.name ?? "Default";
+}
+
+function persistWorkspaceGroupState(workspaceId = state.selectedWorkspaceId) {
+  if (!workspaceId) {
+    return;
+  }
+  state.workspacePaneGroupHints[workspaceId] = { ...(state.paneGroupHints ?? {}) };
+  if (state.selectedGroupId) {
+    state.workspaceSelectedGroups[workspaceId] = state.selectedGroupId;
+  } else {
+    delete state.workspaceSelectedGroups[workspaceId];
+  }
+  localStorage.setItem(STORAGE_KEYS.workspacePaneGroupHints, JSON.stringify(state.workspacePaneGroupHints));
+  localStorage.setItem(STORAGE_KEYS.workspaceSelectedGroups, JSON.stringify(state.workspaceSelectedGroups));
+}
+
+function loadWorkspaceGroupState(workspaceId = state.selectedWorkspaceId) {
+  if (!workspaceId) {
+    state.paneGroupHints = {};
+    state.selectedGroupId = null;
+    return;
+  }
+  state.paneGroupHints = { ...(state.workspacePaneGroupHints[workspaceId] ?? {}) };
+  state.selectedGroupId = state.workspaceSelectedGroups[workspaceId] ?? null;
+}
+
+function setWorkspaceSelectedGroup(groupId) {
+  state.selectedGroupId = groupId ?? null;
+  persistWorkspaceGroupState();
+}
+
+function setPaneGroupHint(paneId, groupId) {
+  if (!paneId) {
+    return;
+  }
+  if (groupId) {
+    state.paneGroupHints[paneId] = groupId;
+  } else {
+    delete state.paneGroupHints[paneId];
+  }
+  persistWorkspaceGroupState();
+}
+
+function renderGroupBar() {
+  if (!groupBar) {
+    return;
+  }
+  groupBar.innerHTML = "";
+  const ws = selectedWorkspace();
+  if (!ws || state.paneGroups.length === 0) {
+    groupBar.hidden = true;
+    return;
+  }
+  groupBar.hidden = false;
+
+  const counts = new Map(state.paneGroups.map((group) => [group.id, { panes: 0, running: 0 }]));
+  for (const pane of leafPanes()) {
+    const groupId = groupForPane(pane.pane_id)?.id ?? defaultPaneGroup()?.id ?? null;
+    if (!groupId) {
+      continue;
+    }
+    const current = counts.get(groupId) ?? { panes: 0, running: 0 };
+    current.panes += 1;
+    const sessionId = state.paneSessions[pane.pane_id] ?? null;
+    const session = sessionId ? state.sessions.find((row) => row.id === sessionId) : null;
+    if (session?.workspace_id === ws.id && session.status === "running") {
+      current.running += 1;
+    }
+    counts.set(groupId, current);
+  }
+
+  const allBtn = document.createElement("button");
+  allBtn.className = `group-chip${!state.selectedGroupId ? " active" : ""}`;
+  allBtn.type = "button";
+  allBtn.textContent = "All";
+  allBtn.addEventListener("click", () => {
+    setWorkspaceSelectedGroup(null);
+    renderGroupBar();
+    if (typeof renderPaneSurface === "function") {
+      renderPaneSurface(true);
+    }
+    setStatus("Pane group: All");
+  });
+  groupBar.appendChild(allBtn);
+
+  for (const group of state.paneGroups) {
+    const btn = document.createElement("button");
+    btn.className = `group-chip${state.selectedGroupId === group.id ? " active" : ""}`;
+    btn.type = "button";
+    const count = counts.get(group.id) ?? { panes: 0, running: 0 };
+    btn.title = `${group.name}: ${count.panes} pane${count.panes === 1 ? "" : "s"}, ${count.running} running`;
+    btn.style.setProperty("--group-color", group.color ?? "#6b7c93");
+    btn.textContent = `${group.name} ${count.panes}`;
+    btn.addEventListener("click", () => {
+      setWorkspaceSelectedGroup(group.id);
+      renderGroupBar();
+      if (typeof renderPaneSurface === "function") {
+        renderPaneSurface(true);
+      }
+      setStatus(`Pane group: ${group.name}`);
+    });
+    groupBar.appendChild(btn);
+  }
+
+  const addBtn = document.createElement("button");
+  addBtn.className = "group-chip group-add";
+  addBtn.type = "button";
+  addBtn.textContent = "+";
+  addBtn.title = "Create pane group";
+  addBtn.addEventListener("click", () => {
+    showGroupCreateInput(addBtn);
+  });
+  groupBar.appendChild(addBtn);
+}
+
+function showGroupCreateInput(anchorEl, options = {}) {
+  const ws = selectedWorkspace();
+  if (!ws || !groupBar) {
+    return;
+  }
+  groupBar.querySelector(".group-create-inline")?.remove();
+
+  const form = document.createElement("form");
+  form.className = "group-create-inline";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "Group name";
+  input.maxLength = 32;
+  input.value = options.initialValue ?? "";
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "submit";
+  saveBtn.textContent = "Add";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.textContent = "Cancel";
+  form.append(input, saveBtn, cancelBtn);
+
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const name = input.value.trim();
+    if (!name) {
+      input.focus();
+      return;
+    }
+    try {
+      const result = await rpc("group.create", { workspace_id: ws.id, name });
+      if (result?.group) {
+        state.paneGroups = [...state.paneGroups.filter((group) => group.id !== result.group.id), result.group]
+          .sort((a, b) => Number(a.sort_order ?? 0) - Number(b.sort_order ?? 0));
+        setWorkspaceSelectedGroup(result.group.id);
+        renderGroupBar();
+        if (typeof options.onCreated === "function") {
+          await options.onCreated(result.group);
+        }
+        setStatus(`Pane group created: ${name}`);
+      }
+      form.remove();
+    } catch (err) {
+      setStatus(String(err?.message ?? err), true);
+    }
+  });
+  cancelBtn.addEventListener("click", () => {
+    form.remove();
+  });
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      form.remove();
+    }
+    ev.stopPropagation();
+  });
+
+  anchorEl?.insertAdjacentElement?.("afterend", form);
+  input.focus();
+  input.select();
 }
 
 function normalizeTerminalOutput(output) {
@@ -516,6 +737,9 @@ function extractPromptMarker(bufferText) {
   const recent = bufferText.slice(-1200);
   const checks = [
     { key: "proceed?", rx: /\bdo\s+you\s+want\s+to\s+(?:proceed|continue)\s*\?/i },
+    { key: "should i?", rx: /\b(?:should\s+i|would\s+you\s+like\s+me\s+to|do\s+you\s+want\s+me\s+to)\b[^?\n]{0,120}\?/i },
+    { key: "waiting for input", rx: /\b(?:waiting|awaiting)\s+(?:for\s+)?(?:your\s+)?(?:input|response|confirmation|approval)\b/i },
+    { key: "need input", rx: /\bneed\s+(?:your\s+)?(?:input|response|confirmation|approval)\b/i },
     { key: "run shell command", rx: /\brun\s+shell\s+command\b/i },
     { key: "yes/no choice", rx: /(?:^|\n)\s*(?:[>]\s*)?[12][.)]\s*(?:yes|no)\b/im },
     { key: "enter to confirm", rx: /\benter\s+to\s+confirm\b/i },
@@ -525,7 +749,9 @@ function extractPromptMarker(bufferText) {
     { key: "select option", rx: /\b(?:select|choose)\b[^.\n]{0,80}\b(?:option|item|number|choice)\b/i },
     { key: "select number", rx: /\b(?:enter|input|type)\b[^.\n]{0,48}\b(?:number|choice|option)\b/i },
     { key: "ko proceed?", rx: /(?:진행|계속).{0,8}(?:하시겠|할까)\S*/i },
-    { key: "ko select", rx: /(?:선택|번호).{0,8}(?:입력|해\s*주세요|하세요)/i }
+    { key: "ko select", rx: /(?:선택|번호).{0,8}(?:입력|해\s*주세요|하세요)/i },
+    { key: "ko waiting input", rx: /(?:입력을?\s*기다리고|응답을?\s*기다리고)/i },
+    { key: "ko confirm", rx: /(?:실행|수정|변경|진행|계속|허용|승인).{0,16}(?:할까요|하시겠습니까|해도\s*될까요|할지)/i }
   ];
 
   for (const check of checks) {
@@ -553,9 +779,12 @@ function hasAssistantPromptContext(bufferText) {
     return false;
   }
   return /\b(?:claude|codex)\b/i.test(bufferText)
+    || /\b(?:gpt-\S+|sonnet|opus)\b/i.test(bufferText)
+    || /(?:Claude\s+Code|Codex\s+CLI)/i.test(bufferText)
     || /\b(?:bash|shell)\s+command\b/i.test(bufferText)
     || /\bdo\s+you\s+want\s+to\s+(?:proceed|continue)\s*\?/i.test(bufferText)
-    || /\b(?:enter\s+to\s+confirm|esc\s+to\s+cancel)\b/i.test(bufferText);
+    || /\b(?:enter\s+to\s+confirm|esc\s+to\s+cancel)\b/i.test(bufferText)
+    || /(?:대기\s*중입니다|도와드릴까요|입력을?\s*기다리고|응답을?\s*기다리고)/i.test(bufferText);
 }
 
 function detectPromptSignal(sessionState, outputChunk) {
@@ -887,6 +1116,19 @@ function renderWorkspaces() {
     });
     titleRow.appendChild(infoBtn);
 
+    const deleteBtn = document.createElement("button");
+    deleteBtn.className = "ws-delete-btn";
+    deleteBtn.title = "Delete this workspace";
+    deleteBtn.setAttribute("aria-label", `Delete workspace ${ws.name}`);
+    deleteBtn.textContent = "×";
+    deleteBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (typeof globalThis.deleteWorkspaceById === "function") {
+        globalThis.deleteWorkspaceById(ws.id).catch((err) => setStatus(String(err), true));
+      }
+    });
+    titleRow.appendChild(deleteBtn);
+
     if (unread > 0) {
       const badge = document.createElement("span");
       badge.className = "ws-unread-badge";
@@ -916,13 +1158,6 @@ function renderWorkspaces() {
 }
 
 function renderNotifications() {
-  const itemHeight = 90;
-  const overscan = 4;
-  const viewportHeight = Math.max(200, notificationList.clientHeight || 400);
-  const start = Math.max(0, Math.floor(notificationList.scrollTop / itemHeight) - overscan);
-  const visible = Math.ceil(viewportHeight / itemHeight) + overscan * 2;
-  const end = Math.min(state.notifications.length, start + visible);
-
   notificationList.innerHTML = "";
   if (state.notifications.length === 0) {
     const empty = document.createElement("li");
@@ -934,50 +1169,59 @@ function renderNotifications() {
     return;
   }
 
-  if (start > 0) {
-    const topSpacer = document.createElement("li");
-    topSpacer.className = "notif-spacer";
-    topSpacer.style.height = `${start * itemHeight}px`;
-    topSpacer.style.border = "none";
-    topSpacer.style.background = "transparent";
-    notificationList.appendChild(topSpacer);
+  const grouped = new Map();
+  for (const n of state.notifications) {
+    const target = normalizeNotificationTarget(n);
+    const workspaceId = target.workspaceId ?? n.workspace_id ?? "unknown";
+    if (!grouped.has(workspaceId)) {
+      grouped.set(workspaceId, []);
+    }
+    grouped.get(workspaceId).push(n);
   }
 
-  for (let i = start; i < end; i += 1) {
-    const n = state.notifications[i];
-    const li = document.createElement("li");
-    li.dataset.notificationId = n.id;
-        const target = normalizeNotificationTarget(n);
-    const workspaceId = target.workspaceId ?? n.workspace_id ?? null;
-    const paneLabel = target.paneId
-      ? `pane ${target.paneId.slice(0, 8)}`
-      : (target.sessionId ? `session ${target.sessionId.slice(0, 8)}` : "pane -");
-    const metaText = `${workspaceNameById(workspaceId)} | ${paneLabel} | ${n.level}`;
+  for (const [workspaceId, rows] of grouped) {
+    const header = document.createElement("li");
+    header.className = "notif-group";
+    header.dataset.workspaceId = workspaceId;
 
-    const titleEl = document.createElement("div");
-    titleEl.className = "notif-title";
-    titleEl.textContent = n.title;
+    const label = document.createElement("div");
+    label.className = "notif-group-title";
+    label.textContent = `${workspaceNameById(workspaceId)} (${rows.length})`;
 
-    const metaEl = document.createElement("div");
-    metaEl.className = "notif-meta muted";
-    metaEl.textContent = metaText;
+    const markBtn = document.createElement("button");
+    markBtn.className = "notif-group-mark";
+    markBtn.type = "button";
+    markBtn.dataset.workspaceId = workspaceId;
+    markBtn.textContent = "Mark";
+    markBtn.title = "Mark this workspace notifications as read";
 
-    const bodyEl = document.createElement("div");
-    bodyEl.className = "notif-body muted";
-    bodyEl.textContent = n.body;
+    header.append(label, markBtn);
+    notificationList.appendChild(header);
 
-    li.append(titleEl, metaEl, bodyEl);
-    notificationList.appendChild(li);
-  }
+    for (const n of rows) {
+      const li = document.createElement("li");
+      li.dataset.notificationId = n.id;
+      const target = normalizeNotificationTarget(n);
+      const paneLabel = target.paneId
+        ? `pane ${target.paneId.slice(0, 8)}`
+        : (target.sessionId ? `session ${target.sessionId.slice(0, 8)}` : "pane -");
+      const metaText = `${paneLabel} | ${n.level}`;
 
-  const remaining = state.notifications.length - end;
-  if (remaining > 0) {
-    const bottomSpacer = document.createElement("li");
-    bottomSpacer.className = "notif-spacer";
-    bottomSpacer.style.height = `${remaining * itemHeight}px`;
-    bottomSpacer.style.border = "none";
-    bottomSpacer.style.background = "transparent";
-    notificationList.appendChild(bottomSpacer);
+      const titleEl = document.createElement("div");
+      titleEl.className = "notif-title";
+      titleEl.textContent = n.title;
+
+      const metaEl = document.createElement("div");
+      metaEl.className = "notif-meta muted";
+      metaEl.textContent = metaText;
+
+      const bodyEl = document.createElement("div");
+      bodyEl.className = "notif-body muted";
+      bodyEl.textContent = n.body;
+
+      li.append(titleEl, metaEl, bodyEl);
+      notificationList.appendChild(li);
+    }
   }
 
   notifTitle.textContent = `Notifications (${state.notifications.length} unread)`;

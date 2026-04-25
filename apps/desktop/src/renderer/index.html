@@ -12,18 +12,15 @@
       <aside class="panel panel-left">
         <h2>Workspaces</h2>
 
-        <div class="workspace-form">
-          <input id="wsNameInput" placeholder="Workspace name" />
+        <div class="workspace-form" aria-label="Add workspace">
+          <div class="workspace-form-title">Add workspace</div>
+          <input id="wsNameInput" placeholder="New workspace name" />
           <div class="path-row">
-            <input id="wsPathInput" placeholder="C:\\project\\my-workspace" />
+            <input id="wsPathInput" placeholder="Workspace folder" />
             <button id="pickFolderBtn">Browse</button>
           </div>
           <div class="workspace-actions">
-            <button id="createWorkspaceBtn">Create</button>
-            <button id="deleteWorkspaceBtn">Delete</button>
-            <button id="openInVscodeBtn" class="icon-btn vscode-btn" title="Open selected workspace in VSCode" aria-label="Open selected workspace in VSCode">
-              <span class="vscode-icon" aria-hidden="true"></span>
-            </button>
+            <button id="createWorkspaceBtn" class="workspace-create-btn">Add Workspace</button>
           </div>
         </div>
 
@@ -56,12 +53,12 @@
             </svg>
             <span class="toolbar-btn-label">Notifications</span>
           </button>
-          <button id="hiddenPanesBtn" class="toolbar-btn" title="Show hidden panes (Ctrl+Shift+H)">
+          <button id="hiddenPanesBtn" class="toolbar-btn" title="Show hidden terminals (Ctrl+Shift+H)">
             <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
               <path d="M1 8 C4 4 12 4 15 8"/>
               <line x1="2" y1="3" x2="14" y2="13"/>
             </svg>
-            <span class="toolbar-btn-label">Hidden Panes (0)</span>
+            <span class="toolbar-btn-label">Hidden (0)</span>
           </button>
           <button id="equalizePanesBtn" class="toolbar-btn" title="Reset all pane splits to equal size (Ctrl+Shift+E)">
             <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
@@ -70,6 +67,13 @@
               <line x1="11" y1="2" x2="11" y2="14"/>
             </svg>
             <span class="toolbar-btn-label">Equalize</span>
+          </button>
+          <button id="shortcutHelpBtn" class="toolbar-btn shortcut-help-btn" title="Show keyboard shortcuts (Ctrl+/)">
+            <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="1.5" y="3" width="13" height="10" rx="1.6"/>
+              <path d="M4 6h.01M6.7 6h.01M9.4 6h.01M12 6h.01M4 8.5h.01M6.7 8.5h.01M9.4 8.5h.01M12 8.5h.01M5.2 11h5.6"/>
+            </svg>
+            <span class="toolbar-btn-label">Keys</span>
           </button>
           <div class="toolbar-divider"></div>
           <div class="font-scale-group" title="Global terminal font size">
@@ -97,6 +101,7 @@
           <div id="hiddenPanesPopover" class="hidden-panes-popover"></div>
         </div>
 
+        <div id="groupBar" class="group-bar" aria-label="Pane groups"></div>
         <div id="paneSurface" class="pane-surface"></div>
       </main>
 
@@ -104,11 +109,11 @@
 
       <aside class="panel panel-right">
         <h2 id="notifTitle">Notifications (0 unread)</h2>
-        <div class="notif-actions">
-          <button id="refreshUnreadBtn">Refresh</button>
-          <button id="markLatestReadBtn">Mark Latest</button>
-          <button id="clearUnreadBtn">Clear</button>
-        </div>
+          <div class="notif-actions">
+            <button id="refreshUnreadBtn">Refresh</button>
+            <button id="markLatestReadBtn" title="Mark unread notifications in the selected workspace as read">Mark WS</button>
+            <button id="clearUnreadBtn">Clear</button>
+          </div>
         <ul id="notificationList"></ul>
       </aside>
     </div>
@@ -125,6 +130,56 @@
         <div id="wsSessionSummary" class="ws-session-summary"></div>
         <div id="wsScanArea" class="ws-scan-area" style="display:none"></div>
       </div>
+    </div>
+
+    <div id="shortcutOverlay" class="shortcut-overlay" hidden>
+      <section class="shortcut-panel" role="dialog" aria-modal="true" aria-labelledby="shortcutTitle">
+        <div class="shortcut-header">
+          <div>
+            <h2 id="shortcutTitle">Keyboard Control</h2>
+            <p>선택된 pane을 기준으로 실행됩니다. 한글 조합 중에는 단축키가 입력을 방해하지 않습니다.</p>
+          </div>
+          <button id="shortcutCloseBtn" class="shortcut-close-btn" title="Close shortcuts">x</button>
+        </div>
+        <div class="shortcut-grid">
+          <div class="shortcut-section">
+            <h3>Pane Navigation</h3>
+            <dl>
+              <div><dt>Ctrl+Tab</dt><dd>Next pane</dd></div>
+              <div><dt>Ctrl+Shift+Tab</dt><dd>Previous pane</dd></div>
+              <div><dt>Ctrl+Alt+Arrow</dt><dd>Move by direction</dd></div>
+            </dl>
+          </div>
+          <div class="shortcut-section">
+            <h3>Pane Layout</h3>
+            <dl>
+              <div><dt>Ctrl+Alt+Backslash</dt><dd>Split right</dd></div>
+              <div><dt>Ctrl+Alt+-</dt><dd>Split down</dd></div>
+              <div><dt>Ctrl+Alt+W</dt><dd>Hide pane</dd></div>
+              <div><dt>Ctrl+Alt+Q</dt><dd>Close pane</dd></div>
+              <div><dt>Ctrl+Shift+E</dt><dd>Equalize panes</dd></div>
+            </dl>
+          </div>
+          <div class="shortcut-section">
+            <h3>Terminal</h3>
+            <dl>
+              <div><dt>Ctrl+Alt+T</dt><dd>Start terminal</dd></div>
+              <div><dt>Ctrl+Alt+R</dt><dd>Restart terminal</dd></div>
+              <div><dt>Ctrl+= / Ctrl+-</dt><dd>Font size</dd></div>
+              <div><dt>Ctrl+0</dt><dd>Reset font size</dd></div>
+            </dl>
+          </div>
+          <div class="shortcut-section">
+            <h3>Panels</h3>
+            <dl>
+              <div><dt>Ctrl+B</dt><dd>Workspaces</dd></div>
+              <div><dt>Ctrl+Shift+N</dt><dd>Notifications</dd></div>
+              <div><dt>Ctrl+Shift+H</dt><dd>Hidden panes</dd></div>
+              <div><dt>Ctrl+/</dt><dd>Show this help</dd></div>
+            </dl>
+          </div>
+        </div>
+      </section>
     </div>
 
     <footer id="statusBar">Ready</footer>

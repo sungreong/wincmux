@@ -6,9 +6,27 @@ const paneHandlers = {
   hidePane: async () => {},
   adjustPaneFont: async () => {},
   insertQuickCommand: async () => {},
-  markPaneNotificationsRead: async () => {}
+  markPaneNotificationsRead: async () => {},
+  movePaneToGroup: async () => {},
+  openSessionInSplit: async () => {}
 };
 const INPUT_FLUSH_DELAY_MS = 12;
+const INPUT_RETRY_DELAY_MS = 120;
+const IME_COMMIT_WAIT_MS = 80;
+const IME_DUPLICATE_WINDOW_MS = 220;
+const PANE_DEBUG_LOGS = localStorage.getItem("wincmux.debug.panes") === "1";
+
+function paneDebug(...args) {
+  if (PANE_DEBUG_LOGS) {
+    console.debug(...args);
+  }
+}
+
+function paneWarn(...args) {
+  if (PANE_DEBUG_LOGS) {
+    console.warn(...args);
+  }
+}
 
 function bindQuickCommandPanelSafe(paneId, quickPanel, quickBtn) {
   const binder = typeof globalThis.bindQuickCommandPanel === "function"
@@ -32,6 +50,24 @@ function bindQuickCommandPanelSafe(paneId, quickPanel, quickBtn) {
     console.error("[renderer] quickcmd bind failed:", err);
   }
 }
+
+const paneIcon = {
+  fontDown: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 15l4.5-10 4.5 10"/><path d="M5.5 11h6"/><path d="M14.5 13h3"/></svg>`,
+  fontUp: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 15l4.5-10 4.5 10"/><path d="M5.5 11h6"/><path d="M16 10v6"/><path d="M13 13h6"/></svg>`,
+  splitRight: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="2"/><path d="M10 4v12"/><path d="M13.5 10h2.5"/><path d="M14.75 8.75v2.5"/></svg>`,
+  splitDown: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="2"/><path d="M3 10h14"/><path d="M8.75 13h2.5"/><path d="M10 11.75v2.5"/></svg>`,
+  start: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 5.5v9l7-4.5-7-4.5z" fill="currentColor" stroke="none"/></svg>`,
+  restart: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 9.5a5.5 5.5 0 1 1-1.7-4"/><path d="M14 2.5v3.5h3.5"/></svg>`,
+  restore: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 11a5 5 0 1 0 1.4-4.2"/><path d="M3.5 7h3.8v-3.8"/></svg>`,
+  sessions: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5.5h10"/><path d="M5 10h10"/><path d="M5 14.5h6"/><circle cx="3" cy="5.5" r=".7" fill="currentColor" stroke="none"/><circle cx="3" cy="10" r=".7" fill="currentColor" stroke="none"/><circle cx="3" cy="14.5" r=".7" fill="currentColor" stroke="none"/></svg>`,
+  closeSession: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="5" width="12" height="10" rx="2"/><path d="M8 8.5l4 3"/><path d="M12 8.5l-4 3"/></svg>`,
+  closePane: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="4" width="12" height="12" rx="2"/><path d="M7.5 7.5l5 5"/><path d="M12.5 7.5l-5 5"/></svg>`,
+  hidePane: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 10s2.8-4.5 7.5-4.5 7.5 4.5 7.5 4.5-2.8 4.5-7.5 4.5S2.5 10 2.5 10z"/><path d="M3.5 3.5l13 13"/></svg>`,
+  quick: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M11 2.5l-6 8h5l-1 7 6-8h-5l1-7z" fill="currentColor" stroke="none"/><circle cx="15.5" cy="4.5" r="1.2" fill="currentColor" stroke="none"/></svg>`,
+  auto: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5h10v10H5z"/><path d="M8 3h4"/><path d="M8 17h4"/><path d="M3 8v4"/><path d="M17 8v4"/></svg>`,
+  group: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5h8l2.5 2.5v8.5h-13v-11z"/><path d="M6 4.5v3h10.5"/><path d="M7 11h6"/><path d="M7 14h4"/></svg>`,
+  more: `<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="10" r="1.2" fill="currentColor" stroke="none"/><circle cx="10" cy="10" r="1.2" fill="currentColor" stroke="none"/><circle cx="15" cy="10" r="1.2" fill="currentColor" stroke="none"/></svg>`
+};
 
 function makeSplitResizableSafe(...args) {
   if (typeof globalThis.makeSplitResizable !== "function") {
@@ -72,6 +108,12 @@ function setPaneHandlers(handlers = {}) {
   if (typeof handlers.markPaneNotificationsRead === "function") {
     paneHandlers.markPaneNotificationsRead = handlers.markPaneNotificationsRead;
   }
+  if (typeof handlers.movePaneToGroup === "function") {
+    paneHandlers.movePaneToGroup = handlers.movePaneToGroup;
+  }
+  if (typeof handlers.openSessionInSplit === "function") {
+    paneHandlers.openSessionInSplit = handlers.openSessionInSplit;
+  }
 }
 
 function paneForSession(sessionId) {
@@ -82,6 +124,195 @@ function paneForSession(sessionId) {
   }
   return null;
 }
+
+function openPaneGroupMenu(paneId, anchorBtn) {
+  document.querySelectorAll(".pane-group-menu").forEach((el) => el.remove());
+  const ws = selectedWorkspace();
+  if (!ws || !state.paneGroups.length) {
+    setStatus("No pane groups available.", true);
+    return;
+  }
+
+  const menu = document.createElement("div");
+  menu.className = "pane-group-menu";
+
+  const title = document.createElement("div");
+  title.className = "pane-group-menu-title";
+  title.textContent = "Move this terminal";
+  menu.appendChild(title);
+
+  const hint = document.createElement("div");
+  hint.className = "pane-group-menu-hint";
+  hint.textContent = "Pick a group, or create one below.";
+  menu.appendChild(hint);
+
+  const currentGroup = typeof groupForPane === "function" ? groupForPane(paneId) : null;
+  for (const group of state.paneGroups) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "pane-group-menu-item";
+    btn.style.setProperty("--group-color", group.color ?? "#6b7c93");
+    btn.textContent = group.name;
+    btn.dataset.active = currentGroup?.id === group.id ? "1" : "0";
+    btn.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      menu.remove();
+      try {
+        await paneHandlers.movePaneToGroup(paneId, group.id);
+      } catch (err) {
+        setStatus(String(err?.message ?? err), true);
+      }
+    });
+    menu.appendChild(btn);
+  }
+
+  const newBtn = document.createElement("button");
+  newBtn.type = "button";
+  newBtn.className = "pane-group-menu-item pane-group-menu-new";
+  newBtn.textContent = "+ New group...";
+  newBtn.addEventListener("click", async (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    menu.remove();
+    if (typeof showGroupCreateInput === "function") {
+      showGroupCreateInput(groupBar?.querySelector(".group-add"), {
+        onCreated: (group) => paneHandlers.movePaneToGroup(paneId, group.id)
+      });
+      return;
+    }
+    setStatus("Group creator unavailable.", true);
+  });
+  menu.appendChild(newBtn);
+
+  document.body.appendChild(menu);
+  const rect = anchorBtn.getBoundingClientRect();
+  const menuW = menu.offsetWidth || 180;
+  const menuH = menu.offsetHeight || 220;
+  let left = rect.left;
+  let top = rect.bottom + 4;
+  if (left + menuW > window.innerWidth - 10) {
+    left = window.innerWidth - menuW - 10;
+  }
+  if (top + menuH > window.innerHeight - 10) {
+    top = rect.top - menuH - 4;
+  }
+  menu.style.left = `${Math.max(10, left)}px`;
+  menu.style.top = `${Math.max(10, top)}px`;
+
+  const closeHandler = (ev) => {
+    if (!menu.contains(ev.target)) {
+      menu.remove();
+      document.removeEventListener("click", closeHandler, true);
+    }
+  };
+  setTimeout(() => document.addEventListener("click", closeHandler, true), 0);
+}
+
+function ensurePaneOverlay(view) {
+  if (!view.overlayEl) {
+    const overlay = document.createElement("div");
+    overlay.className = "pane-terminal-overlay";
+
+    const title = document.createElement("div");
+    title.className = "pane-terminal-overlay-title";
+
+    const detail = document.createElement("div");
+    detail.className = "pane-terminal-overlay-detail";
+
+    const action = document.createElement("button");
+    action.className = "pane-terminal-overlay-action";
+    action.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const mode = overlay.dataset.mode ?? "empty";
+      setPaneOverlay(view, "starting", "Starting session...", "Launching terminal process");
+      paneHandlers.startSessionForPane(view.paneId, {
+        force: mode !== "dormant" && Boolean(view.sessionId),
+        restoreDormant: mode === "dormant",
+        focusTerm: true
+      }).catch((err) => {
+        const canRestore = mode === "dormant";
+        if (mode === "running" || mode === "detached") {
+          const title = mode === "detached" ? "Session detached" : "Session running";
+          setPaneOverlay(view, mode, title, String(err?.message ?? err), "Restart");
+        } else {
+          setPaneOverlay(view, mode, canRestore ? "Restore available" : "No session running", String(err?.message ?? err), canRestore ? "Restore" : "Start");
+        }
+        setStatus(String(err?.message ?? err), true);
+      });
+    });
+
+    overlay.append(title, detail, action);
+    view.overlayEl = overlay;
+    view.overlayTitleEl = title;
+    view.overlayDetailEl = detail;
+    view.overlayActionEl = action;
+  }
+
+  if (view.overlayEl.parentElement !== view.host) {
+    view.host.appendChild(view.overlayEl);
+  }
+}
+
+function setPaneOverlay(view, mode, title, detail = "", actionLabel = "") {
+  if (!view) {
+    return;
+  }
+  ensurePaneOverlay(view);
+  view.overlayEl.dataset.mode = mode;
+  view.overlayTitleEl.textContent = title;
+  view.overlayDetailEl.textContent = detail;
+  view.overlayDetailEl.hidden = !detail;
+  view.overlayActionEl.textContent = actionLabel;
+  view.overlayActionEl.hidden = !actionLabel;
+  view.overlayEl.hidden = false;
+}
+
+function hidePaneOverlay(view) {
+  if (view?.overlayEl) {
+    view.overlayEl.hidden = true;
+  }
+}
+
+function markPaneStarting(paneId, title = "Starting session...", detail = "Launching terminal process") {
+  const view = state.paneViews.get(paneId);
+  if (!view) {
+    return;
+  }
+  setPaneOverlay(view, "starting", title, detail);
+}
+
+function markPaneDetached(view, detail = "Terminal process is no longer attached") {
+  if (!view) {
+    return;
+  }
+  view.detached = true;
+  setPaneOverlay(view, "detached", "Session detached", detail, "Restart");
+  const meta = state.paneMeta.get(view.paneId);
+  if (meta) {
+    meta.statusEl.textContent = "Detached";
+    meta.statusEl.title = detail;
+    meta.startBtn.dataset.fullLabel = "Restart";
+    meta.closeBtn.disabled = false;
+  }
+}
+
+function focusPaneView(view) {
+  if (!view) {
+    return;
+  }
+  rebindImeTextarea(view);
+  view.term.focus();
+  window.requestAnimationFrame(() => {
+    rebindImeTextarea(view);
+  });
+}
+
+function focusPaneTerm(paneId) {
+  focusPaneView(state.paneViews.get(paneId));
+}
+
 function enqueueStreamOutput(paneId, output) {
   const view = state.paneViews.get(paneId);
   if (!view || !output) {
@@ -92,6 +323,8 @@ function enqueueStreamOutput(paneId, output) {
   if (view.sessionId) {
     view.renderedSessionId = view.sessionId;
   }
+  view.hasOutput = true;
+  hidePaneOverlay(view);
   view.outputQueue += output;
   if (view.outputQueue.length > 256_000) {
     view.outputQueue = view.outputQueue.slice(-180_000);
@@ -159,8 +392,8 @@ function normalizePaneSessions() {
     ? hiddenSessionIdsForWorkspace(state.selectedWorkspaceId)
     : new Set();
 
-  console.debug("[normalize] running sessions:", [...running.keys()].map(s => s.slice(0,8)));
-  console.debug("[normalize] paneSessions before:", Object.entries(state.paneSessions).map(([p,s]) => `${p.slice(0,8)}→${s?.slice(0,8)}`));
+  paneDebug("[normalize] running sessions:", [...running.keys()].map(s => s.slice(0,8)));
+  paneDebug("[normalize] paneSessions before:", Object.entries(state.paneSessions).map(([p,s]) => `${p.slice(0,8)}→${s?.slice(0,8)}`));
 
   for (const paneId of Object.keys(state.paneSessions)) {
     const sid = state.paneSessions[paneId];
@@ -168,7 +401,7 @@ function normalizePaneSessions() {
     // paneIds not in leafIds belong to other workspaces — preserve them for workspace-switch cache.
     if (!leafIds.has(paneId)) continue;
     if (sid && (!running.has(sid) || hiddenSessions.has(sid))) {
-      console.warn("[normalize] DELETING pane session:", paneId.slice(0,8), "→", sid?.slice(0,8), "reason: running=", running.has(sid), "hidden=", hiddenSessions.has(sid));
+      paneWarn("[normalize] DELETING pane session:", paneId.slice(0,8), "->", sid?.slice(0,8), "reason: running=", running.has(sid), "hidden=", hiddenSessions.has(sid));
       clearPromptDetectorSession(sid);
       delete state.paneSessions[paneId];
     }
@@ -237,9 +470,81 @@ async function selectPane(paneId, options = {}) {
 
   if (focusTerm) {
     window.requestAnimationFrame(() => {
-      state.paneViews.get(paneId)?.term.focus();
+      focusPaneView(state.paneViews.get(paneId));
     });
   }
+}
+
+function orderedLeafPaneIds() {
+  return leafPanes().map((pane) => pane.pane_id).filter(Boolean);
+}
+
+async function selectAdjacentPane(delta = 1, options = {}) {
+  const paneIds = orderedLeafPaneIds();
+  if (paneIds.length === 0) {
+    return null;
+  }
+  const currentIndex = state.selectedPaneId ? paneIds.indexOf(state.selectedPaneId) : -1;
+  const startIndex = currentIndex >= 0 ? currentIndex : 0;
+  const nextIndex = (startIndex + delta + paneIds.length) % paneIds.length;
+  const nextPaneId = paneIds[nextIndex];
+  await selectPane(nextPaneId, {
+    persist: true,
+    focusTerm: options.focusTerm !== false
+  });
+  setStatus(`Selected pane: ${nextPaneId.slice(0, 8)}`);
+  return nextPaneId;
+}
+
+async function selectPaneByDirection(direction, options = {}) {
+  const currentPaneId = state.selectedPaneId;
+  const currentCard = currentPaneId ? state.paneCards.get(currentPaneId) : null;
+  if (!currentCard) {
+    return selectAdjacentPane(direction === "left" || direction === "up" ? -1 : 1, options);
+  }
+
+  const currentRect = currentCard.getBoundingClientRect();
+  const currentCenter = {
+    x: currentRect.left + currentRect.width / 2,
+    y: currentRect.top + currentRect.height / 2
+  };
+  let best = null;
+  for (const [paneId, card] of state.paneCards.entries()) {
+    if (paneId === currentPaneId) {
+      continue;
+    }
+    const rect = card.getBoundingClientRect();
+    const center = {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2
+    };
+    const dx = center.x - currentCenter.x;
+    const dy = center.y - currentCenter.y;
+    const isCandidate =
+      (direction === "left" && dx < -4)
+      || (direction === "right" && dx > 4)
+      || (direction === "up" && dy < -4)
+      || (direction === "down" && dy > 4);
+    if (!isCandidate) {
+      continue;
+    }
+    const primary = direction === "left" || direction === "right" ? Math.abs(dx) : Math.abs(dy);
+    const secondary = direction === "left" || direction === "right" ? Math.abs(dy) : Math.abs(dx);
+    const score = primary + secondary * 0.45;
+    if (!best || score < best.score) {
+      best = { paneId, score };
+    }
+  }
+
+  if (!best) {
+    return null;
+  }
+  await selectPane(best.paneId, {
+    persist: true,
+    focusTerm: options.focusTerm !== false
+  });
+  setStatus(`Selected pane: ${best.paneId.slice(0, 8)}`);
+  return best.paneId;
 }
 
 function disposeView(view) {
@@ -251,6 +556,9 @@ function disposeView(view) {
   }
   if (view.flushTimer) {
     clearTimeout(view.flushTimer);
+  }
+  if (view.compositionFlushTimer) {
+    clearTimeout(view.compositionFlushTimer);
   }
   if (view.resizeTimer) {
     clearTimeout(view.resizeTimer);
@@ -271,6 +579,9 @@ function disposeView(view) {
     }
     if (view.onCompositionEnd) {
       view.imeTextarea.removeEventListener("compositionend", view.onCompositionEnd);
+    }
+    if (view.onCompositionUpdate) {
+      view.imeTextarea.removeEventListener("compositionupdate", view.onCompositionUpdate);
     }
     view.imeTextarea = null;
   }
@@ -510,7 +821,10 @@ function updatePaneActionLayout(paneId) {
   }
 
   if (meta.autoResizeBtn) {
-    meta.autoResizeBtn.textContent = autoEnabled ? "Auto On" : "Auto Off";
+    const autoLabel = autoEnabled ? "Auto On" : "Auto Off";
+    meta.autoResizeBtn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${paneIcon.auto}</span><span class="pane-btn-label">${autoLabel}</span>`;
+    meta.autoResizeBtn.dataset.hasIcon = "1";
+    meta.autoResizeBtn.classList.toggle("active", autoEnabled);
     meta.autoResizeBtn.title = autoEnabled
       ? "Automatic compact layout is enabled"
       : "Automatic compact layout is disabled";
@@ -540,17 +854,15 @@ function updatePaneActionLayout(paneId) {
   const startFullLabel = meta.startBtn?.dataset?.fullLabel || "Start";
   if (meta.startBtn) {
     const isRestart = /^restart$/i.test(startFullLabel.trim());
+    const isRestore = /^restore$/i.test(startFullLabel.trim());
     if (level > 1) {
-      // tight mode: icon-only with symbol (no SVG icon structure)
-      meta.startBtn.innerHTML = isRestart ? "↻" : "▶";
+      const iconSvg = isRestart ? paneIcon.restart : (isRestore ? paneIcon.restore : paneIcon.start);
+      meta.startBtn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${iconSvg}</span>`;
       meta.startBtn.classList.add("pane-btn-icon");
-      meta.startBtn.title = isRestart ? "Restart" : "Start";
-      delete meta.startBtn.dataset.hasIcon;
+      meta.startBtn.title = startFullLabel;
+      meta.startBtn.dataset.hasIcon = "1";
     } else {
-      // normal mode: SVG icon + label
-      const iconSvg = isRestart
-        ? `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8A5 5 0 1 1 9 3.1"/><polyline points="9,1 9,4 12,4"/></svg>`
-        : `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="4,2 14,8 4,14" fill="currentColor" stroke="none" opacity="0.9"/></svg>`;
+      const iconSvg = isRestart ? paneIcon.restart : (isRestore ? paneIcon.restore : paneIcon.start);
       meta.startBtn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${iconSvg}</span><span class="pane-btn-label">${startFullLabel}</span>`;
       meta.startBtn.dataset.hasIcon = "1";
       meta.startBtn.classList.remove("pane-btn-icon");
@@ -606,7 +918,15 @@ async function syncPaneSize(paneId) {
   }
   const cols = Math.max(2, view.term.cols || 120);
   const rows = Math.max(1, view.term.rows || 24);
-  await rpc("session.resize", { session_id: view.sessionId, cols, rows });
+  try {
+    await rpc("session.resize", { session_id: view.sessionId, cols, rows });
+  } catch (err) {
+    if (isDetachedInputError(err)) {
+      markPaneDetached(view, "Restart this pane to attach a new terminal");
+      return;
+    }
+    throw err;
+  }
 }
 
 function queuePaneInput(view, data) {
@@ -615,6 +935,12 @@ function queuePaneInput(view, data) {
   }
 
   view.pendingInput += data;
+  paneDebug("[input] queued", {
+    pane: view.paneId?.slice(0, 8),
+    session: view.sessionId?.slice(0, 8),
+    bytes: data.length,
+    pending: view.pendingInput.length
+  });
   if (view.inputFlushScheduled || view.inputFlushInFlight) {
     return;
   }
@@ -625,6 +951,28 @@ function queuePaneInput(view, data) {
     view.inputFlushScheduled = false;
     void flushPaneInput(view);
   }, INPUT_FLUSH_DELAY_MS);
+}
+
+function isReconnectableInputError(err) {
+  const msg = String(err?.message ?? err).toLowerCase();
+  return msg.includes("enoent") || msg.includes("pipe") || msg.includes("core pipe disconnected");
+}
+
+function isDetachedInputError(err) {
+  return String(err?.message ?? err).toLowerCase().includes("pty session not attached");
+}
+
+async function writePaneInput(sessionId, payload) {
+  try {
+    await rpc("session.write", { session_id: sessionId, data: payload });
+    return;
+  } catch (err) {
+    if (!isReconnectableInputError(err)) {
+      throw err;
+    }
+    await new Promise((resolve) => setTimeout(resolve, INPUT_RETRY_DELAY_MS));
+    await rpc("session.write", { session_id: sessionId, data: payload });
+  }
 }
 
 async function flushPaneInput(view) {
@@ -646,7 +994,7 @@ async function flushPaneInput(view) {
       const started = performance.now();
 
       try {
-        await rpc("session.write", { session_id: sessionId, data: payload });
+        await writePaneInput(sessionId, payload);
         const latency = performance.now() - started;
         state.metrics.input_latency_ms.push(latency);
         if (state.metrics.input_latency_ms.length > 50) {
@@ -665,10 +1013,21 @@ async function flushPaneInput(view) {
           dropped: 0,
           in_flight_ms: Number(latency.toFixed(2))
         });
+        paneDebug("[input] write ok", {
+          pane: view.paneId?.slice(0, 8),
+          session: sessionId.slice(0, 8),
+          bytes: queued,
+          latency: Number(latency.toFixed(2))
+        });
       } catch (err) {
         const msg = err?.message ?? String(err);
-        if (msg.includes("ENOENT") || msg.includes("pipe")) {
-          setStatus("Core reconnecting, retrying input...", true);
+        const reconnectable = isReconnectableInputError(err);
+        const detached = isDetachedInputError(err);
+        if (reconnectable) {
+          setStatus("Terminal input failed after reconnect retry.", true);
+        } else if (detached) {
+          markPaneDetached(view, "Restart this pane to attach a new terminal");
+          setStatus("Terminal detached. Restart the pane to continue input.", true);
         } else {
           setStatus(`Terminal input error: ${msg}`, true);
         }
@@ -681,6 +1040,13 @@ async function flushPaneInput(view) {
           dropped: queued,
           in_flight_ms: Number(latency.toFixed(2))
         });
+        paneDebug("[input] write failed", {
+          pane: view.paneId?.slice(0, 8),
+          session: sessionId.slice(0, 8),
+          bytes: queued,
+          message: msg
+        });
+        break;
       }
     }
   } finally {
@@ -704,24 +1070,77 @@ function writeToPane(paneId, data) {
   queuePaneInput(view, data);
 }
 
+function flushCompositionPending(view) {
+  if (!view?.compositionPendingData) {
+    return;
+  }
+  if (view.compositionFlushTimer) {
+    clearTimeout(view.compositionFlushTimer);
+    view.compositionFlushTimer = null;
+  }
+  const pending = view.compositionPendingData;
+  view.compositionPendingData = "";
+  view.compositionLastFlushData = pending;
+  view.compositionLastFlushAt = Date.now();
+  queuePaneInput(view, pending);
+}
+
+function clearCompositionPending(view) {
+  if (!view) {
+    return;
+  }
+  if (view.compositionFlushTimer) {
+    clearTimeout(view.compositionFlushTimer);
+    view.compositionFlushTimer = null;
+  }
+  view.compositionPendingData = "";
+}
+
+function shouldSuppressDuplicateCompositionData(view, data) {
+  if (!view || !data) {
+    return false;
+  }
+  const now = Date.now();
+
+  if (view.compositionPendingData && view.compositionEndedAt && now - view.compositionEndedAt <= IME_DUPLICATE_WINDOW_MS) {
+    clearCompositionPending(view);
+    return false;
+  }
+
+  if (
+    view.compositionLastFlushData === data
+    && view.compositionLastFlushAt
+    && now - view.compositionLastFlushAt <= IME_DUPLICATE_WINDOW_MS
+  ) {
+    view.compositionLastFlushData = "";
+    view.compositionLastFlushAt = 0;
+    logIme("composition.duplicate-suppressed", { pane_id: view.paneId, len: data.length });
+    return true;
+  }
+
+  return false;
+}
+
 function bindViewToSession(view, sessionId) {
   const nextSession = sessionId ?? null;
 
   // If same session and already bound, just sync PTY size
   if (view.sessionId === nextSession && view._boundToStream) {
-    syncPaneSize(view.paneId).catch(() => {});
     return;
   }
 
-  console.warn("[bindView] REBIND pane:", view.paneId?.slice(0,8),
+  paneWarn("[bindView] REBIND pane:", view.paneId?.slice(0,8),
     "prevSession:", view.sessionId?.slice(0,8),
     "nextSession:", nextSession?.slice(0,8),
     "_boundToStream:", view._boundToStream,
     "sameId:", view.sessionId === nextSession,
-    "stack:", new Error().stack?.split('\n')[2]?.trim()
+    "stack:", new Error().stack?.split("\n")[2]?.trim()
   );
 
   const previousSession = view.sessionId;
+  if (previousSession !== nextSession) {
+    view.detached = false;
+  }
   if (previousSession && previousSession !== nextSession) {
     clearPromptDetectorSession(previousSession);
   }
@@ -753,9 +1172,20 @@ function bindViewToSession(view, sessionId) {
   if (!sameRendered) {
     view.term.reset();
     view.renderedSessionId = nextSession;
+    view.hasOutput = false;
   }
 
   if (view.sessionId) {
+    if (sameRendered && view.hasOutput) {
+      hidePaneOverlay(view);
+    } else if (view.detached) {
+      setPaneOverlay(view, "detached", "Session detached", "Restart this pane to attach a new terminal", "Restart");
+    } else {
+      setPaneOverlay(view, "running", "Session running", "No output yet", "Restart");
+    }
+    if (!sameRendered) {
+      restoreSessionTail(view, view.sessionId);
+    }
     if (!state.useStream) {
       startPanePolling(view);
     }
@@ -763,7 +1193,26 @@ function bindViewToSession(view, sessionId) {
     syncPaneSize(view.paneId).catch(() => {});
   } else {
     view._boundToStream = false;
+    const dormant = state.dormantPaneSessions[view.paneId] ?? null;
+    if (dormant?.spawn_cmd) {
+      setPaneOverlay(view, "dormant", "Restore available", dormant.spawn_cmd, "Restore");
+    } else {
+      setPaneOverlay(view, "empty", "No session running", "Start a terminal in this pane", "Start");
+    }
   }
+}
+
+function restoreSessionTail(view, sessionId) {
+  const restoreId = sessionId;
+  rpc("session.tail", { session_id: restoreId, max_bytes: 65536 })
+    .then((res) => {
+      if (res?.output && view.sessionId === restoreId && view.renderedSessionId === restoreId) {
+        view.hasOutput = true;
+        hidePaneOverlay(view);
+        view.term.write(normalizeTerminalOutput(res.output));
+      }
+    })
+    .catch(() => {});
 }
 
 function startPanePolling(view) {
@@ -792,6 +1241,8 @@ function startPanePolling(view) {
         const isScrolledUp = buf.viewportY < buf.baseY;
         const savedViewportY = isScrolledUp ? buf.viewportY : null;
         view.renderedSessionId = activeSessionId;
+        view.hasOutput = true;
+        hidePaneOverlay(view);
         view.term.write(normalizeTerminalOutput(res.output), () => {
           if (savedViewportY !== null) {
             view.term.scrollToLine(savedViewportY);
@@ -829,17 +1280,39 @@ function rebindImeTextarea(view) {
     if (view.onCompositionEnd) {
       view.imeTextarea.removeEventListener("compositionend", view.onCompositionEnd);
     }
+    if (view.onCompositionUpdate) {
+      view.imeTextarea.removeEventListener("compositionupdate", view.onCompositionUpdate);
+    }
   }
 
   view.onCompositionStart = () => {
+    // Korean IMEs often end one syllable and immediately start the next one.
+    // Flush the previous committed syllable before resetting this composition cycle.
+    flushCompositionPending(view);
     view.isComposing = true;
+    view.compositionPendingData = "";
+    view.compositionEndedAt = 0;
+    view.compositionLastFlushData = "";
+    view.compositionLastFlushAt = 0;
     logIme("compositionstart", { pane_id: view.paneId });
+  };
+  view.onCompositionUpdate = (ev) => {
+    logIme("compositionupdate", {
+      pane_id: view.paneId,
+      len: String(ev?.data ?? "").length
+    });
   };
   view.onCompositionEnd = () => {
     view.isComposing = false;
+    view.compositionEndedAt = Date.now();
     logIme("compositionend", { pane_id: view.paneId });
+    view.compositionFlushTimer = window.setTimeout(() => {
+      view.compositionFlushTimer = null;
+      flushCompositionPending(view);
+    }, IME_COMMIT_WAIT_MS);
   };
   textarea.addEventListener("compositionstart", view.onCompositionStart);
+  textarea.addEventListener("compositionupdate", view.onCompositionUpdate);
   textarea.addEventListener("compositionend", view.onCompositionEnd);
   view.imeTextarea = textarea;
 }
@@ -857,12 +1330,24 @@ function createPaneLeaf(node, hosts) {
   const unreadBadgeEl = document.createElement("span");
   unreadBadgeEl.className = "pane-unread-badge";
   unreadBadgeEl.hidden = true;
+  const groupBadgeEl = document.createElement("button");
+  groupBadgeEl.type = "button";
+  groupBadgeEl.className = "pane-group-badge";
+  groupBadgeEl.hidden = true;
+  groupBadgeEl.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    openPaneGroupMenu(paneId, groupBadgeEl);
+  });
   const idWrap = document.createElement("div");
   idWrap.className = "pane-id-wrap";
-  idWrap.append(idEl, unreadBadgeEl);
+  idWrap.append(idEl, groupBadgeEl, unreadBadgeEl);
   const statusEl = document.createElement("span");
   statusEl.className = "pane-session";
   statusEl.textContent = "No session";
+  const statusWrap = document.createElement("div");
+  statusWrap.className = "pane-status-wrap";
+  statusWrap.append(statusEl);
   const actions = document.createElement("div");
   actions.className = "pane-actions";
   const actionsPrimary = document.createElement("div");
@@ -871,8 +1356,10 @@ function createPaneLeaf(node, hosts) {
   actionsOverflowWrap.className = "pane-overflow";
   const actionsOverflowBtn = document.createElement("button");
   actionsOverflowBtn.className = "pane-btn pane-overflow-btn";
-  actionsOverflowBtn.textContent = "...";
+  actionsOverflowBtn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${paneIcon.more}</span>`;
+  actionsOverflowBtn.dataset.hasIcon = "1";
   actionsOverflowBtn.title = "More actions";
+  actionsOverflowBtn.setAttribute("aria-label", "More actions");
   actionsOverflowBtn.setAttribute("aria-expanded", "false");
   const actionsOverflowMenu = document.createElement("div");
   actionsOverflowMenu.className = "pane-overflow-menu";
@@ -891,114 +1378,64 @@ function createPaneLeaf(node, hosts) {
     btn.addEventListener("click", onClick);
     return btn;
   };
-  const fontDownBtn = makeBtn("Font −", "Decrease font size", (ev) => {
+  const fontDownBtn = makeBtn("Font -", "Decrease font size", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.adjustPaneFont(paneId, -PANE_FONT_LIMITS.step).catch((err) => setStatus(String(err), true));
-  }, "pane-btn",
-    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-      <text x="1" y="11" font-size="8" font-family="sans-serif" stroke="none" fill="currentColor" font-weight="bold">A</text>
-      <text x="9" y="14" font-size="6" font-family="sans-serif" stroke="none" fill="currentColor">a</text>
-      <line x1="6" y1="13" x2="10" y2="13"/>
-    </svg>`
-  );
+  }, "pane-btn", paneIcon.fontDown);
   const fontUpBtn = makeBtn("Font +", "Increase font size", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.adjustPaneFont(paneId, PANE_FONT_LIMITS.step).catch((err) => setStatus(String(err), true));
-  }, "pane-btn",
-    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-      <text x="1" y="11" font-size="8" font-family="sans-serif" stroke="none" fill="currentColor" font-weight="bold">A</text>
-      <text x="9" y="14" font-size="6" font-family="sans-serif" stroke="none" fill="currentColor">a</text>
-      <line x1="8" y1="11" x2="8" y2="15"/>
-      <line x1="6" y1="13" x2="10" y2="13"/>
-    </svg>`
-  );
+  }, "pane-btn", paneIcon.fontUp);
   const splitHBtn = makeBtn("Split Right", "Split horizontally (add column)", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.splitPane(paneId, "horizontal").catch((err) => setStatus(String(err), true));
-  }, "pane-btn",
-    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-      <rect x="1" y="2" width="14" height="12" rx="1.5"/>
-      <line x1="8" y1="2" x2="8" y2="14"/>
-      <line x1="11" y1="7" x2="11" y2="9"/>
-      <line x1="10" y1="8" x2="12" y2="8"/>
-    </svg>`
-  );
+  }, "pane-btn", paneIcon.splitRight);
   const splitVBtn = makeBtn("Split Down", "Split vertically (add row)", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.splitPane(paneId, "vertical").catch((err) => setStatus(String(err), true));
-  }, "pane-btn",
-    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-      <rect x="1" y="2" width="14" height="12" rx="1.5"/>
-      <line x1="1" y1="9" x2="15" y2="9"/>
-      <line x1="7" y1="12" x2="9" y2="12"/>
-      <line x1="8" y1="11" x2="8" y2="13"/>
-    </svg>`
-  );
+  }, "pane-btn", paneIcon.splitDown);
   const startBtn = makeBtn("Start", "Start session", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.startSessionForPane(paneId, { force: true }).catch((err) => setStatus(String(err), true));
-  }, "pane-btn");
+  }, "pane-btn pane-btn-primary", paneIcon.start);
   startBtn.dataset.fullLabel = "Start";
-  const sessionPickerBtn = makeBtn("Sessions", "View and attach session history", (ev) => {
+  const sessionPickerBtn = makeBtn("Sessions", "Manage running, dormant, and previous sessions", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     openSessionPicker(paneId, sessionPickerBtn);
-  }, "pane-btn",
-    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-      <rect x="2" y="2" width="12" height="3" rx="1"/>
-      <rect x="2" y="7" width="12" height="3" rx="1"/>
-      <line x1="2" y1="13" x2="10" y2="13"/>
-      <polyline points="11,12 13,14 15,11" stroke-width="1.5"/>
-    </svg>`
-  );
+  }, "pane-btn", paneIcon.sessions);
   sessionPickerBtn.className = "pane-btn session-picker-btn";
-  const closeBtn = makeBtn("Close Session", "", (ev) => {
+  const closeBtn = makeBtn("Close Session", "Close terminal session", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.closeSessionForPane(paneId).catch((err) => setStatus(String(err), true));
-  }, "pane-btn",
-    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-      <rect x="2" y="3" width="12" height="10" rx="1.5"/>
-      <line x1="6" y1="7" x2="10" y2="9"/>
-      <line x1="10" y1="7" x2="6" y2="9"/>
-    </svg>`
-  );
-  const closePaneBtn = makeBtn("Close Pane", "", (ev) => {
+  }, "pane-btn", paneIcon.closeSession);
+  const closePaneBtn = makeBtn("Close Pane", "Close pane", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.closePane(paneId).catch((err) => setStatus(String(err), true));
-  }, "pane-btn pane-btn-danger",
-    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-      <polyline points="2,4 8,2 14,4 14,13 8,15 2,13"/>
-      <line x1="8" y1="2" x2="8" y2="15"/>
-      <line x1="5" y1="8" x2="11" y2="8"/>
-    </svg>`
-  );
+  }, "pane-btn pane-btn-danger", paneIcon.closePane);
   const hidePaneBtn = makeBtn("Hide Pane", "Hide this pane without ending session", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.hidePane(paneId).catch((err) => setStatus(String(err), true));
-  }, "pane-btn",
-    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-      <path d="M1 8 C4 4 12 4 15 8"/>
-      <line x1="2" y1="3" x2="14" y2="13"/>
-    </svg>`
-  );
+  }, "pane-btn", paneIcon.hidePane);
   const quickBtn = makeBtn("", "Quick command", () => {});
   quickBtn.classList.add("quickcmd-toggle");
   quickBtn.setAttribute("aria-label", "Quick command");
-  quickBtn.innerHTML = '<span class="quickcmd-icon" aria-hidden="true"></span>';
+  quickBtn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${paneIcon.quick}</span>`;
+  quickBtn.dataset.hasIcon = "1";
   const autoResizeBtn = makeBtn("", "Toggle automatic compact layout", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     setPaneAutoResizeEnabled(!(state.paneAutoResize !== false));
     setStatus(state.paneAutoResize !== false ? "Auto resize enabled" : "Auto resize disabled");
-  }, "pane-btn pane-btn-auto");
+  }, "pane-btn pane-btn-auto", paneIcon.auto);
   actionsOverflowBtn.addEventListener("click", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
@@ -1047,7 +1484,7 @@ function createPaneLeaf(node, hosts) {
     window.addEventListener("resize", reposition);
     window.addEventListener("scroll", reposition, true);
   }
-  header.append(idWrap, statusEl, actions);
+  header.append(idWrap, statusWrap, actions);
   const quickPanel = document.createElement("div");
   quickPanel.className = "quickcmd-popover";
   const terminalHost = document.createElement("div");
@@ -1065,7 +1502,7 @@ function createPaneLeaf(node, hosts) {
     selectPane(paneId, { persist: true, focusTerm: false })
       .then(() => {
         if (isTerminalClick) {
-          state.paneViews.get(paneId)?.term.focus();
+          focusPaneTerm(paneId);
         }
       })
       .catch((err) => setStatus(String(err), true));
@@ -1078,6 +1515,7 @@ function createPaneLeaf(node, hosts) {
     actionsOverflowBtn,
     actionsOverflowMenu,
     statusEl,
+    groupBadgeEl,
     splitHBtn,
     splitVBtn,
     startBtn,
@@ -1099,6 +1537,12 @@ function createPaneLeaf(node, hosts) {
 
 function renderPaneNode(node, paneMap, hosts) {
   if (!node.split) {
+    if (state.selectedGroupId) {
+      const group = typeof groupForPane === "function" ? groupForPane(node.pane_id) : null;
+      if (group?.id !== state.selectedGroupId) {
+        return null;
+      }
+    }
     return createPaneLeaf(node, hosts);
   }
 
@@ -1117,6 +1561,15 @@ function renderPaneNode(node, paneMap, hosts) {
 
   const firstNode = renderPaneNode(first, paneMap, hosts);
   const secondNode = renderPaneNode(second, paneMap, hosts);
+  if (!firstNode && !secondNode) {
+    return null;
+  }
+  if (!firstNode) {
+    return secondNode;
+  }
+  if (!secondNode) {
+    return firstNode;
+  }
   firstNode.classList.add("pane-split-item");
   secondNode.classList.add("pane-split-item");
 
@@ -1170,6 +1623,7 @@ function createPaneView(paneId, host) {
     fitAddon,
     sessionId: null,
     renderedSessionId: null,  // tracks which session's output is actually in the xterm buffer
+    hasOutput: false,
     poller: null,
     observer: null,
     pendingInput: "",
@@ -1180,18 +1634,91 @@ function createPaneView(paneId, host) {
     outputQueue: "",
     resizeTimer: null,
     readBusy: false,
+    detached: false,
     isComposing: false,
+    compositionPendingData: "",
+    compositionFlushTimer: null,
+    compositionEndedAt: 0,
+    compositionLastFlushData: "",
+    compositionLastFlushAt: 0,
     imeTextarea: null,
     imeBindTimer: null,
     onCompositionStart: null,
+    onCompositionUpdate: null,
     onCompositionEnd: null,
-    suppressOnData: false
+    suppressOnData: false,
+    overlayEl: null,
+    overlayTitleEl: null,
+    overlayDetailEl: null,
+    overlayActionEl: null
   };
+  ensurePaneOverlay(view);
+  setPaneOverlay(view, "empty", "No session running", "Start a terminal in this pane", "Start");
 
   term.attachCustomKeyEventHandler((ev) => {
     const key = ev.key?.toLowerCase?.() ?? "";
     if (ev.type !== "keydown") {
       return true;
+    }
+    if (ev.isComposing || key === "process" || view.isComposing) {
+      return true;
+    }
+
+    if ((ev.ctrlKey || ev.metaKey) && ev.key === "Tab") {
+      ev.preventDefault();
+      void selectAdjacentPane(ev.shiftKey ? -1 : 1, { focusTerm: true }).catch((err) => setStatus(String(err?.message ?? err), true));
+      return false;
+    }
+
+    const ctrl = ev.ctrlKey || ev.metaKey;
+    if (ctrl && !ev.altKey && !ev.shiftKey && ev.code === "Slash") {
+      ev.preventDefault();
+      globalThis.toggleShortcutHelp?.();
+      return false;
+    }
+
+    if (ctrl && ev.altKey && !ev.shiftKey) {
+      const arrowMap = {
+        ArrowLeft: "left",
+        ArrowRight: "right",
+        ArrowUp: "up",
+        ArrowDown: "down"
+      };
+      if (arrowMap[ev.key]) {
+        ev.preventDefault();
+        void selectPaneByDirection(arrowMap[ev.key], { focusTerm: true }).catch((err) => setStatus(String(err?.message ?? err), true));
+        return false;
+      }
+      if (ev.code === "Backslash") {
+        ev.preventDefault();
+        paneHandlers.splitPane(paneId, "horizontal").catch((err) => setStatus(String(err), true));
+        return false;
+      }
+      if (ev.code === "Minus" || ev.code === "NumpadSubtract") {
+        ev.preventDefault();
+        paneHandlers.splitPane(paneId, "vertical").catch((err) => setStatus(String(err), true));
+        return false;
+      }
+      if (key === "t") {
+        ev.preventDefault();
+        paneHandlers.startSessionForPane(paneId, { focusTerm: true }).catch((err) => setStatus(String(err), true));
+        return false;
+      }
+      if (key === "r") {
+        ev.preventDefault();
+        paneHandlers.startSessionForPane(paneId, { force: true, focusTerm: true }).catch((err) => setStatus(String(err), true));
+        return false;
+      }
+      if (key === "w") {
+        ev.preventDefault();
+        paneHandlers.hidePane(paneId).catch((err) => setStatus(String(err), true));
+        return false;
+      }
+      if (key === "q") {
+        ev.preventDefault();
+        paneHandlers.closePane(paneId).catch((err) => setStatus(String(err), true));
+        return false;
+      }
     }
 
     if (ev.ctrlKey && !ev.shiftKey && key === "c") {
@@ -1229,13 +1756,22 @@ function createPaneView(paneId, host) {
   });
 
   term.onData((data) => {
-    // Block input if an external textarea/input has focus (e.g. notepad, session picker)
-    const active = document.activeElement;
-    if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT") && active !== view.imeTextarea) {
-      return;
-    }
+    paneDebug("[input] onData", {
+      pane: paneId.slice(0, 8),
+      len: data.length,
+      active: document.activeElement?.tagName ?? null,
+      hostActive: view.host.contains(document.activeElement)
+    });
     // Suppress duplicate onData fired by xterm's native paste path when Ctrl+V is intercepted
     if (view.suppressOnData) {
+      return;
+    }
+    if (view.isComposing) {
+      view.compositionPendingData += data;
+      logIme("onData.composing", { pane_id: paneId, len: data.length });
+      return;
+    }
+    if (shouldSuppressDuplicateCompositionData(view, data)) {
       return;
     }
     logIme("onData", { pane_id: paneId, len: data.length, composing: view.isComposing });
@@ -1243,8 +1779,18 @@ function createPaneView(paneId, host) {
   });
 
   term.onBinary((data) => {
-    const active = document.activeElement;
-    if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT") && active !== view.imeTextarea) {
+    paneDebug("[input] onBinary", {
+      pane: paneId.slice(0, 8),
+      len: data.length,
+      active: document.activeElement?.tagName ?? null,
+      hostActive: view.host.contains(document.activeElement)
+    });
+    if (view.isComposing) {
+      view.compositionPendingData += data;
+      logIme("onBinary.composing", { pane_id: paneId, len: data.length });
+      return;
+    }
+    if (shouldSuppressDuplicateCompositionData(view, data)) {
       return;
     }
     logIme("onBinary", { pane_id: paneId, len: data.length });
@@ -1317,7 +1863,6 @@ function renderPaneSurface(force = false) {
 
   // On workspace switch: stash current workspace's views+sessions into cache, restore returning workspace's
   const renderingWorkspaceId = state.selectedWorkspaceId;
-  let restoredFromWorkspaceSwitch = false;
   if (state._lastRenderedWorkspaceId !== renderingWorkspaceId) {
     // Save outgoing workspace's live views and session mappings into cache (stop polling first)
     if (state._lastRenderedWorkspaceId) {
@@ -1342,7 +1887,6 @@ function renderPaneSurface(force = false) {
       for (const [paneId, view] of cachedViews.entries()) {
         state.paneViews.set(paneId, view);
       }
-      restoredFromWorkspaceSwitch = true;
     }
     const cachedSessions = state.workspacePaneSessionCache.get(renderingWorkspaceId);
     if (cachedSessions) {
@@ -1379,9 +1923,13 @@ function renderPaneSurface(force = false) {
 
   const hosts = [];
   const rootNode = renderPaneNode(root, paneMap, hosts);
+  if (!rootNode) {
+    const group = paneGroupById(state.selectedGroupId);
+    renderPaneEmptyState("No panes in this group", `${group?.name ?? "Selected"} has no panes. Choose All or move a terminal into this group.`);
+    return;
+  }
   paneSurface.appendChild(rootNode);
 
-  const restoredFromCache = new Set();
   for (const item of hosts) {
     const existing = state.paneViews.get(item.paneId);
     if (existing) {
@@ -1392,6 +1940,8 @@ function renderPaneSurface(force = false) {
         item.host.appendChild(existing.term.element);
       }
       existing.host = item.host;
+      ensurePaneOverlay(existing);
+      rebindImeTextarea(existing);
       existing.observer?.disconnect();
       const observer = new ResizeObserver(() => {
         updatePaneActionLayout(item.paneId);
@@ -1400,8 +1950,6 @@ function renderPaneSurface(force = false) {
       });
       observer.observe(item.host);
       existing.observer = observer;
-      // Only replay session buffer for views that actually came back from another workspace's cache
-      if (restoredFromWorkspaceSwitch && existing.renderedSessionId) restoredFromCache.add(item.paneId);
     } else {
       createPaneView(item.paneId, item.host);
     }
@@ -1412,27 +1960,6 @@ function renderPaneSurface(force = false) {
   // Defer fit until after browser has applied layout, so xterm gets correct dimensions
   requestAnimationFrame(() => {
     fitAllPanes();
-    // Second pass after any CSS transitions settle
-    setTimeout(() => fitAllPanes(), 80);
-    // For views restored from workspace cache: replay session buffer so terminal isn't blank
-    if (restoredFromCache.size > 0) {
-      setTimeout(() => {
-        for (const paneId of restoredFromCache) {
-          const view = state.paneViews.get(paneId);
-          if (!view?.sessionId) continue;
-          const replayId = view.sessionId;
-          rpc("session.read", { session_id: replayId, max_bytes: 65536 })
-            .then((res) => {
-              if (res?.output && view.sessionId === replayId) {
-                view.term.reset();
-                view.term.write(normalizeTerminalOutput(res.output));
-                view.renderedSessionId = replayId;
-              }
-            })
-            .catch(() => {});
-        }
-      }, 120);
-    }
   });
 }
 
@@ -1455,7 +1982,7 @@ function renderPaneEmptyState(title, description) {
 function refreshPaneBindings() {
   const runningMap = new Map(runningSessions().map((s) => [s.id, s]));
   const leafCount = leafPanes().length;
-  console.debug("[refreshBindings] called, running sessions:", [...runningMap.keys()].map(s=>s.slice(0,8)), "paneSessions:", Object.entries(state.paneSessions).map(([p,s])=>`${p.slice(0,8)}→${s?.slice(0,8)}`));
+  paneDebug("[refreshBindings] called, running sessions:", [...runningMap.keys()].map(s=>s.slice(0,8)), "paneSessions:", Object.entries(state.paneSessions).map(([p,s])=>`${p.slice(0,8)}->${s?.slice(0,8)}`));
 
   for (const pane of leafPanes()) {
     const paneId = pane.pane_id;
@@ -1476,14 +2003,22 @@ function refreshPaneBindings() {
     const meta = state.paneMeta.get(paneId);
     const fontSize = currentPaneFontSize(state.selectedWorkspaceId, paneId);
     const unreadCount = unreadRowsForPane(paneId, sessionId).length;
+    const dormant = state.dormantPaneSessions[paneId] ?? null;
     if (meta) {
       if (sessionId) {
         const session = runningMap.get(sessionId);
         meta.statusEl.textContent = session ? `Running - pid ${session.pid}` : "Attached";
+        meta.statusEl.title = "";
         meta.startBtn.dataset.fullLabel = "Restart";
         meta.closeBtn.disabled = false;
+      } else if (dormant?.spawn_cmd) {
+        meta.statusEl.textContent = `Dormant - ${dormant.spawn_cmd}`;
+        meta.statusEl.title = "Restore available";
+        meta.startBtn.dataset.fullLabel = "Restore";
+        meta.closeBtn.disabled = true;
       } else {
         meta.statusEl.textContent = "No session";
+        meta.statusEl.title = "";
         meta.startBtn.dataset.fullLabel = "Start";
         meta.closeBtn.disabled = true;
       }
@@ -1493,10 +2028,19 @@ function refreshPaneBindings() {
       meta.hidePaneBtn.disabled = leafCount <= 1;
       meta.unreadBadgeEl.hidden = unreadCount <= 0;
       meta.unreadBadgeEl.textContent = unreadCount > 99 ? "99+" : String(unreadCount);
+      const group = typeof groupForPane === "function" ? groupForPane(paneId) : null;
+      if (meta.groupBadgeEl) {
+        meta.groupBadgeEl.hidden = !group;
+        meta.groupBadgeEl.textContent = group ? `${group.name} ▾` : "";
+        meta.groupBadgeEl.title = group ? `Move this terminal from ${group.name} to another group` : "Move this terminal to a group";
+        meta.groupBadgeEl.setAttribute("aria-label", meta.groupBadgeEl.title);
+        meta.groupBadgeEl.style.setProperty("--group-color", group?.color ?? "#6b7c93");
+      }
     }
     const card = state.paneCards.get(paneId);
     if (card) {
       card.classList.toggle("pane-has-unread", unreadCount > 0);
+      card.classList.toggle("pane-dormant", !sessionId && Boolean(dormant));
     }
     updatePaneActionLayout(paneId);
 
@@ -1519,21 +2063,101 @@ async function openSessionPicker(paneId, anchorBtn) {
   const ws = selectedWorkspace();
   if (!ws) return;
 
-  const [histRes, aiRes] = await Promise.all([
-    rpc("session.history", { workspace_id: ws.id }).catch(() => null),
-    rpc("ai.sessions", { workspace_id: ws.id }).catch(() => null),
-  ]);
-  const aiSessions = aiRes?.sessions ?? [];
+  const workspaceRows = [ws];
+  const sessionResults = await Promise.all(workspaceRows.map((row) =>
+    Promise.all([
+      rpc("session.history", { workspace_id: row.id }).catch(() => null),
+      rpc("ai.sessions", { workspace_id: row.id }).catch(() => null)
+    ]).then(([histRes, aiRes]) => ({ workspace: row, histRes, aiRes }))
+  ));
+  const aiSessions = sessionResults.flatMap((result) =>
+    (result.aiRes?.sessions ?? []).map((session) => ({
+      ...session,
+      workspace_name: result.workspace.name,
+      workspace_path: result.workspace.path
+    }))
+  );
 
   const dropdown = document.createElement("div");
   dropdown.className = "session-picker-dropdown";
 
+  const titleBar = document.createElement("div");
+  titleBar.className = "session-picker-titlebar";
+  const titleText = document.createElement("div");
+  titleText.className = "session-picker-title";
+  titleText.textContent = `${ws.name} Sessions`;
+  const subtitleText = document.createElement("div");
+  subtitleText.className = "session-picker-subtitle";
+  subtitleText.textContent = "Manage running, dormant, and previous sessions for this workspace.";
+  titleBar.append(titleText, subtitleText);
+  dropdown.appendChild(titleBar);
+
+  const tools = document.createElement("div");
+  tools.className = "session-picker-tools";
+  const searchInput = document.createElement("input");
+  searchInput.className = "session-picker-search";
+  searchInput.placeholder = "Search command or session id";
+  const filterSelect = document.createElement("select");
+  filterSelect.className = "session-picker-filter";
+  for (const [value, label] of [["all", "All"], ["running", "Running"], ["dormant", "Dormant"], ["history", "History"], ["ai", "AI Resume"]]) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    filterSelect.appendChild(opt);
+  }
+  tools.append(searchInput, filterSelect);
+  dropdown.appendChild(tools);
+
+  const appendSectionHeader = (title, detail = "") => {
+    const header = document.createElement("div");
+    header.className = "session-picker-header";
+    const titleEl = document.createElement("span");
+    titleEl.textContent = title;
+    header.appendChild(titleEl);
+    if (detail) {
+      const detailEl = document.createElement("span");
+      detailEl.className = "session-picker-header-detail";
+      detailEl.textContent = detail;
+      header.appendChild(detailEl);
+    }
+    dropdown.appendChild(header);
+  };
+
+  const commandBaseName = (cmd = "") => String(cmd).split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  const cleanShellCommand = (value = "") => {
+    let text = String(value).trim();
+    text = text.replace(/^\$OutputEncoding=\[Console\]::OutputEncoding=\[TextUTF8Encoding\]::new\(\);\s*/i, "");
+    text = text.replace(/^\$OutputEncoding=\[Console\]::OutputEncoding=\[Text\.UTF8Encoding\]::new\(\);\s*/i, "");
+    text = text.replace(/^\[Console\]::InputEncoding=\[Text\.UTF8Encoding\]::new\(\);\s*/i, "");
+    text = text.replace(/^if \(Get-Variable PSStyle[\s\S]*?\};\s*/i, "");
+    text = text.replace(/^chcp\s+65001\s*>\s*\$null\s*;?\s*/i, "");
+    return text || value;
+  };
+  const sessionLabel = (session) => {
+    const cmd = commandBaseName(session.spawn_cmd);
+    let parsedArgs = [];
+    try {
+      const parsed = JSON.parse(session.spawn_args || "[]");
+      parsedArgs = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      parsedArgs = [];
+    }
+    const commandIndex = parsedArgs.findIndex((arg) => String(arg).toLowerCase() === "-command");
+    if ((cmd === "pwsh.exe" || cmd === "powershell.exe" || cmd === "pwsh" || cmd === "powershell") && commandIndex >= 0) {
+      return cleanShellCommand(parsedArgs.slice(commandIndex + 1).join(" "));
+    }
+    const displayArgs = parsedArgs.filter((arg) => {
+      const value = String(arg);
+      return !value.startsWith("-No") && !value.startsWith("chcp") && !value.startsWith("$Output") && !value.startsWith("[Console]");
+    });
+    return displayArgs.length > 0
+      ? `${session.spawn_cmd} ${displayArgs.join(" ")}`.trim()
+      : session.spawn_cmd;
+  };
+
   // AI Sessions section (Claude / Codex conversation sessions)
   if (aiSessions.length > 0) {
-    const aiHeader = document.createElement("div");
-    aiHeader.className = "session-picker-header";
-    aiHeader.textContent = "AI Sessions (Claude / Codex)";
-    dropdown.appendChild(aiHeader);
+    appendSectionHeader("AI Resume", `${aiSessions.length} saved command${aiSessions.length === 1 ? "" : "s"} in this workspace`);
 
     for (const ai of aiSessions) {
       const dateObj = new Date(ai.detected_at);
@@ -1541,6 +2165,8 @@ async function openSessionPicker(paneId, anchorBtn) {
 
       const item = document.createElement("div");
       item.className = "session-picker-item ai-session";
+      item.dataset.status = "ai";
+      item.dataset.search = `${ai.workspace_name ?? ""} ${ai.tool ?? ""} ${ai.resume_cmd ?? ""}`.toLowerCase();
 
       const dot = document.createElement("span");
       dot.className = "session-status-dot ai-dot";
@@ -1556,13 +2182,14 @@ async function openSessionPicker(paneId, anchorBtn) {
 
       const metaEl = document.createElement("span");
       metaEl.className = "session-meta";
-      metaEl.textContent = `${ai.tool} - detected ${timeStr}`;
+        metaEl.textContent = `${ai.workspace_name ?? "workspace"} - ${ai.tool} - detected ${timeStr}`;
 
       info.append(labelEl, metaEl);
 
       const resumeBtn = document.createElement("button");
       resumeBtn.className = "session-attach-btn";
       resumeBtn.textContent = "Resume";
+      resumeBtn.dataset.action = "resume";
       resumeBtn.addEventListener("click", async (ev) => {
         ev.stopPropagation();
         dropdown.remove();
@@ -1592,14 +2219,48 @@ async function openSessionPicker(paneId, anchorBtn) {
         }
       });
 
-      item.append(dot, info, resumeBtn);
+      const deleteBtn = document.createElement("button");
+      deleteBtn.className = "session-delete-btn";
+      deleteBtn.textContent = "×";
+      deleteBtn.title = "Delete this resume record";
+      deleteBtn.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        try {
+          await rpc("ai.session.delete", { ai_session_id: ai.id });
+          item.remove();
+          setStatus("AI resume record deleted");
+        } catch (err) {
+          setStatus(String(err?.message ?? err), true);
+        }
+      });
+
+      item.append(dot, info, resumeBtn, deleteBtn);
       dropdown.appendChild(item);
     }
   }
 
-  // PTY Sessions section
-  const allSessions = histRes?.sessions ?? [];
-  const namedSessions = allSessions.filter((s) => s.spawn_cmd);
+  // Terminal sessions section
+  const dormantRows = Object.values(state.dormantPaneSessions)
+    .filter((row) => row?.workspace_id === ws.id && row.spawn_cmd)
+    .map((row) => ({
+      id: row.session_id,
+      workspace_id: row.workspace_id,
+      workspace_name: ws.name,
+      pane_id: row.pane_id,
+      status: "dormant",
+      started_at: new Date().toISOString(),
+      spawn_cmd: row.spawn_cmd,
+      spawn_args: row.spawn_args,
+      spawn_cwd: row.spawn_cwd
+    }));
+  const allSessions = sessionResults.flatMap((result) =>
+    (result.histRes?.sessions ?? []).map((session) => ({
+      ...session,
+      workspace_id: result.workspace.id,
+      workspace_name: result.workspace.name
+    }))
+  );
+  const namedSessions = [...dormantRows, ...allSessions].filter((s) => s.spawn_cmd);
   const sessionSignature = (session) => {
     let argsText = "[]";
     try {
@@ -1640,107 +2301,179 @@ async function openSessionPicker(paneId, anchorBtn) {
   }
 
   if (displaySessions.length > 0 || aiSessions.length === 0) {
-    const ptyHeader = document.createElement("div");
-    ptyHeader.className = "session-picker-header";
-    ptyHeader.textContent = "PTY Sessions";
-    dropdown.appendChild(ptyHeader);
+    const currentWorkspaceSessions = displaySessions.filter((s) => (s.workspace_id ?? ws.id) === ws.id);
+    const groupsForPicker = state.paneGroups.length > 0 ? state.paneGroups : [{ id: "default", name: "Default", color: "#6b7c93" }];
+    const sessionGroups = groupsForPicker
+      .map((paneGroup) => ({
+        group: paneGroup,
+        rows: currentWorkspaceSessions
+          .filter((s) => {
+            const groupId = typeof groupIdForSession === "function"
+              ? groupIdForSession(s.id)
+              : null;
+            return (groupId ?? groupsForPicker[0]?.id) === paneGroup.id;
+          })
+          .sort((a, b) => {
+            const order = { running: 0, dormant: 1 };
+            const left = order[a.status] ?? 2;
+            const right = order[b.status] ?? 2;
+            if (left !== right) return left - right;
+            return new Date(b.started_at).getTime() - new Date(a.started_at).getTime();
+          })
+      }))
+      .filter((group) => group.rows.length > 0);
 
-    if (displaySessions.length === 0) {
+    if (sessionGroups.length === 0) {
       const empty = document.createElement("div");
       empty.className = "session-picker-empty";
-      empty.textContent = "No named sessions yet - use the input below";
+      empty.textContent = "No reusable sessions yet. Run a command below to create one.";
       dropdown.appendChild(empty);
     } else {
-      for (const s of displaySessions) {
-        let label;
-        try {
-          const parsedArgs = JSON.parse(s.spawn_args || "[]");
-          const displayArgs = parsedArgs.filter((a) => !a.startsWith("-No") && !a.startsWith("chcp") && !a.startsWith("$Output") && !a.startsWith("[Console]"));
-          label = displayArgs.length > 0
-            ? `${s.spawn_cmd} ${displayArgs.join(" ")}`.trim()
-            : s.spawn_cmd;
-        } catch {
-          label = s.spawn_cmd;
-        }
-        const dateObj = new Date(s.started_at);
-        const timeStr = dateObj.toLocaleDateString([], { month: "short", day: "numeric" }) + " " +
-                        dateObj.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const attachSessionHere = async (s) => {
         const isRunning = s.status === "running";
-
-        const item = document.createElement("div");
-        item.className = `session-picker-item ${s.status}`;
-
-        const dot = document.createElement("span");
-        dot.className = "session-status-dot";
-        dot.title = s.status;
-
-        const info = document.createElement("div");
-        info.className = "session-item-info";
-
-        const labelEl = document.createElement("span");
-        labelEl.className = "session-label";
-        labelEl.title = label;
-        labelEl.textContent = label;
-
-        const metaEl = document.createElement("span");
-        metaEl.className = "session-meta";
-        metaEl.textContent = `${s.id.slice(0, 8)} · ${isRunning ? "running" : s.status} · ${timeStr}`;
-
-        info.append(labelEl, metaEl);
-
-        const attachBtn = document.createElement("button");
-        attachBtn.className = "session-attach-btn";
-        attachBtn.textContent = isRunning ? "Attach" : "Re-run";
-        attachBtn.addEventListener("click", async (ev) => {
-          ev.stopPropagation();
-          dropdown.remove();
-          try {
-            if (isRunning) {
-              const currentSid = state.paneSessions[paneId] ?? null;
-              if (currentSid && currentSid !== s.id) {
-                await rpc("session.close", { session_id: currentSid }).catch(() => {});
-              }
-              state.paneSessions[paneId] = s.id;
-              rpc("pane.session.bind", { workspace_id: ws.id, pane_id: paneId, session_id: s.id }).catch(() => {});
-              await _loadSessions();
-              paneApi.normalizePaneSessions();
-              paneApi.refreshPaneBindings();
-              setStatus(`Attached: ${s.id.slice(0, 8)}`);
-            } else {
-              let parsedArgs = [];
-              try { parsedArgs = JSON.parse(s.spawn_args || "[]"); } catch { /* */ }
-              await paneHandlers.startSessionForPane(paneId, {
-                force: true,
-                cmd: s.spawn_cmd,
-                args: parsedArgs,
-                cwd: s.spawn_cwd || undefined,
-              });
-            }
-          } catch (err) {
-            setStatus(String(err?.message ?? err), true);
+        const isDormant = s.status === "dormant";
+        if (isDormant) {
+          await paneHandlers.startSessionForPane(paneId, {
+            restoreDormant: true,
+            silent: false,
+            groupId: typeof groupIdForSession === "function" ? groupIdForSession(s.id) : undefined
+          });
+          return;
+        }
+        if (isRunning) {
+          const currentSid = state.paneSessions[paneId] ?? null;
+          if (currentSid && currentSid !== s.id) {
+            await rpc("session.close", { session_id: currentSid }).catch(() => {});
           }
+          state.paneSessions[paneId] = s.id;
+          rpc("pane.session.bind", { workspace_id: ws.id, pane_id: paneId, session_id: s.id }).catch(() => {});
+          await _loadSessions();
+          paneApi.normalizePaneSessions();
+          paneApi.refreshPaneBindings();
+          setStatus(`Attached: ${s.id.slice(0, 8)}`);
+          return;
+        }
+        let parsedArgs = [];
+        try { parsedArgs = JSON.parse(s.spawn_args || "[]"); } catch { /* */ }
+        await paneHandlers.startSessionForPane(paneId, {
+          force: true,
+          cmd: s.spawn_cmd,
+          args: parsedArgs,
+          cwd: s.spawn_cwd || undefined,
+          groupId: typeof groupIdForSession === "function" ? groupIdForSession(s.id) : undefined
         });
+      };
 
-        item.append(dot, info, attachBtn);
+      const openSessionSide = async (s, direction) => {
+        await paneHandlers.openSessionInSplit(paneId, s, direction);
+      };
 
-        if (!isRunning) {
-          const deleteBtn = document.createElement("button");
-          deleteBtn.className = "session-delete-btn";
-          deleteBtn.textContent = "✕";
-          deleteBtn.title = "Delete this session record";
-          deleteBtn.addEventListener("click", async (ev) => {
+      for (const group of sessionGroups) {
+        appendSectionHeader(group.group.name, `${group.rows.length} session${group.rows.length === 1 ? "" : "s"}`);
+        for (const s of group.rows) {
+          const label = sessionLabel(s);
+          const dateObj = new Date(s.started_at);
+          const timeStr = dateObj.toLocaleDateString([], { month: "short", day: "numeric" }) + " " +
+                          dateObj.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+          const isRunning = s.status === "running";
+          const isDormant = s.status === "dormant";
+          const isCurrentWorkspace = (s.workspace_id ?? ws.id) === ws.id;
+
+          const item = document.createElement("div");
+          item.className = `session-picker-item ${s.status}`;
+          item.dataset.status = isRunning ? "running" : (isDormant ? "dormant" : "history");
+          item.dataset.search = `${group.group.name ?? ""} ${s.workspace_name ?? ""} ${label ?? ""} ${s.id ?? ""}`.toLowerCase();
+
+          const dot = document.createElement("span");
+          dot.className = "session-status-dot";
+          dot.title = s.status;
+
+          const info = document.createElement("div");
+          info.className = "session-item-info";
+
+          const labelEl = document.createElement("span");
+          labelEl.className = "session-label";
+          labelEl.title = label;
+          labelEl.textContent = label;
+
+          const metaEl = document.createElement("span");
+          metaEl.className = "session-meta";
+          metaEl.textContent = `${s.id.slice(0, 8)} · ${isRunning ? "running" : s.status} · ${timeStr}`;
+
+          info.append(labelEl, metaEl);
+
+          const attachBtn = document.createElement("button");
+          attachBtn.className = "session-attach-btn";
+          attachBtn.textContent = isCurrentWorkspace ? (isDormant ? "Restore" : (isRunning ? "Attach" : "Re-run")) : "Jump";
+          attachBtn.dataset.action = attachBtn.textContent.toLowerCase();
+          attachBtn.addEventListener("click", async (ev) => {
             ev.stopPropagation();
+            dropdown.remove();
             try {
-              await rpc("session.delete", { session_id: s.id });
-              item.remove();
+              if (!isCurrentWorkspace) {
+                await switchWorkspace(s.workspace_id);
+                setStatus(`Jumped to ${s.workspace_name ?? "workspace"}`);
+                return;
+              }
+              await attachSessionHere(s);
             } catch (err) {
               setStatus(String(err?.message ?? err), true);
             }
           });
-          item.append(deleteBtn);
-        }
 
-        dropdown.appendChild(item);
+          item.append(dot, info, attachBtn);
+
+          if (isCurrentWorkspace) {
+            const rightBtn = document.createElement("button");
+            rightBtn.className = "session-attach-btn session-side-btn";
+            rightBtn.textContent = "Right";
+            rightBtn.title = "Open right";
+            rightBtn.dataset.action = "open-right";
+            rightBtn.addEventListener("click", async (ev) => {
+              ev.stopPropagation();
+              dropdown.remove();
+              try {
+                await openSessionSide(s, "horizontal");
+              } catch (err) {
+                setStatus(String(err?.message ?? err), true);
+              }
+            });
+            const downBtn = document.createElement("button");
+            downBtn.className = "session-attach-btn session-side-btn";
+            downBtn.textContent = "Down";
+            downBtn.title = "Open down";
+            downBtn.dataset.action = "open-down";
+            downBtn.addEventListener("click", async (ev) => {
+              ev.stopPropagation();
+              dropdown.remove();
+              try {
+                await openSessionSide(s, "vertical");
+              } catch (err) {
+                setStatus(String(err?.message ?? err), true);
+              }
+            });
+            item.append(rightBtn, downBtn);
+          }
+
+          if (!isRunning && !isDormant) {
+            const deleteBtn = document.createElement("button");
+            deleteBtn.className = "session-delete-btn";
+            deleteBtn.textContent = "x";
+            deleteBtn.title = "Delete this session record";
+            deleteBtn.addEventListener("click", async (ev) => {
+              ev.stopPropagation();
+              try {
+                await rpc("session.delete", { session_id: s.id });
+                item.remove();
+              } catch (err) {
+                setStatus(String(err?.message ?? err), true);
+              }
+            });
+            item.append(deleteBtn);
+          }
+
+          dropdown.appendChild(item);
+        }
       }
     }
   }
@@ -1798,6 +2531,19 @@ async function openSessionPicker(paneId, anchorBtn) {
   newRow.append(newLabel, cmdInput, runBtn);
   dropdown.appendChild(newRow);
 
+  const applySessionFilter = () => {
+    const query = searchInput.value.trim().toLowerCase();
+    const status = filterSelect.value;
+    for (const item of dropdown.querySelectorAll(".session-picker-item")) {
+      const matchesQuery = !query || (item.dataset.search ?? "").includes(query);
+      const itemStatus = item.dataset.status ?? "all";
+      const matchesStatus = status === "all" || itemStatus === status;
+      item.hidden = !(matchesQuery && matchesStatus);
+    }
+  };
+  searchInput.addEventListener("input", applySessionFilter);
+  filterSelect.addEventListener("change", applySessionFilter);
+
   // Position: prefer below anchor, flip up if too low
   document.body.appendChild(dropdown);
   const rect = anchorBtn.getBoundingClientRect();
@@ -1833,7 +2579,11 @@ globalThis.normalizePaneSessions = normalizePaneSessions;
 globalThis.renderPaneSurface = renderPaneSurface;
 globalThis.refreshPaneBindings = refreshPaneBindings;
 globalThis.selectPane = selectPane;
+globalThis.selectAdjacentPane = selectAdjacentPane;
+globalThis.selectPaneByDirection = selectPaneByDirection;
+globalThis.focusPaneTerm = focusPaneTerm;
 globalThis.fitAllPanes = fitAllPanes;
 globalThis.equalizePaneSizes = equalizePaneSizes;
 globalThis.setGlobalFontScale = setGlobalFontScale;
 globalThis.writeToPane = writeToPane;
+globalThis.markPaneStarting = markPaneStarting;

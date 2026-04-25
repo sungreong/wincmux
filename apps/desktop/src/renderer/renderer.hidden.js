@@ -141,12 +141,28 @@ function renderHiddenPanesPopover() {
   if (rows.length === 0) {
     const empty = document.createElement("div");
     empty.className = "hidden-pane-empty";
-    empty.textContent = "No hidden panes.";
+    empty.textContent = "No hidden terminals.";
     hiddenPanesPopover.appendChild(empty);
     return;
   }
 
+  const rowsByGroup = new Map();
   for (const row of rows) {
+    const group = paneGroupById(row.group_id) ?? groupForSession(row.session_id) ?? defaultPaneGroup();
+    const key = group?.id ?? "default";
+    if (!rowsByGroup.has(key)) {
+      rowsByGroup.set(key, { group, rows: [] });
+    }
+    rowsByGroup.get(key).rows.push(row);
+  }
+
+  for (const section of rowsByGroup.values()) {
+    const header = document.createElement("div");
+    header.className = "hidden-pane-group-header";
+    header.textContent = `${section.group?.name ?? "Default"} (${section.rows.length})`;
+    hiddenPanesPopover.appendChild(header);
+
+    for (const row of section.rows) {
     const item = document.createElement("div");
     item.className = "hidden-pane-item";
 
@@ -194,12 +210,15 @@ function renderHiddenPanesPopover() {
     actions.append(restoreH, restoreV, terminate);
     item.append(title, meta, actions);
     hiddenPanesPopover.appendChild(item);
+    }
   }
 }
 
 function refreshHiddenPanesUi() {
   if (hiddenPanesBtn) {
-    setToolbarBtnLabel(hiddenPanesBtn, `Hidden Panes (${hiddenPanesForWorkspace().length})`);
+    const count = hiddenPanesForWorkspace().length;
+    setToolbarBtnLabel(hiddenPanesBtn, `Hidden (${count})`);
+    hiddenPanesBtn.title = "Show hidden terminals (Ctrl+Shift+H)";
   }
   if (hiddenPanesPopover?.classList.contains("open")) {
     renderHiddenPanesPopover();

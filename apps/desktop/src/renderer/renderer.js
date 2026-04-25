@@ -81,6 +81,18 @@ const paneApi = {
     }
     await globalThis.selectPane(...args);
   },
+  selectAdjacentPane: async (...args) => {
+    if (typeof globalThis.selectAdjacentPane !== "function") {
+      return null;
+    }
+    return globalThis.selectAdjacentPane(...args);
+  },
+  selectPaneByDirection: async (...args) => {
+    if (typeof globalThis.selectPaneByDirection !== "function") {
+      return null;
+    }
+    return globalThis.selectPaneByDirection(...args);
+  },
   fitAllPanes: () => {
     if (typeof globalThis.fitAllPanes === "function") {
       globalThis.fitAllPanes();
@@ -102,6 +114,21 @@ const paneApi = {
       return true;
     }
     return false;
+  },
+  markPaneStarting: (...args) => {
+    if (typeof globalThis.markPaneStarting === "function") {
+      globalThis.markPaneStarting(...args);
+      return true;
+    }
+    return false;
+  },
+  focusPaneTerm: (paneId) => {
+    if (typeof globalThis.focusPaneTerm === "function") {
+      globalThis.focusPaneTerm(paneId);
+      return true;
+    }
+    state.paneViews.get(paneId)?.term?.focus?.();
+    return false;
   }
 };
 
@@ -111,6 +138,34 @@ const workspaceTransition = {
   activeWorkspaceId: null,
   switchInFlight: false
 };
+const RENDERER_DEBUG_LOGS = localStorage.getItem("wincmux.debug.renderer") === "1";
+const activeWorkspacePing = {
+  workspaceId: null,
+  sentAt: 0
+};
+
+function dormantPaneSession(paneId) {
+  return paneId ? (state.dormantPaneSessions[paneId] ?? null) : null;
+}
+
+function clearDormantPaneSession(paneId) {
+  if (!paneId) {
+    return;
+  }
+  delete state.dormantPaneSessions[paneId];
+}
+
+function clearDormantPaneSessionsForWorkspace(workspaceId) {
+  if (!workspaceId) {
+    return;
+  }
+  const leafIds = new Set(leafPanes().map((pane) => pane.pane_id));
+  for (const [paneId, row] of Object.entries(state.dormantPaneSessions)) {
+    if (row?.workspace_id === workspaceId || leafIds.has(paneId)) {
+      delete state.dormantPaneSessions[paneId];
+    }
+  }
+}
 
 function isTransitionStale(transitionSeq, workspaceId) {
   if (!transitionSeq) {
@@ -126,6 +181,51 @@ function isTransitionStale(transitionSeq, workspaceId) {
     return true;
   }
   return false;
+}
+
+function showShortcutHelp() {
+  if (!shortcutOverlay) {
+    return;
+  }
+  shortcutOverlay.hidden = false;
+  shortcutCloseBtn?.focus();
+}
+
+function hideShortcutHelp() {
+  if (!shortcutOverlay) {
+    return;
+  }
+  shortcutOverlay.hidden = true;
+  paneApi.focusPaneTerm(state.selectedPaneId);
+}
+
+function toggleShortcutHelp() {
+  if (!shortcutOverlay) {
+    return;
+  }
+  if (shortcutOverlay.hidden) {
+    showShortcutHelp();
+  } else {
+    hideShortcutHelp();
+  }
+}
+globalThis.toggleShortcutHelp = toggleShortcutHelp;
+
+function selectedPaneForShortcut() {
+  const paneId = state.selectedPaneId ?? leafPanes()[0]?.pane_id ?? null;
+  if (!paneId) {
+    setStatus("No pane selected.", true);
+    return null;
+  }
+  return paneId;
+}
+
+function runPaneShortcut(action) {
+  const paneId = selectedPaneForShortcut();
+  if (!paneId) {
+    return;
+  }
+  action(paneId).catch((err) => setStatus(String(err?.message ?? err), true));
 }
 
 function workspaceRowById(workspaceId) {
@@ -215,7 +315,7 @@ function handleStreamEvent(event) {
     return;
   }
   const params = event.params ?? {};
-  if (event.method !== "session.output") {
+  if (RENDERER_DEBUG_LOGS && event.method !== "session.output") {
     console.debug("[stream]", event.method, JSON.stringify(params).slice(0, 120));
   }
   if (event.method === "notify.created") {
@@ -302,9 +402,25 @@ async function syncActiveContext() {
     session_id: activeSessionId(),
     app_focused: document.hasFocus()
   }).catch(() => {});
+  const now = Date.now();
+  if (
+    state.selectedWorkspaceId &&
+    (activeWorkspacePing.workspaceId !== state.selectedWorkspaceId || now - activeWorkspacePing.sentAt > 2500)
+  ) {
+    activeWorkspacePing.workspaceId = state.selectedWorkspaceId;
+    activeWorkspacePing.sentAt = now;
+    rpc("workspace.activate", { workspace_id: state.selectedWorkspaceId }).catch(() => {});
+  }
 }
 
-async function openNotificationById(notificationId) {
+async function dismissNativeNotifications(payload) {
+  if (typeof window.wincmux?.dismissNotifications !== "function") {
+    return;
+  }
+  await window.wincmux.dismissNotifications(payload).catch(() => {});
+}
+
+async function openNotificationById(notificationId, notificationHint = null) {
   if (!notificationId) {
     return;
   }
@@ -312,12 +428,11 @@ async function openNotificationById(notificationId) {
   if (!row) {
     await loadUnread();
   }
-  const resolved = state.notifications.find((item) => item.id === notificationId);
+  const resolved = state.notifications.find((item) => item.id === notificationId) ?? notificationHint;
   if (!resolved) {
     return;
   }
 
-  await rpc("notify.mark_read", { notification_id: notificationId });
   const target = normalizeNotificationTarget(resolved);
   const workspaceId = target.workspaceId ?? resolved.workspace_id ?? null;
   if (workspaceId && workspaceId !== state.selectedWorkspaceId) {
@@ -335,7 +450,11 @@ async function openNotificationById(notificationId) {
   }
   if (targetPaneId && leafPanes().some((pane) => pane.pane_id === targetPaneId)) {
     await paneApi.selectPane(targetPaneId, { persist: true, focusTerm: true });
+  } else if (workspaceId) {
+    setStatus("Notification workspace opened; pane is no longer attached");
   }
+  await rpc("notify.mark_read", { notification_id: notificationId });
+  await dismissNativeNotifications({ ids: [notificationId] });
   await loadUnread();
 }
 async function loadWorkspaces() {
@@ -373,6 +492,63 @@ async function loadSessions(workspaceId = state.selectedWorkspaceId, transitionS
   cleanupPromptDetectorSessions(
     state.sessions.filter((s) => s.status === "running").map((s) => s.id),
   );
+  renderGroupBar();
+}
+
+async function loadPaneGroups(workspaceId = state.selectedWorkspaceId, transitionSeq = null) {
+  if (!workspaceId) {
+    state.paneGroups = [];
+    state.sessionGroupBindings = {};
+    state.selectedGroupId = null;
+    renderGroupBar();
+    return;
+  }
+  const [groupRes, bindingRes] = await Promise.all([
+    rpc("group.list", { workspace_id: workspaceId }),
+    rpc("session.group.list", { workspace_id: workspaceId }).catch(() => ({ bindings: [] }))
+  ]);
+  if (isTransitionStale(transitionSeq, workspaceId) || workspaceId !== state.selectedWorkspaceId) {
+    return;
+  }
+  state.paneGroups = groupRes.groups ?? [];
+  state.sessionGroupBindings = {};
+  for (const binding of bindingRes.bindings ?? []) {
+    if (binding?.session_id && binding?.group_id) {
+      state.sessionGroupBindings[binding.session_id] = binding.group_id;
+    }
+  }
+  if (state.selectedGroupId && !state.paneGroups.some((group) => group.id === state.selectedGroupId)) {
+    state.selectedGroupId = null;
+    persistWorkspaceGroupState(workspaceId);
+  }
+  renderGroupBar();
+}
+
+function assistantLaunchGroupId(cmd, args) {
+  const text = [cmd, ...(Array.isArray(args) ? args : [])].filter(Boolean).join(" ");
+  if (/\b(?:claude|codex)\b/i.test(text)) {
+    return aiPaneGroup()?.id ?? null;
+  }
+  return null;
+}
+
+function groupIdForNewPaneSession(paneId, cmd, args, explicitGroupId = null) {
+  return explicitGroupId
+    ?? assistantLaunchGroupId(cmd, args)
+    ?? (paneId ? state.paneGroupHints[paneId] : null)
+    ?? groupForPane(paneId)?.id
+    ?? state.selectedGroupId
+    ?? defaultPaneGroup()?.id
+    ?? null;
+}
+
+async function setSessionGroup(workspaceId, sessionId, groupId) {
+  if (!workspaceId || !sessionId || !groupId) {
+    return;
+  }
+  await rpc("session.group.set", { workspace_id: workspaceId, session_id: sessionId, group_id: groupId });
+  state.sessionGroupBindings[sessionId] = groupId;
+  renderGroupBar();
 }
 function cleanupHiddenSessionsForWorkspace(workspaceId, showStatus = false) {
   if (!workspaceId) {
@@ -463,7 +639,8 @@ async function startSessionForPane(paneId, options = {}) {
     args = null,
     cwd = null,
     workspaceId = state.selectedWorkspaceId,
-    transitionSeq = null
+    transitionSeq = null,
+    restoreDormant = false
   } = options;
   if (!workspaceId) {
     throw new Error("Select a workspace first.");
@@ -490,14 +667,33 @@ async function startSessionForPane(paneId, options = {}) {
     await rpc("session.close", { session_id: existing }).catch(() => {});
     delete state.paneSessions[paneId];
   }
+  const dormant = dormantPaneSession(paneId);
+  const restoreFromDormant = !cmd && dormant?.spawn_cmd && (restoreDormant || force || !existing);
+  let effectiveCmd = cmd;
+  let effectiveArgs = args;
+  let effectiveCwd = cwd;
+  if (restoreFromDormant) {
+    effectiveCmd = dormant.spawn_cmd;
+    try {
+      effectiveArgs = JSON.parse(dormant.spawn_args ?? "[]");
+    } catch {
+      effectiveArgs = [];
+    }
+    effectiveCwd = dormant.spawn_cwd ?? undefined;
+  }
+  paneApi.markPaneStarting(
+    paneId,
+    restoreFromDormant ? "Restoring session..." : "Starting session...",
+    effectiveCmd ? String(effectiveCmd) : "Launching default shell"
+  );
   let created;
   try {
-    if (cmd) {
+    if (effectiveCmd) {
       created = await rpc("session.run", {
         workspace_id: workspaceId,
-        cmd,
-        args: args ?? [],
-        cwd: cwd ?? ws.path,
+        cmd: effectiveCmd,
+        args: effectiveArgs ?? [],
+        cwd: effectiveCwd ?? ws.path,
       });
     } else {
       created = await runShellSession(workspaceId, ws.path);
@@ -516,13 +712,20 @@ async function startSessionForPane(paneId, options = {}) {
   if (!sid) {
     throw new Error("session.run returned no session_id");
   }
+  clearDormantPaneSession(paneId);
   state.paneSessions[paneId] = sid;
+  const newGroupId = groupIdForNewPaneSession(paneId, effectiveCmd, effectiveArgs, options.groupId ?? null);
+  if (newGroupId) {
+    await setSessionGroup(workspaceId, sid, newGroupId).catch(() => {});
+  }
+  setPaneGroupHint(paneId, null);
   rpc("pane.session.bind", {
     workspace_id: workspaceId,
     pane_id: paneId,
     session_id: sid,
   }).catch(() => {});
   await loadSessions(workspaceId, transitionSeq);
+  await loadPaneGroups(workspaceId, transitionSeq);
   if (isTransitionStale(transitionSeq, workspaceId)) {
     return sid;
   }
@@ -531,8 +734,8 @@ async function startSessionForPane(paneId, options = {}) {
   if (!silent) {
     setStatus(`Session started: ${sid}`);
   }
-  const effectiveCmd = (cmd ?? "pwsh.exe").toLowerCase();
-  const isShell = effectiveCmd.includes("pwsh") || effectiveCmd.includes("powershell") || effectiveCmd.includes("cmd.exe");
+  const shellCmd = (effectiveCmd ?? "pwsh.exe").toLowerCase();
+  const isShell = shellCmd.includes("pwsh") || shellCmd.includes("powershell") || shellCmd.includes("cmd.exe");
   setTimeout(() => {
     state.paneViews.get(paneId)?.fitAddon?.fit?.();
     if (isShell) {
@@ -541,7 +744,7 @@ async function startSessionForPane(paneId, options = {}) {
   }, 300);
   if (focusTerm) {
     window.requestAnimationFrame(() => {
-      state.paneViews.get(paneId)?.term.focus();
+      paneApi.focusPaneTerm(paneId);
     });
   }
   await syncActiveContext();
@@ -559,15 +762,13 @@ async function ensurePaneSessionReady(workspaceId, paneId, transitionSeq = null)
   }
   const sid = state.paneSessions[paneId] ?? null;
   const alive = sid ? runningSessionsForWorkspace(workspaceId).some((s) => s.id === sid) : false;
-  if (!alive) {
-    await startSessionForPane(paneId, { silent: true, workspaceId, transitionSeq });
-  }
-  if (isTransitionStale(transitionSeq, workspaceId)) {
-    return;
-  }
   await paneApi.selectPane(paneId, { persist: true, focusTerm: true });
+  if (!alive) {
+    paneApi.refreshPaneBindings();
+  }
   await syncActiveContext();
 }
+
 async function ensureAllPaneSessionsReady(workspaceId, primaryPaneId, transitionSeq = null) {
   if (!workspaceId) {
     return;
@@ -601,6 +802,10 @@ async function closeSessionForPane(paneId) {
     setStatus("No running session in selected pane.", true);
     return;
   }
+  const groupId = groupForPane(paneId)?.id ?? null;
+  if (groupId) {
+    setPaneGroupHint(paneId, groupId);
+  }
   await rpc("session.close", { session_id: sid });
   clearPromptDetectorSession(sid);
   delete state.paneSessions[paneId];
@@ -623,9 +828,9 @@ async function tryRestorePaneSessions(workspaceId, transitionSeq = null) {
   if (isTransitionStale(transitionSeq, workspaceId)) {
     return;
   }
+  clearDormantPaneSessionsForWorkspace(workspaceId);
   const running = new Set(runningSessionsForWorkspace(workspaceId).map((s) => s.id));
   const currentLeafIds = new Set(leafPanes().map((p) => p.pane_id));
-  const restoreWork = [];
   for (const binding of res.bindings) {
     if (isTransitionStale(transitionSeq, workspaceId)) {
       return;
@@ -634,43 +839,33 @@ async function tryRestorePaneSessions(workspaceId, transitionSeq = null) {
     if (!currentLeafIds.has(pane_id)) continue;
     if (running.has(session_id)) {
       state.paneSessions[pane_id] = session_id;
+      clearDormantPaneSession(pane_id);
       continue;
     }
     if (!spawn_cmd) continue;
-    let parsedArgs = [];
-    try { parsedArgs = JSON.parse(spawn_args ?? "[]"); } catch { /* */ }
-    restoreWork.push(
-      rpc("session.run", {
+    if (!state.paneSessions[pane_id]) {
+      state.dormantPaneSessions[pane_id] = {
         workspace_id: workspaceId,
-        cmd: spawn_cmd,
-        args: parsedArgs,
-        cwd: spawn_cwd ?? undefined,
-      })
-        .then((result) => {
-          if (isTransitionStale(transitionSeq, workspaceId)) {
-            return;
-          }
-          const newSid = result?.session?.session_id;
-          if (newSid) {
-            state.paneSessions[pane_id] = newSid;
-            rpc("pane.session.bind", { workspace_id: workspaceId, pane_id, session_id: newSid }).catch(() => {});
-          }
-        })
-        .catch(() => {})
-    );
+        pane_id,
+        session_id,
+        spawn_cmd,
+        spawn_args,
+        spawn_cwd
+      };
+    }
   }
-  await Promise.all(restoreWork);
-  if (isTransitionStale(transitionSeq, workspaceId)) {
-    return;
-  }
-  await loadSessions(workspaceId, transitionSeq);
 }
 async function refreshWorkspaceState(workspaceId, options = {}, transitionSeq = null) {
   if (!workspaceId) {
     return;
   }
   const { forceLayout = false, autoSession = true } = options;
-  await Promise.all([loadSessions(workspaceId, transitionSeq), loadPanes(workspaceId, transitionSeq), loadUnread()]);
+  const unreadRefresh = loadUnread().catch((err) => {
+    if (!isTransitionStale(transitionSeq, workspaceId)) {
+      setStatus(`Unread refresh failed: ${String(err?.message ?? err)}`, true);
+    }
+  });
+  await Promise.all([loadSessions(workspaceId, transitionSeq), loadPanes(workspaceId, transitionSeq), loadPaneGroups(workspaceId, transitionSeq)]);
   if (isTransitionStale(transitionSeq, workspaceId)) {
     return;
   }
@@ -696,14 +891,9 @@ async function refreshWorkspaceState(workspaceId, options = {}, transitionSeq = 
   if (isTransitionStale(transitionSeq, workspaceId)) {
     return;
   }
-  if (autoSession) {
-    await ensurePaneSessionReady(workspaceId, state.selectedPaneId, transitionSeq);
-    await ensureAllPaneSessionsReady(workspaceId, state.selectedPaneId, transitionSeq);
-    if (isTransitionStale(transitionSeq, workspaceId)) {
-      return;
-    }
-  }
+  paneApi.selectPane(state.selectedPaneId, { persist: false, focusTerm: false }).catch(() => {});
   await syncActiveContext();
+  void unreadRefresh;
 }
 async function runWorkspaceTransition(workspaceId, options = {}) {
   if (!workspaceId) {
@@ -714,7 +904,11 @@ async function runWorkspaceTransition(workspaceId, options = {}) {
   workspaceTransition.activeTransitionSeq = transitionSeq;
   workspaceTransition.activeWorkspaceId = workspaceId;
   workspaceTransition.switchInFlight = true;
+  if (state.selectedWorkspaceId && state.selectedWorkspaceId !== workspaceId) {
+    persistWorkspaceGroupState(state.selectedWorkspaceId);
+  }
   state.selectedWorkspaceId = workspaceId;
+  loadWorkspaceGroupState(workspaceId);
   localStorage.setItem(STORAGE_KEYS.selectedWorkspaceId, workspaceId);
   renderWorkspaces();
   loadNotepadForWorkspace(workspaceId);
@@ -789,33 +983,54 @@ async function onCreateWorkspace() {
   wsPathInput.value = pathValue;
   setStatus(`Workspace created: ${name}`);
 }
-async function onDeleteWorkspace() {
-  const ws = selectedWorkspace();
+async function deleteWorkspaceById(workspaceId) {
+  const ws = state.workspaces.find((item) => item.id === workspaceId);
   if (!ws) {
     return;
   }
+  const message = `Delete workspace "${ws.name}"?\n\nThis removes it from WinCMux and closes its sessions. Files on disk are not deleted.`;
+  if (!window.confirm(message)) {
+    return;
+  }
+  const wasSelected = ws.id === state.selectedWorkspaceId;
   await rpc("workspace.delete", { id: ws.id });
   removeWorkspacePaneFonts(ws.id);
   hiddenClearPanesForWorkspace(ws.id);
-  disposeAllViews();
-  state.paneCards.clear();
-  state.paneMeta.clear();
-  state.layoutHash = "";
-  state.paneSessions = {};
-  state.panes = [];
-  state.sessions = [];
-  clearPromptDetectorAll();
-  state.selectedPaneId = null;
-  await unsubscribeStream();
+  delete state.workspacePaneGroupHints[ws.id];
+  delete state.workspaceSelectedGroups[ws.id];
+  localStorage.setItem(STORAGE_KEYS.workspacePaneGroupHints, JSON.stringify(state.workspacePaneGroupHints));
+  localStorage.setItem(STORAGE_KEYS.workspaceSelectedGroups, JSON.stringify(state.workspaceSelectedGroups));
+  if (wasSelected) {
+    disposeAllViews();
+    state.paneCards.clear();
+    state.paneMeta.clear();
+    state.layoutHash = "";
+    state.paneSessions = {};
+    state.paneGroupHints = {};
+    state.panes = [];
+    state.sessions = [];
+    clearPromptDetectorAll();
+    state.selectedPaneId = null;
+    localStorage.removeItem(STORAGE_KEYS.selectedWorkspaceId);
+    await unsubscribeStream();
+  }
   await loadWorkspaces();
-  if (state.selectedWorkspaceId) {
+  await loadUnread();
+  if (wasSelected && state.selectedWorkspaceId) {
     await switchWorkspace(state.selectedWorkspaceId);
-  } else {
+  } else if (wasSelected) {
     paneSurface.innerHTML = "";
     notificationList.innerHTML = "";
   }
   setStatus(`Workspace deleted: ${ws.name}`);
   await syncActiveContext();
+}
+async function onDeleteWorkspace() {
+  const ws = selectedWorkspace();
+  if (!ws) {
+    return;
+  }
+  await deleteWorkspaceById(ws.id);
 }
 async function onPickFolder() {
   if (typeof window.wincmux?.pickFolder !== "function") {
@@ -857,6 +1072,8 @@ async function onClosePane(paneId) {
     delete state.paneSessions[paneId];
     await loadSessions();
   }
+  clearDormantPaneSession(paneId);
+  setPaneGroupHint(paneId, null);
   removePaneFontSize(ws.id, paneId);
   const res = await rpc("layout.close", {
     workspace_id: ws.id,
@@ -886,6 +1103,7 @@ async function splitPaneInternal(paneId, direction, options = {}) {
   }
   const previousPaneId = paneId;
   const previousSession = state.paneSessions[previousPaneId] ?? null;
+  const previousGroupId = groupForPane(previousPaneId)?.id ?? state.selectedGroupId ?? defaultPaneGroup()?.id ?? null;
   const inheritedFontSize = currentPaneFontSize(ws.id, previousPaneId);
   const res = await rpc("layout.split", {
     workspace_id: ws.id,
@@ -895,18 +1113,31 @@ async function splitPaneInternal(paneId, direction, options = {}) {
   const first = res?.pane_ids?.[0] ?? null;
   const second = res?.pane_ids?.[1] ?? null;
   delete state.paneSessions[previousPaneId];
+  setPaneGroupHint(previousPaneId, null);
+  const previousDormant = dormantPaneSession(previousPaneId);
+  clearDormantPaneSession(previousPaneId);
   removePaneFontSize(ws.id, previousPaneId);
   if (previousSession && first) {
     state.paneSessions[first] = previousSession;
   }
+  if (!previousSession && previousDormant && first) {
+    state.dormantPaneSessions[first] = { ...previousDormant, pane_id: first };
+  }
   if (first) {
     setPaneFontSize(ws.id, first, inheritedFontSize);
+    if (previousGroupId) {
+      setPaneGroupHint(first, previousGroupId);
+    }
   }
   if (second) {
     setPaneFontSize(ws.id, second, inheritedFontSize);
+    if (previousGroupId) {
+      setPaneGroupHint(second, previousGroupId);
+    }
   }
   if (newPaneSessionId && second) {
     state.paneSessions[second] = newPaneSessionId;
+    clearDormantPaneSession(second);
   }
   state.selectedPaneId = second ?? first;
   await loadPanes();
@@ -946,6 +1177,7 @@ async function onHidePane(paneId) {
     return;
   }
   const sessionId = state.paneSessions[paneId] ?? null;
+  const groupId = groupForPane(paneId)?.id ?? null;
   if (sessionId) {
     const session = state.sessions.find((row) => row.id === sessionId);
     const label = session
@@ -957,10 +1189,13 @@ async function onHidePane(paneId) {
       session_id: sessionId,
       source_pane_id: paneId,
       hidden_at: new Date().toISOString(),
+      group_id: groupId,
       label,
     });
   }
   delete state.paneSessions[paneId];
+  setPaneGroupHint(paneId, null);
+  clearDormantPaneSession(paneId);
   removePaneFontSize(ws.id, paneId);
   const res = await rpc("layout.close", {
     workspace_id: ws.id,
@@ -1012,6 +1247,9 @@ async function onRestoreHiddenPane(hiddenId, direction) {
   }
   hiddenRemovePaneById(ws.id, hidden.id);
   try {
+    if (hidden.group_id && targetPaneId) {
+      setPaneGroupHint(targetPaneId, hidden.group_id);
+    }
     const result = await splitPaneInternal(targetPaneId, direction, {
       newPaneSessionId: hidden.session_id,
       autoStartIfMissing: false,
@@ -1052,6 +1290,85 @@ async function onTerminateHiddenPane(hiddenId) {
   setStatus(`Hidden session terminated: ${hidden.session_id.slice(0, 8)}`);
   await syncActiveContext();
 }
+async function movePaneToGroup(paneId, groupId) {
+  const ws = selectedWorkspace();
+  if (!ws || !paneId || !groupId) {
+    return;
+  }
+  if (!leafPanes().some((pane) => pane.pane_id === paneId)) {
+    setStatus("Pane not found.", true);
+    return;
+  }
+  const group = paneGroupById(groupId);
+  if (!group) {
+    setStatus("Pane group not found.", true);
+    return;
+  }
+  setPaneGroupHint(paneId, groupId);
+  const sessionId = state.paneSessions[paneId] ?? null;
+  if (sessionId) {
+    await setSessionGroup(ws.id, sessionId, groupId);
+    await loadPaneGroups(ws.id);
+  } else {
+    renderGroupBar();
+  }
+  paneApi.renderPaneSurface(true);
+  paneApi.refreshPaneBindings();
+  setStatus(`Pane moved to ${group.name}`);
+}
+async function openSessionInSplit(paneId, session, direction) {
+  const ws = selectedWorkspace();
+  if (!ws || !session) {
+    return;
+  }
+  const groupId = groupIdForSession(session.id) ?? groupForPane(paneId)?.id ?? defaultPaneGroup()?.id ?? null;
+  if (groupId) {
+    setPaneGroupHint(paneId, groupId);
+  }
+  const result = await splitPaneInternal(paneId, direction, {
+    autoStartIfMissing: false,
+    newPaneSessionId: session.status === "running" ? session.id : null
+  });
+  const targetPaneId = result?.second ?? result?.first ?? null;
+  if (!targetPaneId) {
+    return;
+  }
+  if (groupId) {
+    setPaneGroupHint(targetPaneId, groupId);
+  }
+  if (session.status === "running") {
+    rpc("pane.session.bind", { workspace_id: ws.id, pane_id: targetPaneId, session_id: session.id }).catch(() => {});
+  } else if (session.status === "dormant") {
+    state.dormantPaneSessions[targetPaneId] = {
+      workspace_id: ws.id,
+      pane_id: targetPaneId,
+      session_id: session.id,
+      spawn_cmd: session.spawn_cmd,
+      spawn_args: session.spawn_args,
+      spawn_cwd: session.spawn_cwd
+    };
+    await startSessionForPane(targetPaneId, {
+      restoreDormant: true,
+      silent: false,
+      groupId,
+      focusTerm: true
+    });
+  } else {
+    let parsedArgs = [];
+    try { parsedArgs = JSON.parse(session.spawn_args || "[]"); } catch { /* */ }
+    await startSessionForPane(targetPaneId, {
+      force: true,
+      cmd: session.spawn_cmd,
+      args: parsedArgs,
+      cwd: session.spawn_cwd || undefined,
+      groupId,
+      focusTerm: true
+    });
+  }
+  await paneApi.selectPane(targetPaneId, { persist: true, focusTerm: true });
+  paneApi.refreshPaneBindings();
+  setStatus(`Opened in ${direction === "horizontal" ? "right" : "down"} pane`);
+}
 async function onAdjustPaneFont(paneId, delta) {
   const ws = selectedWorkspace();
   if (!ws || !paneId) {
@@ -1073,15 +1390,45 @@ async function onInsertQuickCommand(paneId, text) {
   paneApi.writeToPane(paneId, text);
   setStatus("Quick command inserted");
 }
-async function onMarkLatestRead() {
+async function onMarkWorkspaceRead() {
   if (state.notifications.length === 0) {
     return;
   }
-  await rpc("notify.mark_read", { notification_id: state.notifications[0].id });
+  const workspaceId = state.selectedWorkspaceId;
+  if (!workspaceId || !state.notifications.some((row) => row.workspace_id === workspaceId)) {
+    setStatus("No unread notifications in this workspace");
+    return;
+  }
+  await markWorkspaceNotificationsRead(workspaceId);
+}
+async function markWorkspaceNotificationsRead(workspaceId) {
+  if (!workspaceId) {
+    return;
+  }
+  const rows = state.notifications.filter((row) => row.workspace_id === workspaceId);
+  if (rows.length === 0) {
+    return;
+  }
+  const ids = rows.map((row) => row.id);
+  const idSet = new Set(ids);
+  state.notifications = state.notifications.filter((row) => !idSet.has(row.id));
+  renderNotifications();
+  renderWorkspaces();
+  paneApi.refreshPaneBindings();
+  await updateUnreadBadge(state.notifications.length);
+  await Promise.allSettled(ids.map((notificationId) => rpc("notify.mark_read", { notification_id: notificationId })));
+  await dismissNativeNotifications({ ids });
   await loadUnread();
+  setStatus(`Workspace notifications marked read: ${rows.length}`);
 }
 async function onClearUnread() {
+  state.notifications = [];
+  renderNotifications();
+  renderWorkspaces();
+  paneApi.refreshPaneBindings();
+  await updateUnreadBadge(0);
   await rpc("notify.clear", {});
+  await dismissNativeNotifications({ all: true });
   await loadUnread();
   setStatus("Unread notifications cleared");
 }
@@ -1091,6 +1438,19 @@ async function onNotificationClick(event) {
     return;
   }
   const item = target.closest("li[data-notification-id]");
+  const groupMark = target.closest("button.notif-group-mark[data-workspace-id]");
+  if (groupMark) {
+    const workspaceId = groupMark.dataset.workspaceId;
+    state.notificationActionBusy = true;
+    try {
+      await markWorkspaceNotificationsRead(workspaceId);
+    } catch (err) {
+      setStatus(String(err?.message ?? err), true);
+    } finally {
+      state.notificationActionBusy = false;
+    }
+    return;
+  }
   if (!item || state.notificationActionBusy) {
     return;
   }
@@ -1490,20 +1850,20 @@ function bindEvents() {
   $("createWorkspaceBtn").addEventListener("click", () =>
     onCreateWorkspace().catch((err) => setStatus(String(err), true)),
   );
-  $("deleteWorkspaceBtn").addEventListener("click", () =>
+  $("deleteWorkspaceBtn")?.addEventListener("click", () =>
     onDeleteWorkspace().catch((err) => setStatus(String(err), true)),
   );
   $("pickFolderBtn").addEventListener("click", () =>
     onPickFolder().catch((err) => setStatus(String(err), true)),
   );
-  $("openInVscodeBtn").addEventListener("click", () =>
+  $("openInVscodeBtn")?.addEventListener("click", () =>
     onOpenInVscode().catch((err) => setStatus(String(err), true)),
   );
   $("refreshUnreadBtn").addEventListener("click", () =>
     loadUnread().catch((err) => setStatus(String(err), true)),
   );
   $("markLatestReadBtn").addEventListener("click", () =>
-    onMarkLatestRead().catch((err) => setStatus(String(err), true)),
+    onMarkWorkspaceRead().catch((err) => setStatus(String(err), true)),
   );
   $("clearUnreadBtn").addEventListener("click", () =>
     onClearUnread().catch((err) => setStatus(String(err), true)),
@@ -1524,6 +1884,13 @@ function bindEvents() {
       setStatus("Pane sizes equalized");
     });
   }
+  shortcutHelpBtn?.addEventListener("click", () => toggleShortcutHelp());
+  shortcutCloseBtn?.addEventListener("click", () => hideShortcutHelp());
+  shortcutOverlay?.addEventListener("click", (ev) => {
+    if (ev.target === shortcutOverlay) {
+      hideShortcutHelp();
+    }
+  });
   if (fontScaleSelect) {
     fontScaleSelect.addEventListener("change", () => {
       const scale = Number(fontScaleSelect.value);
@@ -1546,12 +1913,80 @@ const FONT_SCALE_STEPS = [80, 85, 90, 95, 100, 110, 120];
 
 function bindKeyboardShortcuts() {
   document.addEventListener("keydown", (ev) => {
-    // Skip if focus is inside a text input / textarea (but NOT xterm canvas)
-    const tag = document.activeElement?.tagName;
-    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-
+    if (ev.isComposing || ev.key === "Process") {
+      return;
+    }
     const ctrl = ev.ctrlKey || ev.metaKey;
     const shift = ev.shiftKey;
+    const alt = ev.altKey;
+
+    if (ev.key === "Escape" && shortcutOverlay && !shortcutOverlay.hidden) {
+      ev.preventDefault();
+      hideShortcutHelp();
+      return;
+    }
+
+    if (ctrl && !alt && !shift && ev.code === "Slash") {
+      ev.preventDefault();
+      toggleShortcutHelp();
+      return;
+    }
+
+    // Skip if focus is inside a text input / textarea (but NOT xterm canvas)
+    const tag = document.activeElement?.tagName;
+    const inXterm = Boolean(document.activeElement?.closest?.(".xterm"));
+    if ((tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") && !inXterm) return;
+
+    // Ctrl+Tab / Ctrl+Shift+Tab — move focus between terminal panes.
+    if (ctrl && ev.key === "Tab") {
+      ev.preventDefault();
+      paneApi.selectAdjacentPane(shift ? -1 : 1, { focusTerm: true }).catch((err) => setStatus(String(err?.message ?? err), true));
+      return;
+    }
+
+    if (ctrl && alt && !shift) {
+      const arrowMap = {
+        ArrowLeft: "left",
+        ArrowRight: "right",
+        ArrowUp: "up",
+        ArrowDown: "down"
+      };
+      if (arrowMap[ev.key]) {
+        ev.preventDefault();
+        paneApi.selectPaneByDirection(arrowMap[ev.key], { focusTerm: true }).catch((err) => setStatus(String(err?.message ?? err), true));
+        return;
+      }
+      if (ev.code === "Backslash") {
+        ev.preventDefault();
+        runPaneShortcut((paneId) => onSplit(paneId, "horizontal"));
+        return;
+      }
+      if (ev.code === "Minus" || ev.code === "NumpadSubtract") {
+        ev.preventDefault();
+        runPaneShortcut((paneId) => onSplit(paneId, "vertical"));
+        return;
+      }
+      if (ev.key.toLowerCase() === "t") {
+        ev.preventDefault();
+        runPaneShortcut((paneId) => startSessionForPane(paneId, { focusTerm: true }));
+        return;
+      }
+      if (ev.key.toLowerCase() === "r") {
+        ev.preventDefault();
+        runPaneShortcut((paneId) => startSessionForPane(paneId, { force: true, focusTerm: true }));
+        return;
+      }
+      if (ev.key.toLowerCase() === "w") {
+        ev.preventDefault();
+        runPaneShortcut((paneId) => onHidePane(paneId));
+        return;
+      }
+      if (ev.key.toLowerCase() === "q") {
+        ev.preventDefault();
+        runPaneShortcut((paneId) => onClosePane(paneId));
+        return;
+      }
+    }
 
     // Ctrl+B — toggle Workspace panel
     if (ctrl && !shift && ev.key === "b") {
@@ -1633,6 +2068,8 @@ async function bootstrap() {
       adjustPaneFont: (paneId, delta) => onAdjustPaneFont(paneId, delta),
       insertQuickCommand: (paneId, text) => onInsertQuickCommand(paneId, text),
       markPaneNotificationsRead: (paneId) => markPaneNotificationsRead(paneId),
+      movePaneToGroup: (paneId, groupId) => movePaneToGroup(paneId, groupId),
+      openSessionInSplit: (paneId, session, direction) => openSessionInSplit(paneId, session, direction),
     });
     if (!paneHandlersBound) {
       setStatus("Pane module unavailable. Terminal controls are limited.", true, { priority: 85, holdMs: 12000 });
@@ -1647,8 +2084,8 @@ async function bootstrap() {
     state.streamUnbind = window.wincmux.onStreamEvent(handleStreamEvent);
     state.contextUnbind = window.wincmux.onContextAction(handleContextAction);
     if (typeof window.wincmux?.onNotificationOpen === "function") {
-      state.notificationOpenUnbind = window.wincmux.onNotificationOpen(({ notification_id }) => {
-        void openNotificationById(notification_id).catch((err) => setStatus(String(err), true));
+      state.notificationOpenUnbind = window.wincmux.onNotificationOpen(({ notification_id, notification }) => {
+        void openNotificationById(notification_id, notification).catch((err) => setStatus(String(err), true));
       });
     }
     if (typeof window.wincmux?.onCoreStatus === "function") {
