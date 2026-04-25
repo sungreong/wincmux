@@ -7,6 +7,9 @@ const paneHandlers = {
   adjustPaneFont: async () => {},
   insertQuickCommand: async () => {},
   markPaneNotificationsRead: async () => {},
+  startPaneMove: async () => {},
+  swapPanePositions: async () => {},
+  movePaneToPlacement: async () => {},
   movePaneToGroup: async () => {},
   openSessionInSplit: async () => {}
 };
@@ -63,6 +66,7 @@ const paneIcon = {
   closeSession: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="5" width="12" height="10" rx="2"/><path d="M8 8.5l4 3"/><path d="M12 8.5l-4 3"/></svg>`,
   closePane: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="4" width="12" height="12" rx="2"/><path d="M7.5 7.5l5 5"/><path d="M12.5 7.5l-5 5"/></svg>`,
   hidePane: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 10s2.8-4.5 7.5-4.5 7.5 4.5 7.5 4.5-2.8 4.5-7.5 4.5S2.5 10 2.5 10z"/><path d="M3.5 3.5l13 13"/></svg>`,
+  movePane: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v14"/><path d="M7.5 5.5L10 3l2.5 2.5"/><path d="M7.5 14.5L10 17l2.5-2.5"/><path d="M3 10h14"/><path d="M5.5 7.5L3 10l2.5 2.5"/><path d="M14.5 7.5L17 10l-2.5 2.5"/></svg>`,
   quick: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M11 2.5l-6 8h5l-1 7 6-8h-5l1-7z" fill="currentColor" stroke="none"/><circle cx="15.5" cy="4.5" r="1.2" fill="currentColor" stroke="none"/></svg>`,
   auto: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5h10v10H5z"/><path d="M8 3h4"/><path d="M8 17h4"/><path d="M3 8v4"/><path d="M17 8v4"/></svg>`,
   group: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5h8l2.5 2.5v8.5h-13v-11z"/><path d="M6 4.5v3h10.5"/><path d="M7 11h6"/><path d="M7 14h4"/></svg>`,
@@ -107,6 +111,15 @@ function setPaneHandlers(handlers = {}) {
   }
   if (typeof handlers.markPaneNotificationsRead === "function") {
     paneHandlers.markPaneNotificationsRead = handlers.markPaneNotificationsRead;
+  }
+  if (typeof handlers.startPaneMove === "function") {
+    paneHandlers.startPaneMove = handlers.startPaneMove;
+  }
+  if (typeof handlers.swapPanePositions === "function") {
+    paneHandlers.swapPanePositions = handlers.swapPanePositions;
+  }
+  if (typeof handlers.movePaneToPlacement === "function") {
+    paneHandlers.movePaneToPlacement = handlers.movePaneToPlacement;
   }
   if (typeof handlers.movePaneToGroup === "function") {
     paneHandlers.movePaneToGroup = handlers.movePaneToGroup;
@@ -423,10 +436,46 @@ function normalizePaneSessions() {
 }
 
 function applyPaneSelectionStyles() {
+  const moveSourcePaneId = state.paneMove?.sourcePaneId ?? null;
+  const moveTargetPaneId = state.paneMove?.targetPaneId ?? null;
+  const placement = state.paneMove?.placement ?? null;
   for (const [paneId, card] of state.paneCards.entries()) {
     card.classList.toggle("active", paneId === state.selectedPaneId);
+    card.classList.toggle("pane-move-source", paneId === moveSourcePaneId);
+    card.classList.toggle("pane-move-target", Boolean(moveSourcePaneId) && paneId !== moveSourcePaneId);
+    card.classList.toggle("pane-drop-active", paneId === moveTargetPaneId);
+    for (const key of ["left", "right", "above", "below"]) {
+      card.classList.toggle(`pane-drop-${key}`, paneId === moveTargetPaneId && placement === key);
+    }
   }
   selectedPaneLabel.textContent = `Selected Pane: ${state.selectedPaneId ? state.selectedPaneId.slice(0, 8) : "-"}`;
+}
+
+function paneDropPlacement(card, clientX, clientY) {
+  const rect = card.getBoundingClientRect();
+  const x = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+  const y = Math.max(0, Math.min(1, (clientY - rect.top) / Math.max(1, rect.height)));
+  const dx = Math.abs(x - 0.5);
+  const dy = Math.abs(y - 0.5);
+  if (dy >= dx) {
+    return y < 0.5 ? "above" : "below";
+  }
+  return x < 0.5 ? "left" : "right";
+}
+
+function setPaneMoveTarget(paneId, placement) {
+  state.paneMove.targetPaneId = paneId;
+  state.paneMove.placement = placement;
+  applyPaneSelectionStyles();
+}
+
+function clearPaneMoveTarget(paneId = null) {
+  if (paneId && state.paneMove.targetPaneId !== paneId) {
+    return;
+  }
+  state.paneMove.targetPaneId = null;
+  state.paneMove.placement = null;
+  applyPaneSelectionStyles();
 }
 
 function unreadRowsForPane(paneId, sessionId) {
@@ -759,6 +808,35 @@ function closePaneOverflowMenus(exceptPaneId = null) {
   paneOverflowOpenPaneId = exceptPaneId;
 }
 
+function togglePaneOverflowMenu(paneId, forceOpen = null) {
+  const meta = state.paneMeta.get(paneId);
+  if (!meta?.actionsOverflowMenu || !meta?.actionsOverflowBtn) {
+    return false;
+  }
+  const isOpen = paneOverflowOpenPaneId === paneId && meta.actionsOverflowMenu.classList.contains("open");
+  const shouldOpen = typeof forceOpen === "boolean" ? forceOpen : !isOpen;
+  if (!shouldOpen) {
+    closePaneOverflowMenus(null);
+    meta.actionsOverflowMenu.classList.remove("open");
+    meta.actionsOverflowBtn.setAttribute("aria-expanded", "false");
+    return true;
+  }
+
+  closePaneOverflowMenus(paneId);
+  meta.actionsOverflowMenu.classList.add("open");
+  meta.actionsOverflowBtn.setAttribute("aria-expanded", "true");
+  paneOverflowOpenPaneId = paneId;
+  positionPaneOverflowMenu(paneId);
+  return true;
+}
+
+function cancelPaneMoveMode() {
+  state.paneMove.sourcePaneId = null;
+  state.paneMove.targetPaneId = null;
+  state.paneMove.placement = null;
+  applyPaneSelectionStyles();
+}
+
 function updatePaneActionLayout(paneId) {
   const meta = state.paneMeta.get(paneId);
   const card = state.paneCards.get(paneId);
@@ -769,7 +847,9 @@ function updatePaneActionLayout(paneId) {
   const autoEnabled = state.paneAutoResize !== false;
   const width = card.clientWidth || 0;
   let level = 0;
-  if (autoEnabled && width > 0) {
+  if (width <= 0) {
+    level = 2;
+  } else {
     if (width <= PANE_ACTION_TIGHT_BREAKPOINT) {
       level = 2;
     } else if (width <= PANE_ACTION_COMPACT_BREAKPOINT) {
@@ -785,6 +865,7 @@ function updatePaneActionLayout(paneId) {
     meta.startBtn,
     meta.sessionPickerBtn,
     meta.closeBtn,
+    meta.movePaneBtn,
     meta.hidePaneBtn,
     meta.quickBtn,
     meta.closePaneBtn
@@ -796,13 +877,13 @@ function updatePaneActionLayout(paneId) {
       primarySet.add(button);
     }
   } else if (level === 1) {
-    [meta.startBtn, meta.sessionPickerBtn, meta.quickBtn].forEach((button) => {
+    [meta.startBtn, meta.movePaneBtn, meta.sessionPickerBtn, meta.quickBtn].forEach((button) => {
       if (button) {
         primarySet.add(button);
       }
     });
   } else {
-    [meta.startBtn, meta.quickBtn].forEach((button) => {
+    [meta.startBtn, meta.movePaneBtn, meta.quickBtn].forEach((button) => {
       if (button) {
         primarySet.add(button);
       }
@@ -822,7 +903,8 @@ function updatePaneActionLayout(paneId) {
 
   if (meta.autoResizeBtn) {
     const autoLabel = autoEnabled ? "Auto On" : "Auto Off";
-    meta.autoResizeBtn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${paneIcon.auto}</span><span class="pane-btn-label">${autoLabel}</span>`;
+    const shortcut = meta.autoResizeBtn.dataset.shortcut ?? "";
+    meta.autoResizeBtn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${paneIcon.auto}</span><span class="pane-btn-label">${autoLabel}</span>${shortcut ? `<span class="pane-btn-shortcut">${shortcut}</span>` : ""}`;
     meta.autoResizeBtn.dataset.hasIcon = "1";
     meta.autoResizeBtn.classList.toggle("active", autoEnabled);
     meta.autoResizeBtn.title = autoEnabled
@@ -863,7 +945,8 @@ function updatePaneActionLayout(paneId) {
       meta.startBtn.dataset.hasIcon = "1";
     } else {
       const iconSvg = isRestart ? paneIcon.restart : (isRestore ? paneIcon.restore : paneIcon.start);
-      meta.startBtn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${iconSvg}</span><span class="pane-btn-label">${startFullLabel}</span>`;
+      const shortcut = meta.startBtn.dataset.shortcut ?? "";
+      meta.startBtn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${iconSvg}</span><span class="pane-btn-label">${startFullLabel}</span>${shortcut ? `<span class="pane-btn-shortcut">${shortcut}</span>` : ""}`;
       meta.startBtn.dataset.hasIcon = "1";
       meta.startBtn.classList.remove("pane-btn-icon");
       meta.startBtn.title = startFullLabel;
@@ -1358,21 +1441,24 @@ function createPaneLeaf(node, hosts) {
   actionsOverflowBtn.className = "pane-btn pane-overflow-btn";
   actionsOverflowBtn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${paneIcon.more}</span>`;
   actionsOverflowBtn.dataset.hasIcon = "1";
-  actionsOverflowBtn.title = "More actions";
-  actionsOverflowBtn.setAttribute("aria-label", "More actions");
+  actionsOverflowBtn.title = "More actions (Ctrl+Alt+M)";
+  actionsOverflowBtn.setAttribute("aria-label", "More actions (Ctrl+Alt+M)");
   actionsOverflowBtn.setAttribute("aria-expanded", "false");
   const actionsOverflowMenu = document.createElement("div");
   actionsOverflowMenu.className = "pane-overflow-menu";
   actionsOverflowWrap.append(actionsOverflowBtn, actionsOverflowMenu);
   actions.append(actionsPrimary);
-  const makeBtn = (text, title, onClick, cls = "pane-btn", iconHtml = "") => {
+  const makeBtn = (text, title, onClick, cls = "pane-btn", iconHtml = "", shortcut = "") => {
     const btn = document.createElement("button");
     btn.className = cls;
     if (iconHtml) {
-      btn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${iconHtml}</span><span class="pane-btn-label">${text}</span>`;
+      btn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${iconHtml}</span><span class="pane-btn-label">${text}</span>${shortcut ? `<span class="pane-btn-shortcut">${shortcut}</span>` : ""}`;
       btn.dataset.hasIcon = "1";
     } else {
       btn.textContent = text;
+    }
+    if (shortcut) {
+      btn.dataset.shortcut = shortcut;
     }
     btn.title = title || text;
     btn.addEventListener("click", onClick);
@@ -1382,49 +1468,55 @@ function createPaneLeaf(node, hosts) {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.adjustPaneFont(paneId, -PANE_FONT_LIMITS.step).catch((err) => setStatus(String(err), true));
-  }, "pane-btn", paneIcon.fontDown);
+  }, "pane-btn", paneIcon.fontDown, "Ctrl+-");
   const fontUpBtn = makeBtn("Font +", "Increase font size", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.adjustPaneFont(paneId, PANE_FONT_LIMITS.step).catch((err) => setStatus(String(err), true));
-  }, "pane-btn", paneIcon.fontUp);
+  }, "pane-btn", paneIcon.fontUp, "Ctrl+=");
   const splitHBtn = makeBtn("Split Right", "Split horizontally (add column)", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.splitPane(paneId, "horizontal").catch((err) => setStatus(String(err), true));
-  }, "pane-btn", paneIcon.splitRight);
+  }, "pane-btn", paneIcon.splitRight, "Ctrl+Alt+\\");
   const splitVBtn = makeBtn("Split Down", "Split vertically (add row)", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.splitPane(paneId, "vertical").catch((err) => setStatus(String(err), true));
-  }, "pane-btn", paneIcon.splitDown);
+  }, "pane-btn", paneIcon.splitDown, "Ctrl+Alt+-");
   const startBtn = makeBtn("Start", "Start session", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.startSessionForPane(paneId, { force: true }).catch((err) => setStatus(String(err), true));
-  }, "pane-btn pane-btn-primary", paneIcon.start);
+  }, "pane-btn pane-btn-primary", paneIcon.start, "Ctrl+Alt+T");
   startBtn.dataset.fullLabel = "Start";
   const sessionPickerBtn = makeBtn("Sessions", "Manage running, dormant, and previous sessions", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     openSessionPicker(paneId, sessionPickerBtn);
-  }, "pane-btn", paneIcon.sessions);
+  }, "pane-btn", paneIcon.sessions, "Menu");
   sessionPickerBtn.className = "pane-btn session-picker-btn";
   const closeBtn = makeBtn("Close Session", "Close terminal session", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.closeSessionForPane(paneId).catch((err) => setStatus(String(err), true));
-  }, "pane-btn", paneIcon.closeSession);
+  }, "pane-btn", paneIcon.closeSession, "Ctrl+Alt+R");
+  const movePaneBtn = makeBtn("Move Pane", "Move this pane to another position", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    closePaneOverflowMenus(null);
+    paneHandlers.startPaneMove(paneId).catch((err) => setStatus(String(err), true));
+  }, "pane-btn", paneIcon.movePane, "Ctrl+Alt+P");
   const closePaneBtn = makeBtn("Close Pane", "Close pane", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.closePane(paneId).catch((err) => setStatus(String(err), true));
-  }, "pane-btn pane-btn-danger", paneIcon.closePane);
+  }, "pane-btn pane-btn-danger", paneIcon.closePane, "Ctrl+Alt+Q");
   const hidePaneBtn = makeBtn("Hide Pane", "Hide this pane without ending session", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     paneHandlers.hidePane(paneId).catch((err) => setStatus(String(err), true));
-  }, "pane-btn", paneIcon.hidePane);
+  }, "pane-btn", paneIcon.hidePane, "Ctrl+Alt+W");
   const quickBtn = makeBtn("", "Quick command", () => {});
   quickBtn.classList.add("quickcmd-toggle");
   quickBtn.setAttribute("aria-label", "Quick command");
@@ -1439,19 +1531,7 @@ function createPaneLeaf(node, hosts) {
   actionsOverflowBtn.addEventListener("click", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
-    const isSamePaneOpen = paneOverflowOpenPaneId === paneId && actionsOverflowMenu.classList.contains("open");
-    if (isSamePaneOpen) {
-      closePaneOverflowMenus(null);
-      actionsOverflowMenu.classList.remove("open");
-      actionsOverflowBtn.setAttribute("aria-expanded", "false");
-      return;
-    }
-
-    closePaneOverflowMenus(paneId);
-    actionsOverflowMenu.classList.add("open");
-    actionsOverflowBtn.setAttribute("aria-expanded", "true");
-    paneOverflowOpenPaneId = paneId;
-    positionPaneOverflowMenu(paneId);
+    togglePaneOverflowMenu(paneId);
   });
   actionsOverflowMenu.addEventListener("click", () => {
     actionsOverflowMenu.classList.remove("open");
@@ -1490,12 +1570,36 @@ function createPaneLeaf(node, hosts) {
   const terminalHost = document.createElement("div");
   terminalHost.className = "pane-terminal-host";
   card.append(header, quickPanel, terminalHost);
+  card.addEventListener("pointermove", (ev) => {
+    const sourcePaneId = state.paneMove?.sourcePaneId ?? null;
+    if (!sourcePaneId || sourcePaneId === paneId) {
+      return;
+    }
+    setPaneMoveTarget(paneId, paneDropPlacement(card, ev.clientX, ev.clientY));
+  });
+  card.addEventListener("pointerleave", () => {
+    clearPaneMoveTarget(paneId);
+  });
   card.addEventListener("pointerdown", (ev) => {
     if (ev.button !== 0) {
       return;
     }
     const target = ev.target;
     if (target instanceof HTMLElement && target.closest("button")) {
+      return;
+    }
+    if (state.paneMove.sourcePaneId) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (state.paneMove.sourcePaneId === paneId) {
+        cancelPaneMoveMode();
+        setStatus("Pane move cancelled");
+        return;
+      }
+      const placement = paneDropPlacement(card, ev.clientX, ev.clientY);
+      setPaneMoveTarget(paneId, placement);
+      paneHandlers.movePaneToPlacement(state.paneMove.sourcePaneId, paneId, placement)
+        .catch((err) => setStatus(String(err), true));
       return;
     }
     const isTerminalClick = target instanceof HTMLElement && Boolean(target.closest(".pane-terminal-host"));
@@ -1521,6 +1625,7 @@ function createPaneLeaf(node, hosts) {
     startBtn,
     sessionPickerBtn,
     closeBtn,
+    movePaneBtn,
     closePaneBtn,
     hidePaneBtn,
     fontDownBtn,
@@ -1717,6 +1822,16 @@ function createPaneView(paneId, host) {
       if (key === "q") {
         ev.preventDefault();
         paneHandlers.closePane(paneId).catch((err) => setStatus(String(err), true));
+        return false;
+      }
+      if (key === "m") {
+        ev.preventDefault();
+        togglePaneOverflowMenu(paneId);
+        return false;
+      }
+      if (key === "p") {
+        ev.preventDefault();
+        paneHandlers.startPaneMove(paneId).catch((err) => setStatus(String(err), true));
         return false;
       }
     }
@@ -2581,6 +2696,7 @@ globalThis.refreshPaneBindings = refreshPaneBindings;
 globalThis.selectPane = selectPane;
 globalThis.selectAdjacentPane = selectAdjacentPane;
 globalThis.selectPaneByDirection = selectPaneByDirection;
+globalThis.togglePaneOverflowMenu = togglePaneOverflowMenu;
 globalThis.focusPaneTerm = focusPaneTerm;
 globalThis.fitAllPanes = fitAllPanes;
 globalThis.equalizePaneSizes = equalizePaneSizes;

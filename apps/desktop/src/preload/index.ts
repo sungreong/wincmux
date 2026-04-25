@@ -10,7 +10,7 @@ type ActiveContextPayload = {
   session_id?: string | null;
   app_focused?: boolean;
 };
-type NotificationOpenPayload = { notification_id: string };
+type NotificationOpenPayload = { notification_id: string; notification?: unknown };
 type CoreStatusPayload = { status: string; error?: string };
 type IpcEnvelope<T> = { ok: true; result: T } | { ok: false; error: string };
 
@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld("wincmux", {
   showContextMenu: (hasSelection: boolean) => ipcRenderer.invoke("wincmux:show-context-menu", { has_selection: hasSelection }),
   pickFolder: () => ipcRenderer.invoke("wincmux:pick-folder"),
   setUnreadBadge: (count: number) => ipcRenderer.invoke("wincmux:set-unread-badge", { count }),
+  dismissNotifications: (payload: { ids?: string[]; all?: boolean }) => ipcRenderer.invoke("wincmux:dismiss-notifications", payload),
   updateActiveContext: (payload: ActiveContextPayload) => ipcRenderer.invoke("wincmux:update-active-context", payload),
   onNotificationOpen: (handler: (payload: NotificationOpenPayload) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: NotificationOpenPayload) => handler(payload);
@@ -51,6 +52,16 @@ contextBridge.exposeInMainWorld("wincmux", {
     unwrapEnvelope(await ipcRenderer.invoke("wincmux:open-in-vscode", { path: workspacePath })),
   scanLongFiles: async (workspacePath: string, minLines: number) =>
     unwrapEnvelope(await ipcRenderer.invoke("wincmux:scan-long-files", { path: workspacePath, minLines })),
+  agentAssetsScan: async (workspacePath: string) =>
+    unwrapEnvelope(await ipcRenderer.invoke("wincmux:agent-assets-scan", { path: workspacePath })),
+  agentAssetRead: async (workspacePath: string, relativePath: string) =>
+    unwrapEnvelope(await ipcRenderer.invoke("wincmux:agent-asset-read", { path: workspacePath, relativePath })),
+  agentAssetWrite: async (workspacePath: string, relativePath: string, content: string) =>
+    unwrapEnvelope(await ipcRenderer.invoke("wincmux:agent-asset-write", { path: workspacePath, relativePath, content })),
+  agentAssetCreate: async (workspacePath: string, relativePath: string, templateKind: string) =>
+    unwrapEnvelope(await ipcRenderer.invoke("wincmux:agent-asset-create", { path: workspacePath, relativePath, templateKind })),
+  agentAssetReveal: async (workspacePath: string, relativePath: string) =>
+    unwrapEnvelope(await ipcRenderer.invoke("wincmux:agent-asset-reveal", { path: workspacePath, relativePath })),
   openInExplorer: async (workspacePath: string) =>
     unwrapEnvelope(await ipcRenderer.invoke("wincmux:open-in-explorer", { path: workspacePath })),
   gitInfo: async (workspacePath: string) =>

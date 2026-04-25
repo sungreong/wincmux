@@ -1142,6 +1142,580 @@ function scanLongFiles(workspacePath: string, minLines: number): { files: Array<
   return { files: results.slice(0, 50) };
 }
 
+const AGENT_ASSET_MAX_PREVIEW_BYTES = 256 * 1024;
+const AGENT_ASSET_MAX_WRITE_BYTES = 512 * 1024;
+const AGENT_ASSET_SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", "coverage", "out", ".next", ".turbo", ".cache"]);
+const AGENT_ASSET_TEXT_EXTS = new Set([".md", ".mdc", ".json", ".jsonc", ".yaml", ".yml", ".toml", ".txt"]);
+
+type AgentAssetCategory = "instructions" | "skills" | "rules" | "subagents" | "commands" | "settings" | "mcp" | "other";
+type AgentAssetProviderId = "claude" | "codex" | "gemini" | "cursor" | "kiro" | "opencode" | "shared";
+
+type AgentAssetProviderDefinition = {
+  id: AgentAssetProviderId;
+  label: string;
+  instructionFiles?: string[];
+  settingsFiles?: string[];
+  scanRoots?: string[];
+  editableFiles?: string[];
+  editablePatterns?: RegExp[];
+  allowedPatterns?: RegExp[];
+};
+
+const AGENT_ASSET_PROVIDERS: AgentAssetProviderDefinition[] = [
+  {
+    id: "claude",
+    label: "Claude",
+    instructionFiles: ["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"],
+    settingsFiles: [".claude/settings.json", ".claude/settings.local.json"],
+    scanRoots: [".claude"],
+    editableFiles: ["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"],
+    editablePatterns: [/^\.claude\/rules\/[^/]+\.md$/i, /^\.claude\/commands\/[^/]+\.md$/i],
+    allowedPatterns: [/^\.claude\/.+/i]
+  },
+  {
+    id: "codex",
+    label: "Codex",
+    instructionFiles: ["AGENTS.md", "AGENTS.override.md"],
+    scanRoots: [".agents"],
+    editableFiles: ["AGENTS.md", "AGENTS.override.md"],
+    allowedPatterns: [/^\.agents\/.+/i]
+  },
+  {
+    id: "gemini",
+    label: "Gemini",
+    instructionFiles: ["GEMINI.md"],
+    settingsFiles: [".gemini/settings.json"],
+    scanRoots: [".gemini"],
+    editableFiles: ["GEMINI.md"],
+    allowedPatterns: [/^\.gemini\/.+/i]
+  },
+  {
+    id: "cursor",
+    label: "Cursor",
+    instructionFiles: [".cursorrules", "AGENTS.md"],
+    scanRoots: [".cursor"],
+    editableFiles: [".cursorrules", "AGENTS.md"],
+    editablePatterns: [/^\.cursor\/rules\/.+\.(mdc|md)$/i],
+    allowedPatterns: [/^\.cursor\/.+/i]
+  },
+  {
+    id: "kiro",
+    label: "Kiro",
+    instructionFiles: ["AGENTS.md"],
+    scanRoots: [".kiro"],
+    editableFiles: ["AGENTS.md"],
+    editablePatterns: [/^\.kiro\/steering\/.+\.md$/i],
+    allowedPatterns: [/^\.kiro\/.+/i]
+  },
+  {
+    id: "opencode",
+    label: "opencode",
+    instructionFiles: ["AGENTS.md"],
+    settingsFiles: ["opencode.json", "opencode.jsonc"],
+    scanRoots: [".opencode"],
+    editableFiles: ["AGENTS.md"],
+    allowedPatterns: [/^\.opencode\/.+/i]
+  },
+  {
+    id: "shared",
+    label: "Shared",
+    settingsFiles: [".mcp.json"],
+    editableFiles: [],
+    allowedPatterns: [/^\.mcp\.json$/i]
+  }
+];
+
+type AgentAssetItem = {
+  category: AgentAssetCategory;
+  providers: AgentAssetProviderId[];
+  relativePath: string;
+  name: string;
+  exists: boolean;
+  editable: boolean;
+  readOnly: boolean;
+  large: boolean;
+  invalid: boolean;
+  privateLocal: boolean;
+  size: number;
+  lineCount: number | null;
+  modifiedAt: string | null;
+  summary: string;
+  details: Record<string, unknown>;
+  warnings: string[];
+};
+
+type AgentAssetsScanResult = {
+  summary: Record<AgentAssetCategory, { count: number; missing: number; invalid: number; large: number; local: number }>;
+  items: AgentAssetItem[];
+};
+
+function toWorkspaceRelative(filePath: string, root: string): string {
+  return path.relative(root, filePath).replace(/\\/g, "/");
+}
+
+function normalizeRelativePath(relativePath: string): string {
+  const raw = String(relativePath ?? "").replace(/\\/g, "/").trim();
+  if (!raw || path.isAbsolute(raw) || /^[a-zA-Z]:/.test(raw)) {
+    throw new Error("workspace-relative path is required");
+  }
+  const parts = raw.split("/").filter(Boolean);
+  if (parts.some((part) => part === ".." || part === ".")) {
+    throw new Error("path traversal is not allowed");
+  }
+  return parts.join("/");
+}
+
+function assertInsideWorkspace(root: string, targetPath: string): void {
+  const normalizedRoot = path.resolve(root);
+  const normalizedTarget = path.resolve(targetPath);
+  if (normalizedTarget !== normalizedRoot && !normalizedTarget.startsWith(normalizedRoot + path.sep)) {
+    throw new Error("path escapes workspace");
+  }
+}
+
+function nearestExistingAncestor(targetPath: string): string {
+  let current = targetPath;
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) {
+      throw new Error("unable to resolve path ancestor");
+    }
+    current = parent;
+  }
+  return current;
+}
+
+function resolveWorkspaceAssetPath(workspacePath: string, relativePath: string, options: { forWrite?: boolean } = {}): { root: string; relative: string; fullPath: string } {
+  const root = validateWorkspacePath(workspacePath);
+  const relative = normalizeRelativePath(relativePath);
+  if (!isAllowedAgentAssetPath(relative)) {
+    throw new Error(`agent asset path is not allowed: ${relative}`);
+  }
+  const fullPath = path.resolve(root, relative);
+  assertInsideWorkspace(root, fullPath);
+
+  const rootReal = fs.realpathSync.native(root);
+  const realTarget = fs.realpathSync.native(fs.existsSync(fullPath) ? fullPath : nearestExistingAncestor(path.dirname(fullPath)));
+  assertInsideWorkspace(rootReal, realTarget);
+
+  if (options.forWrite && !isEditableAgentAssetPath(relative)) {
+    throw new Error(`agent asset is read-only in WinCMux: ${relative}`);
+  }
+  return { root, relative, fullPath };
+}
+
+function isAllowedAgentAssetPath(relativePath: string): boolean {
+  const rel = relativePath.replace(/\\/g, "/");
+  for (const provider of AGENT_ASSET_PROVIDERS) {
+    if (provider.instructionFiles?.includes(rel) || provider.settingsFiles?.includes(rel)) return true;
+    if (provider.allowedPatterns?.some((pattern) => pattern.test(rel))) return true;
+    if (provider.editablePatterns?.some((pattern) => pattern.test(rel))) return true;
+  }
+  return false;
+}
+
+function isEditableAgentAssetPath(relativePath: string): boolean {
+  const rel = relativePath.replace(/\\/g, "/");
+  for (const provider of AGENT_ASSET_PROVIDERS) {
+    if (provider.editableFiles?.includes(rel)) return true;
+    if (provider.editablePatterns?.some((pattern) => pattern.test(rel))) return true;
+  }
+  return false;
+}
+
+function providersForAgentAssetPath(relativePath: string): AgentAssetProviderId[] {
+  const rel = relativePath.replace(/\\/g, "/");
+  const providers = AGENT_ASSET_PROVIDERS
+    .filter((provider) =>
+      provider.instructionFiles?.includes(rel) ||
+      provider.settingsFiles?.includes(rel) ||
+      provider.allowedPatterns?.some((pattern) => pattern.test(rel)) ||
+      provider.editablePatterns?.some((pattern) => pattern.test(rel))
+    )
+    .map((provider) => provider.id);
+  return providers.length > 0 ? providers : ["shared"];
+}
+
+function uniqueAgentAssetPaths(paths: string[]): string[] {
+  return Array.from(new Set(paths.filter(Boolean).map((p) => p.replace(/\\/g, "/"))));
+}
+
+function readSmallText(filePath: string, maxBytes = AGENT_ASSET_MAX_PREVIEW_BYTES): string | null {
+  const stat = fs.statSync(filePath);
+  if (stat.size > maxBytes) return null;
+  return fs.readFileSync(filePath, "utf8");
+}
+
+function countLinesFromContent(content: string): number {
+  if (!content) return 0;
+  let count = 1;
+  for (let i = 0; i < content.length; i++) {
+    if (content[i] === "\n") count++;
+  }
+  return count;
+}
+
+function parseMarkdownFrontmatter(content: string): Record<string, string> {
+  if (!content.startsWith("---")) return {};
+  const end = content.indexOf("\n---", 3);
+  if (end < 0) return {};
+  const block = content.slice(3, end).trim();
+  const out: Record<string, string> = {};
+  let currentKey: string | null = null;
+  for (const line of block.split(/\r?\n/)) {
+    const match = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
+    if (match) {
+      currentKey = match[1] ?? null;
+      if (currentKey) {
+        out[currentKey] = (match[2] ?? "").replace(/^["']|["']$/g, "").trim();
+      }
+    } else if (currentKey && /^\s+-\s+/.test(line)) {
+      const value = line.replace(/^\s+-\s+/, "").trim();
+      out[currentKey] = out[currentKey] ? `${out[currentKey]}, ${value}` : value;
+    }
+  }
+  return out;
+}
+
+function listDirSafe(dir: string): fs.Dirent[] {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
+function countFilesInDir(dir: string, predicate?: (entryPath: string, entry: fs.Dirent) => boolean): number {
+  let count = 0;
+  for (const entry of listDirSafe(dir)) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      count += countFilesInDir(fullPath, predicate);
+    } else if (entry.isFile() && (!predicate || predicate(fullPath, entry))) {
+      count++;
+    }
+  }
+  return count;
+}
+
+function makeAgentAssetItem(root: string, category: AgentAssetCategory, relativePath: string, extra: Partial<AgentAssetItem> = {}): AgentAssetItem {
+  const fullPath = path.join(root, relativePath);
+  const exists = fs.existsSync(fullPath);
+  const stat = exists ? fs.statSync(fullPath) : null;
+  const size = stat?.isFile() ? stat.size : 0;
+  const large = Boolean(stat?.isFile() && size > AGENT_ASSET_MAX_PREVIEW_BYTES);
+  let lineCount: number | null = null;
+  let content: string | null = null;
+  if (exists && stat?.isFile() && !large) {
+    try {
+      content = fs.readFileSync(fullPath, "utf8");
+      lineCount = countLinesFromContent(content);
+    } catch {
+      lineCount = null;
+    }
+  }
+  const name = extra.name ?? path.basename(relativePath);
+  return {
+    category,
+    providers: providersForAgentAssetPath(relativePath),
+    relativePath,
+    name,
+    exists,
+    editable: isEditableAgentAssetPath(relativePath),
+    readOnly: !isEditableAgentAssetPath(relativePath),
+    large,
+    invalid: false,
+    privateLocal: /(^|\/).*(local|override).*$/i.test(relativePath),
+    size,
+    lineCount,
+    modifiedAt: stat ? stat.mtime.toISOString() : null,
+    summary: exists ? `${name}${lineCount !== null ? ` · ${lineCount} lines` : ""}` : `${name} missing`,
+    details: {},
+    warnings: [],
+    ...extra
+  };
+}
+
+function parseInstructionItem(root: string, relativePath: string): AgentAssetItem {
+  const item = makeAgentAssetItem(root, "instructions", relativePath);
+  if (!item.exists || item.large) return item;
+  const content = readSmallText(path.join(root, relativePath));
+  const imports = content ? (content.match(/^@\S+/gm) ?? []).length : 0;
+  const importsAgents = relativePath.toUpperCase().includes("CLAUDE") && Boolean(content && /@\.?\/?AGENTS\.md/i.test(content));
+  item.details = { imports, importsAgents };
+  item.summary = `${item.name} · ${item.lineCount ?? 0} lines${imports ? ` · ${imports} imports` : ""}${importsAgents ? " · imports AGENTS.md" : ""}`;
+  return item;
+}
+
+function parseSkillDir(root: string, skillDir: string): AgentAssetItem {
+  const skillName = path.basename(skillDir);
+  const skillMd = path.join(skillDir, "SKILL.md");
+  const relative = toWorkspaceRelative(skillMd, root);
+  if (!fs.existsSync(skillMd)) {
+    return makeAgentAssetItem(root, "skills", relative, {
+      name: skillName,
+      exists: false,
+      editable: false,
+      readOnly: true,
+      invalid: true,
+      summary: `${skillName} · missing SKILL.md`,
+      warnings: ["SKILL.md is missing"]
+    });
+  }
+  const item = makeAgentAssetItem(root, "skills", relative, { name: skillName, editable: false, readOnly: true });
+  if (!item.large) {
+    const content = readSmallText(skillMd) ?? "";
+    const fm = parseMarkdownFrontmatter(content);
+    item.details = {
+      frontmatterName: fm.name ?? "",
+      description: fm.description ?? "",
+      allowedTools: fm["allowed-tools"] ?? "",
+      disableModelInvocation: fm["disable-model-invocation"] ?? "",
+      scripts: countFilesInDir(path.join(skillDir, "scripts")),
+      examples: countFilesInDir(path.join(skillDir, "examples")),
+      templates: countFilesInDir(path.join(skillDir, "templates")),
+      references: countFilesInDir(skillDir, (entryPath) => /^reference.*\.md$/i.test(path.basename(entryPath))),
+      supportingFiles: Math.max(0, countFilesInDir(skillDir) - 1)
+    };
+    if (!fm.name && !fm.description) {
+      item.warnings.push("frontmatter name/description not found");
+    }
+    item.summary = `${skillName}${fm.description ? ` · ${fm.description}` : ""}`;
+  }
+  return item;
+}
+
+function parseSettingsItem(root: string, relativePath: string): AgentAssetItem {
+  const item = makeAgentAssetItem(root, "settings", relativePath, { editable: false, readOnly: true });
+  if (!item.exists || item.large) return item;
+  if (path.extname(relativePath).toLowerCase() === ".jsonc") {
+    item.summary = `${item.name} · JSONC config`;
+    item.details = { format: "jsonc" };
+    return item;
+  }
+  try {
+    const json = JSON.parse(readSmallText(path.join(root, relativePath)) ?? "{}");
+    const permissions = json?.permissions ?? {};
+    const hooks = json?.hooks && typeof json.hooks === "object" ? json.hooks : {};
+    const hookCounts = Object.fromEntries(Object.entries(hooks).map(([key, value]) => [key, Array.isArray(value) ? value.length : 1]));
+    const allowCount = Array.isArray(permissions.allow) ? permissions.allow.length : 0;
+    const denyCount = Array.isArray(permissions.deny) ? permissions.deny.length : 0;
+    item.details = {
+      allow: allowCount,
+      deny: denyCount,
+      hooks: hookCounts,
+      enabledPlugins: Array.isArray(json?.enabledPlugins) ? json.enabledPlugins.length : 0,
+      envKeys: json?.env && typeof json.env === "object" ? Object.keys(json.env).length : 0
+    };
+    item.summary = `${item.name} · allow ${allowCount} · deny ${denyCount} · hooks ${Object.keys(hookCounts).length}`;
+  } catch (err) {
+    item.invalid = true;
+    item.warnings.push(`invalid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return item;
+}
+
+function parseMcpItem(root: string): AgentAssetItem {
+  const item = makeAgentAssetItem(root, "mcp", ".mcp.json", { editable: false, readOnly: true });
+  if (!item.exists || item.large) return item;
+  try {
+    const json = JSON.parse(readSmallText(path.join(root, ".mcp.json")) ?? "{}");
+    const servers = json?.mcpServers && typeof json.mcpServers === "object" ? json.mcpServers : {};
+    const serverDetails = Object.entries(servers).map(([name, value]) => {
+      const server = value && typeof value === "object" ? value as Record<string, unknown> : {};
+      const transport = typeof server.type === "string"
+        ? server.type
+        : typeof server.url === "string"
+          ? "http"
+          : typeof server.command === "string"
+            ? "stdio"
+            : "unknown";
+      const env = server.env && typeof server.env === "object" ? Object.keys(server.env as Record<string, unknown>) : [];
+      return { name, transport, hasCommand: Boolean(server.command), hasUrl: Boolean(server.url), envKeys: env };
+    });
+    item.details = {
+      servers: serverDetails
+    };
+    item.summary = `.mcp.json · ${serverDetails.length} servers`;
+  } catch (err) {
+    item.invalid = true;
+    item.warnings.push(`invalid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return item;
+}
+
+function parseMarkdownAsset(root: string, category: AgentAssetCategory, relativePath: string, options: { editable?: boolean } = {}): AgentAssetItem {
+  const item = makeAgentAssetItem(root, category, relativePath, {
+    editable: options.editable ?? isEditableAgentAssetPath(relativePath),
+    readOnly: !(options.editable ?? isEditableAgentAssetPath(relativePath))
+  });
+  if (!item.exists || item.large) return item;
+  const content = readSmallText(path.join(root, relativePath)) ?? "";
+  const fm = parseMarkdownFrontmatter(content);
+  item.details = { ...fm };
+  item.summary = `${item.name}${fm.description ? ` · ${fm.description}` : ""}`;
+  return item;
+}
+
+function walkAllowedAgentFiles(root: string, dir: string, category: AgentAssetCategory, items: AgentAssetItem[], limit = 100): void {
+  if (items.length >= limit) return;
+  for (const entry of listDirSafe(dir)) {
+    if (AGENT_ASSET_SKIP_DIRS.has(entry.name)) continue;
+    const fullPath = path.join(dir, entry.name);
+    const relative = toWorkspaceRelative(fullPath, root);
+    if (entry.isDirectory()) {
+      walkAllowedAgentFiles(root, fullPath, category, items, limit);
+    } else if (entry.isFile() && isAllowedAgentAssetPath(relative) && AGENT_ASSET_TEXT_EXTS.has(path.extname(entry.name).toLowerCase())) {
+      items.push(makeAgentAssetItem(root, category, relative, { editable: false, readOnly: true }));
+      if (items.length >= limit) return;
+    }
+  }
+}
+
+function pushUniqueAgentItem(items: AgentAssetItem[], item: AgentAssetItem): void {
+  const existing = items.find((candidate) => candidate.relativePath === item.relativePath);
+  if (existing) {
+    existing.providers = Array.from(new Set([...existing.providers, ...item.providers]));
+    if (existing.category === "other" && item.category !== "other") existing.category = item.category;
+    return;
+  }
+  items.push(item);
+}
+
+function scanAgentAssets(workspacePath: string): AgentAssetsScanResult {
+  const root = validateWorkspacePath(workspacePath);
+  const items: AgentAssetItem[] = [];
+
+  const instructionFiles = uniqueAgentAssetPaths(AGENT_ASSET_PROVIDERS.flatMap((provider) => provider.instructionFiles ?? []));
+  const settingsFiles = uniqueAgentAssetPaths(AGENT_ASSET_PROVIDERS.flatMap((provider) => provider.settingsFiles ?? []));
+
+  for (const rel of instructionFiles) {
+    pushUniqueAgentItem(items, parseInstructionItem(root, rel));
+  }
+  for (const rel of settingsFiles) {
+    if (rel === ".mcp.json") {
+      pushUniqueAgentItem(items, parseMcpItem(root));
+    } else {
+      pushUniqueAgentItem(items, parseSettingsItem(root, rel));
+    }
+  }
+
+  const rulesDir = path.join(root, ".claude", "rules");
+  for (const entry of listDirSafe(rulesDir).filter((e) => e.isFile() && e.name.toLowerCase().endsWith(".md"))) {
+    pushUniqueAgentItem(items, parseMarkdownAsset(root, "rules", `.claude/rules/${entry.name}`, { editable: true }));
+  }
+
+  const commandsDir = path.join(root, ".claude", "commands");
+  for (const entry of listDirSafe(commandsDir).filter((e) => e.isFile() && e.name.toLowerCase().endsWith(".md"))) {
+    const rel = `.claude/commands/${entry.name}`;
+    const item = parseMarkdownAsset(root, "commands", rel, { editable: true });
+    item.details = { ...item.details, slashCommand: `/${path.basename(entry.name, ".md")}` };
+    pushUniqueAgentItem(items, item);
+  }
+
+  const agentsDir = path.join(root, ".claude", "agents");
+  for (const entry of listDirSafe(agentsDir).filter((e) => e.isFile() && e.name.toLowerCase().endsWith(".md"))) {
+    pushUniqueAgentItem(items, parseMarkdownAsset(root, "subagents", `.claude/agents/${entry.name}`, { editable: false }));
+  }
+
+  const skillsDir = path.join(root, ".claude", "skills");
+  for (const entry of listDirSafe(skillsDir).filter((e) => e.isDirectory())) {
+    pushUniqueAgentItem(items, parseSkillDir(root, path.join(skillsDir, entry.name)));
+  }
+
+  const cursorRulesDir = path.join(root, ".cursor", "rules");
+  for (const entry of listDirSafe(cursorRulesDir).filter((e) => e.isFile() && /\.(mdc|md)$/i.test(e.name))) {
+    pushUniqueAgentItem(items, parseMarkdownAsset(root, "rules", `.cursor/rules/${entry.name}`, { editable: true }));
+  }
+
+  const kiroSteeringDir = path.join(root, ".kiro", "steering");
+  for (const entry of listDirSafe(kiroSteeringDir).filter((e) => e.isFile() && e.name.toLowerCase().endsWith(".md"))) {
+    pushUniqueAgentItem(items, parseMarkdownAsset(root, "rules", `.kiro/steering/${entry.name}`, { editable: true }));
+  }
+
+  for (const rootRel of uniqueAgentAssetPaths(AGENT_ASSET_PROVIDERS.flatMap((provider) => provider.scanRoots ?? []))) {
+    const otherItems: AgentAssetItem[] = [];
+    walkAllowedAgentFiles(root, path.join(root, rootRel), "other", otherItems);
+    for (const item of otherItems) {
+      pushUniqueAgentItem(items, item);
+    }
+  }
+
+  const categories: AgentAssetCategory[] = ["instructions", "skills", "rules", "subagents", "commands", "settings", "mcp", "other"];
+  const summary = Object.fromEntries(categories.map((category) => [
+    category,
+    {
+      count: items.filter((item) => item.category === category && item.exists).length,
+      missing: items.filter((item) => item.category === category && !item.exists).length,
+      invalid: items.filter((item) => item.category === category && item.invalid).length,
+      large: items.filter((item) => item.category === category && item.large).length,
+      local: items.filter((item) => item.category === category && item.privateLocal).length
+    }
+  ])) as AgentAssetsScanResult["summary"];
+
+  items.sort((a, b) => {
+    const catDiff = categories.indexOf(a.category) - categories.indexOf(b.category);
+    if (catDiff !== 0) return catDiff;
+    if (a.exists !== b.exists) return a.exists ? -1 : 1;
+    return a.relativePath.localeCompare(b.relativePath);
+  });
+
+  return { summary, items };
+}
+
+function readAgentAsset(workspacePath: string, relativePath: string): { content: string; meta: AgentAssetItem } {
+  const { root, relative, fullPath } = resolveWorkspaceAssetPath(workspacePath, relativePath);
+  if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
+    throw new Error(`agent asset not found: ${relative}`);
+  }
+  const meta = makeAgentAssetItem(root, "other", relative);
+  if (meta.large) {
+    throw new Error(`agent asset is too large to preview (${meta.size} bytes)`);
+  }
+  return { content: fs.readFileSync(fullPath, "utf8"), meta };
+}
+
+function writeAgentAsset(workspacePath: string, relativePath: string, content: string): { ok: true; savedAt: string } {
+  const { fullPath, relative } = resolveWorkspaceAssetPath(workspacePath, relativePath, { forWrite: true });
+  const text = String(content ?? "");
+  if (Buffer.byteLength(text, "utf8") > AGENT_ASSET_MAX_WRITE_BYTES) {
+    throw new Error("agent asset content is too large to save");
+  }
+  if (path.extname(relative).toLowerCase() === ".json") {
+    JSON.parse(text);
+  }
+  fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+  if (fs.existsSync(fullPath)) {
+    fs.copyFileSync(fullPath, `${fullPath}.bak`);
+  }
+  const tmpPath = `${fullPath}.tmp-${Date.now()}`;
+  fs.writeFileSync(tmpPath, text, "utf8");
+  fs.renameSync(tmpPath, fullPath);
+  return { ok: true, savedAt: new Date().toISOString() };
+}
+
+function createAgentAsset(workspacePath: string, relativePath: string, templateKind?: string): { ok: true; content: string } {
+  const { fullPath, relative } = resolveWorkspaceAssetPath(workspacePath, relativePath, { forWrite: true });
+  if (fs.existsSync(fullPath)) {
+    throw new Error(`agent asset already exists: ${relative}`);
+  }
+  const kind = String(templateKind ?? "").toLowerCase();
+  const title = path.basename(relative, path.extname(relative));
+  const content = kind === "command"
+    ? `# /${title}\n\nDescribe what this command should do.\n\n$ARGUMENTS\n`
+    : kind === "rule"
+      ? `# ${title}\n\n- Add project-specific rule here.\n`
+      : relative.toUpperCase().includes("GEMINI")
+        ? `# GEMINI.md\n\n## Project Notes\n\n- Add guidance for Gemini CLI here.\n`
+        : relative.toLowerCase().includes(".cursorrules")
+          ? `# Cursor Rules\n\n- Add project-wide Cursor guidance here.\n`
+      : relative.toUpperCase().includes("AGENTS")
+        ? `# AGENTS.md\n\n## Project Notes\n\n- Add guidance for Codex agents here.\n`
+        : `# CLAUDE.md\n\n## Project Notes\n\n- Add guidance for Claude Code here.\n`;
+  writeAgentAsset(workspacePath, relative, content);
+  return { ok: true, content };
+}
+
 function registerIpcHandlers(): void {
   ipcMain.handle("wincmux:rpc", async (_event, payload: RpcPayload) => toIpcEnvelope(() => pipeCall(payload)));
   ipcMain.handle("wincmux:stream-subscribe", async (event, payload: StreamFilter) =>
@@ -1200,6 +1774,30 @@ function registerIpcHandlers(): void {
   );
   ipcMain.handle("wincmux:scan-long-files", async (_event, payload: { path: string; minLines: number }) =>
     toIpcEnvelope(() => Promise.resolve(scanLongFiles(payload?.path, payload?.minLines ?? 1000)))
+  );
+  ipcMain.handle("wincmux:agent-assets-scan", async (_event, payload: { path: string }) =>
+    toIpcEnvelope(() => Promise.resolve(scanAgentAssets(payload?.path)))
+  );
+  ipcMain.handle("wincmux:agent-asset-read", async (_event, payload: { path: string; relativePath: string }) =>
+    toIpcEnvelope(() => Promise.resolve(readAgentAsset(payload?.path, payload?.relativePath)))
+  );
+  ipcMain.handle("wincmux:agent-asset-write", async (_event, payload: { path: string; relativePath: string; content: string }) =>
+    toIpcEnvelope(() => Promise.resolve(writeAgentAsset(payload?.path, payload?.relativePath, payload?.content)))
+  );
+  ipcMain.handle("wincmux:agent-asset-create", async (_event, payload: { path: string; relativePath: string; templateKind?: string }) =>
+    toIpcEnvelope(() => Promise.resolve(createAgentAsset(payload?.path, payload?.relativePath, payload?.templateKind)))
+  );
+  ipcMain.handle("wincmux:agent-asset-reveal", async (_event, payload: { path: string; relativePath: string }) =>
+    toIpcEnvelope(async () => {
+      const { fullPath } = resolveWorkspaceAssetPath(payload?.path, payload?.relativePath);
+      if (fs.existsSync(fullPath)) {
+        shell.showItemInFolder(fullPath);
+      } else {
+        const err = await shell.openPath(path.dirname(fullPath));
+        if (err) throw new Error(err);
+      }
+      return { ok: true };
+    })
   );
   ipcMain.handle("wincmux:open-in-explorer", async (_event, payload: { path: string }) =>
     toIpcEnvelope(async () => {

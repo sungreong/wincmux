@@ -18,6 +18,14 @@ declare global {
       pickFolder: () => Promise<string | null>;
       setUnreadBadge: (count: number) => Promise<{ ok: true }>;
       openInVscode: (workspacePath: string) => Promise<{ ok: true; method: "code-cli" | "vscode-protocol" }>;
+      openInExplorer: (workspacePath: string) => Promise<{ ok: true }>;
+      scanLongFiles: (workspacePath: string, minLines: number) => Promise<{ files: Array<{ relativePath: string; lineCount: number }> }>;
+      gitInfo: (workspacePath: string) => Promise<any>;
+      agentAssetsScan: (workspacePath: string) => Promise<any>;
+      agentAssetRead: (workspacePath: string, relativePath: string) => Promise<any>;
+      agentAssetWrite: (workspacePath: string, relativePath: string, content: string) => Promise<any>;
+      agentAssetCreate: (workspacePath: string, relativePath: string, templateKind: string) => Promise<any>;
+      agentAssetReveal: (workspacePath: string, relativePath: string) => Promise<{ ok: true }>;
     };
   }
 }

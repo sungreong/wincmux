@@ -275,7 +275,12 @@ const state = {
   workspacePaneViewCache: new Map(),
   // Cache of paneSessions per workspace so pane→session mappings survive workspace switching
   workspacePaneSessionCache: new Map(),
-  dormantPaneSessions: {}
+  dormantPaneSessions: {},
+  paneMove: {
+    sourcePaneId: null,
+    targetPaneId: null,
+    placement: null
+  }
 };
 if (!localStorage.getItem(STORAGE_KEYS.terminalDefaultShell)) {
   localStorage.setItem(STORAGE_KEYS.terminalDefaultShell, state.terminal.default_shell);
@@ -485,7 +490,9 @@ function renderGroupBar() {
     btn.className = `group-chip${state.selectedGroupId === group.id ? " active" : ""}`;
     btn.type = "button";
     const count = counts.get(group.id) ?? { panes: 0, running: 0 };
-    btn.title = `${group.name}: ${count.panes} pane${count.panes === 1 ? "" : "s"}, ${count.running} running`;
+    btn.title = group.name === "Default"
+      ? `${group.name}: ${count.panes} pane${count.panes === 1 ? "" : "s"}, ${count.running} running`
+      : `${group.name}: ${count.panes} pane${count.panes === 1 ? "" : "s"}, ${count.running} running. Double-click or right-click to rename.`;
     btn.style.setProperty("--group-color", group.color ?? "#6b7c93");
     btn.textContent = `${group.name} ${count.panes}`;
     btn.addEventListener("click", () => {
@@ -496,6 +503,18 @@ function renderGroupBar() {
       }
       setStatus(`Pane group: ${group.name}`);
     });
+    if (group.name !== "Default") {
+      btn.addEventListener("dblclick", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        showGroupRenameInput(group, btn);
+      });
+      btn.addEventListener("contextmenu", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        showGroupRenameInput(group, btn);
+      });
+    }
     groupBar.appendChild(btn);
   }
 
@@ -551,6 +570,64 @@ function showGroupCreateInput(anchorEl, options = {}) {
         }
         setStatus(`Pane group created: ${name}`);
       }
+      form.remove();
+    } catch (err) {
+      setStatus(String(err?.message ?? err), true);
+    }
+  });
+  cancelBtn.addEventListener("click", () => {
+    form.remove();
+  });
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      form.remove();
+    }
+    ev.stopPropagation();
+  });
+
+  anchorEl?.insertAdjacentElement?.("afterend", form);
+  input.focus();
+  input.select();
+}
+
+function showGroupRenameInput(group, anchorEl) {
+  const ws = selectedWorkspace();
+  if (!ws || !group || group.name === "Default") {
+    return;
+  }
+  groupBar.querySelector(".group-create-inline")?.remove();
+
+  const form = document.createElement("form");
+  form.className = "group-create-inline group-rename-inline";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "Group name";
+  input.maxLength = 32;
+  input.value = group.name;
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "submit";
+  saveBtn.textContent = "Rename";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.textContent = "Cancel";
+  form.append(input, saveBtn, cancelBtn);
+
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const name = input.value.trim();
+    if (!name || name === group.name) {
+      form.remove();
+      return;
+    }
+    try {
+      await rpc("group.rename", { group_id: group.id, name });
+      state.paneGroups = state.paneGroups.map((item) =>
+        item.id === group.id ? { ...item, name } : item
+      );
+      renderGroupBar();
+      paneApi.refreshPaneBindings();
+      setStatus(`Pane group renamed: ${name}`);
       form.remove();
     } catch (err) {
       setStatus(String(err?.message ?? err), true);

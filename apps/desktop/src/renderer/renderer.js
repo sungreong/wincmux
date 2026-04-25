@@ -115,6 +115,12 @@ const paneApi = {
     }
     return false;
   },
+  togglePaneOverflowMenu: (...args) => {
+    if (typeof globalThis.togglePaneOverflowMenu === "function") {
+      return globalThis.togglePaneOverflowMenu(...args);
+    }
+    return false;
+  },
   markPaneStarting: (...args) => {
     if (typeof globalThis.markPaneStarting === "function") {
       globalThis.markPaneStarting(...args);
@@ -1217,6 +1223,134 @@ async function onHidePane(paneId) {
   );
   await syncActiveContext();
 }
+
+function cancelPaneMoveMode(showStatus = true) {
+  if (!state.paneMove?.sourcePaneId) {
+    return;
+  }
+  state.paneMove.sourcePaneId = null;
+  state.paneMove.targetPaneId = null;
+  state.paneMove.placement = null;
+  paneApi.refreshPaneBindings();
+  if (showStatus) {
+    setStatus("Pane move cancelled");
+  }
+}
+
+async function startPaneMove(paneId) {
+  const ws = selectedWorkspace();
+  if (!ws) {
+    return;
+  }
+  const leaves = leafPanes();
+  if (!paneId || !leaves.some((pane) => pane.pane_id === paneId)) {
+    setStatus("Pane not found.", true);
+    return;
+  }
+  const visiblePaneCount = state.paneCards?.size ?? leaves.length;
+  if (visiblePaneCount < 2) {
+    setStatus("Need at least two visible panes to move.", true);
+    return;
+  }
+  state.paneMove.sourcePaneId = paneId;
+  state.paneMove.targetPaneId = null;
+  state.paneMove.placement = null;
+  await paneApi.selectPane(paneId, { persist: true, focusTerm: false });
+  paneApi.refreshPaneBindings();
+  setStatus("Move pane: hover a target edge, click to drop, or press Esc to cancel");
+}
+
+async function swapPanePositions(firstPaneId, secondPaneId) {
+  const ws = selectedWorkspace();
+  if (!ws) {
+    return;
+  }
+  if (!firstPaneId || !secondPaneId || firstPaneId === secondPaneId) {
+    cancelPaneMoveMode();
+    return;
+  }
+  const leaves = leafPanes();
+  if (!leaves.some((pane) => pane.pane_id === firstPaneId) || !leaves.some((pane) => pane.pane_id === secondPaneId)) {
+    state.paneMove.sourcePaneId = null;
+    paneApi.refreshPaneBindings();
+    setStatus("Pane not found.", true);
+    return;
+  }
+  try {
+    await rpc("layout.swap", {
+      workspace_id: ws.id,
+      first_pane_id: firstPaneId,
+      second_pane_id: secondPaneId,
+    });
+    state.paneMove.sourcePaneId = null;
+    state.selectedPaneId = firstPaneId;
+    await loadPanes();
+    paneApi.normalizePaneSessions();
+    paneApi.renderPaneSurface(true);
+    paneApi.refreshPaneBindings();
+    await paneApi.selectPane(firstPaneId, { persist: true, focusTerm: true });
+    hiddenRefreshPanesUi();
+    setStatus(`Pane moved to ${secondPaneId.slice(0, 8)}`);
+    await syncActiveContext();
+  } catch (err) {
+    state.paneMove.sourcePaneId = null;
+    paneApi.refreshPaneBindings();
+    throw err;
+  }
+}
+
+async function movePaneToPlacement(sourcePaneId, targetPaneId, placement) {
+  const ws = selectedWorkspace();
+  if (!ws) {
+    return;
+  }
+  if (!sourcePaneId || !targetPaneId || sourcePaneId === targetPaneId) {
+    cancelPaneMoveMode();
+    return;
+  }
+  const validPlacements = new Set(["left", "right", "above", "below"]);
+  if (!validPlacements.has(placement)) {
+    setStatus("Drop position not found.", true);
+    return;
+  }
+  const leaves = leafPanes();
+  if (!leaves.some((pane) => pane.pane_id === sourcePaneId) || !leaves.some((pane) => pane.pane_id === targetPaneId)) {
+    state.paneMove.sourcePaneId = null;
+    state.paneMove.targetPaneId = null;
+    state.paneMove.placement = null;
+    paneApi.refreshPaneBindings();
+    setStatus("Pane not found.", true);
+    return;
+  }
+  try {
+    await rpc("layout.move", {
+      workspace_id: ws.id,
+      source_pane_id: sourcePaneId,
+      target_pane_id: targetPaneId,
+      placement,
+    });
+    state.paneMove.sourcePaneId = null;
+    state.paneMove.targetPaneId = null;
+    state.paneMove.placement = null;
+    state.selectedPaneId = sourcePaneId;
+    await loadPanes();
+    paneApi.normalizePaneSessions();
+    paneApi.renderPaneSurface(true);
+    paneApi.refreshPaneBindings();
+    await paneApi.selectPane(sourcePaneId, { persist: true, focusTerm: true });
+    hiddenRefreshPanesUi();
+    const label = placement === "below" ? "below" : placement === "above" ? "above" : placement === "left" ? "left of" : "right of";
+    setStatus(`Pane moved ${label} ${targetPaneId.slice(0, 8)}`);
+    await syncActiveContext();
+  } catch (err) {
+    state.paneMove.sourcePaneId = null;
+    state.paneMove.targetPaneId = null;
+    state.paneMove.placement = null;
+    paneApi.refreshPaneBindings();
+    throw err;
+  }
+}
+
 async function onRestoreHiddenPane(hiddenId, direction) {
   const ws = selectedWorkspace();
   if (!ws) {
@@ -1495,6 +1629,394 @@ function toggleNotificationPanel() {
 // ?? Workspace Info Panel ???????????????????????????????????????
 let wsDescSaveTimer = null;
 
+const AGENT_ASSET_CATEGORY_LABELS = {
+  instructions: "Instructions",
+  skills: "Skills",
+  rules: "Rules",
+  subagents: "Subagents",
+  commands: "Commands",
+  settings: "Settings",
+  mcp: "MCP",
+  other: "Other",
+};
+
+const AGENT_ASSET_PROVIDER_DEFS = [
+  { id: "all", label: "All" },
+  { id: "claude", label: "Claude" },
+  { id: "codex", label: "Codex" },
+  { id: "gemini", label: "Gemini" },
+  { id: "cursor", label: "Cursor" },
+  { id: "kiro", label: "Kiro" },
+  { id: "opencode", label: "opencode" },
+  { id: "shared", label: "Shared" },
+];
+
+const AGENT_ASSET_PROVIDER_LABELS = Object.fromEntries(AGENT_ASSET_PROVIDER_DEFS.map((provider) => [provider.id, provider.label]));
+
+function htmlEscape(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function agentAssetDetailText(value) {
+  if (value == null || value === "") return "";
+  if (Array.isArray(value)) return value.map((v) => typeof v === "object" ? JSON.stringify(v) : String(v)).join(", ");
+  if (typeof value === "object") {
+    return Object.entries(value).map(([k, v]) => `${k}: ${agentAssetDetailText(v)}`).join(" · ");
+  }
+  return String(value);
+}
+
+function agentAssetSummaryText(item) {
+  const bits = [
+    `[${AGENT_ASSET_CATEGORY_LABELS[item.category] ?? item.category}] ${item.relativePath}`,
+    item.summary,
+  ];
+  if (item.lineCount != null) bits.push(`${item.lineCount} lines`);
+  if (item.size) bits.push(`${item.size} bytes`);
+  if (item.privateLocal) bits.push("local/private");
+  if (item.large) bits.push("large preview-limited");
+  if (item.invalid) bits.push(`warning: ${(item.warnings ?? []).join("; ") || "invalid"}`);
+  const details = Object.entries(item.details ?? {})
+    .map(([key, value]) => `${key}: ${agentAssetDetailText(value)}`)
+    .filter((line) => !line.endsWith(": "));
+  return bits.concat(details).join("\n");
+}
+
+function agentAssetProviders(item) {
+  if (Array.isArray(item?.providers) && item.providers.length > 0) return item.providers;
+  const rel = String(item?.relativePath ?? "").toLowerCase();
+  if (rel === ".mcp.json") return ["shared"];
+  if (rel.startsWith(".agents/") || rel.includes("agents.md")) return ["codex", "cursor", "kiro", "opencode"];
+  if (rel.startsWith(".claude/") || rel.includes("claude.md")) return ["claude"];
+  if (rel.startsWith(".gemini/") || rel.includes("gemini.md")) return ["gemini"];
+  if (rel.startsWith(".cursor/") || rel === ".cursorrules") return ["cursor"];
+  if (rel.startsWith(".kiro/")) return ["kiro"];
+  if (rel.startsWith(".opencode/") || rel.startsWith("opencode.")) return ["opencode"];
+  return ["shared"];
+}
+
+function filterAgentAssetsByProvider(items, providerId) {
+  if (!providerId || providerId === "all") return items;
+  return items.filter((item) => agentAssetProviders(item).includes(providerId));
+}
+
+function summarizeAgentAssetItems(items) {
+  const summary = {};
+  for (const category of Object.keys(AGENT_ASSET_CATEGORY_LABELS)) {
+    const categoryItems = items.filter((item) => item.category === category);
+    summary[category] = {
+      count: categoryItems.filter((item) => item.exists).length,
+      missing: categoryItems.filter((item) => !item.exists).length,
+      invalid: categoryItems.filter((item) => item.invalid).length,
+      large: categoryItems.filter((item) => item.large).length,
+      local: categoryItems.filter((item) => item.privateLocal).length,
+    };
+  }
+  return summary;
+}
+
+function renderAgentAssetProviderTabs(items, activeProvider) {
+  return AGENT_ASSET_PROVIDER_DEFS.map(({ id, label }) => {
+    const scopedItems = filterAgentAssetsByProvider(items, id);
+    const count = scopedItems.filter((item) => item.exists).length;
+    const active = id === activeProvider ? " active" : "";
+    return `<button class="agent-asset-scope-tab${active}" data-agent-action="provider-filter" data-provider="${id}">
+      ${label} <span>${count}</span>
+    </button>`;
+  }).join("");
+}
+
+function renderAgentAssetSummaryCards(items) {
+  const summary = summarizeAgentAssetItems(items);
+  return Object.entries(AGENT_ASSET_CATEGORY_LABELS).map(([category, label]) => {
+    const info = summary[category] ?? { count: 0, missing: 0, invalid: 0, large: 0, local: 0 };
+    const warn = (info.missing || info.invalid || info.large) ? " warn" : "";
+    const meta = [
+      info.missing ? `missing ${info.missing}` : "",
+      info.invalid ? `invalid ${info.invalid}` : "",
+      info.large ? `large ${info.large}` : "",
+      info.local ? `local ${info.local}` : "",
+    ].filter(Boolean).join(" · ");
+    return `<div class="agent-asset-card${warn}" data-agent-category="${category}">
+      <div class="agent-asset-card-title">${label}</div>
+      <div class="agent-asset-card-count">${info.count}</div>
+      <div class="agent-asset-card-meta">${htmlEscape(meta || "ok")}</div>
+    </div>`;
+  }).join("");
+}
+
+function renderAgentAssetBadges(item) {
+  const badges = [];
+  if (!item.exists) badges.push(["missing", "Missing"]);
+  if (item.invalid) badges.push(["invalid", "Invalid"]);
+  if (item.large) badges.push(["large", "Large"]);
+  if (item.privateLocal) badges.push(["local", "Local"]);
+  badges.push([item.editable ? "editable" : "readonly", item.editable ? "Editable" : "Read only"]);
+  return badges.map(([cls, text]) => `<span class="agent-asset-badge ${cls}">${text}</span>`).join("");
+}
+
+function renderAgentAssetItem(item) {
+  const providers = agentAssetProviders(item);
+  const details = Object.entries(item.details ?? {})
+    .map(([key, value]) => {
+      const text = agentAssetDetailText(value);
+      return text ? `<span title="${htmlEscape(text)}">${htmlEscape(key)}: ${htmlEscape(text)}</span>` : "";
+    })
+    .filter(Boolean)
+    .join("");
+  const warnings = (item.warnings ?? []).map((w) => `<div class="agent-asset-warning">${htmlEscape(w)}</div>`).join("");
+  const viewLabel = item.exists ? "View" : "Create";
+  const canCreate = !item.exists && item.editable;
+  const canView = item.exists && !item.large;
+  return `<div class="agent-asset-item${item.invalid ? " invalid" : ""}" data-path="${htmlEscape(item.relativePath)}">
+    <div class="agent-asset-item-main">
+      <div class="agent-asset-row">
+        <span class="agent-asset-name">${htmlEscape(item.name)}</span>
+        ${providers.map((provider) => `<span class="agent-asset-badge scope">${htmlEscape(AGENT_ASSET_PROVIDER_LABELS[provider] ?? provider)}</span>`).join("")}
+        ${renderAgentAssetBadges(item)}
+      </div>
+      <div class="agent-asset-path" title="${htmlEscape(item.relativePath)}">${htmlEscape(item.relativePath)}</div>
+      <div class="agent-asset-summary">${htmlEscape(item.summary)}</div>
+      <div class="agent-asset-details">${details}</div>
+      ${warnings}
+    </div>
+    <div class="agent-asset-actions">
+      <button data-agent-action="${canCreate ? "create" : "view"}" ${canView || canCreate ? "" : "disabled"}>${viewLabel}</button>
+      <button data-agent-action="copy-summary">Copy Summary</button>
+      <button data-agent-action="insert-summary">Insert</button>
+      <button data-agent-action="copy-path">Copy Path</button>
+      <button data-agent-action="reveal">Explorer</button>
+    </div>
+  </div>`;
+}
+
+function renderAgentAssetList(result, activeProvider = "all") {
+  const scopedItems = filterAgentAssetsByProvider(result.items ?? [], activeProvider);
+  const byCategory = {};
+  for (const item of scopedItems) {
+    (byCategory[item.category] ||= []).push(item);
+  }
+  const sections = Object.entries(AGENT_ASSET_CATEGORY_LABELS).map(([category, label]) => {
+    const items = byCategory[category] ?? [];
+    if (items.length === 0) {
+      return `<section class="agent-asset-section">
+        <div class="agent-asset-section-title">${label}</div>
+        <div class="agent-asset-empty">No ${label.toLowerCase()} assets found.</div>
+      </section>`;
+    }
+    return `<section class="agent-asset-section">
+      <div class="agent-asset-section-title">${label} (${items.filter((i) => i.exists).length})</div>
+      <div class="agent-asset-list">${items.map(renderAgentAssetItem).join("")}</div>
+    </section>`;
+  }).join("");
+  return `<div class="agent-asset-scope-tabs">${renderAgentAssetProviderTabs(result.items ?? [], activeProvider)}</div>
+    <div class="agent-assets-grid">${renderAgentAssetSummaryCards(scopedItems)}</div>
+    ${sections}`;
+}
+
+function agentAssetTemplateKind(relativePath) {
+  if (/\.claude\/commands\//i.test(relativePath)) return "command";
+  if (/\.claude\/rules\//i.test(relativePath) || /\.cursor\/rules\//i.test(relativePath) || /\.kiro\/steering\//i.test(relativePath)) return "rule";
+  if (/GEMINI/i.test(relativePath)) return "gemini";
+  if (/AGENTS/i.test(relativePath)) return "agents";
+  return "claude";
+}
+
+async function loadAgentAssets(ws) {
+  const area = $("wsAgentAssets");
+  if (!area || !ws?.path) return;
+  if (area.style.display !== "none" && area.dataset.wsId === ws.id) {
+    area.style.display = "none";
+    const panel = $("wsInfoPanel");
+    if (panel) panel.classList.remove("ws-info-panel-agent-assets");
+    const summaryEl = $("wsSessionSummary");
+    if (summaryEl) summaryEl.style.display = "";
+    return;
+  }
+  const panel = $("wsInfoPanel");
+  if (panel) {
+    panel.classList.add("ws-info-panel-agent-assets");
+    requestAnimationFrame(() => {
+      const rect = panel.getBoundingClientRect();
+      if (rect.right > window.innerWidth - 8) {
+        panel.style.left = `${Math.max(8, window.innerWidth - rect.width - 8)}px`;
+      }
+    });
+  }
+  const summaryEl = $("wsSessionSummary");
+  if (summaryEl) summaryEl.style.display = "none";
+  const scanArea = $("wsScanArea");
+  if (scanArea) scanArea.style.display = "none";
+  const gitArea = $("wsGitSummary");
+  if (gitArea) gitArea.style.display = "none";
+  area.dataset.wsId = ws.id;
+  area.style.display = "";
+  area.innerHTML = '<div class="agent-asset-loading">Scanning agent assets...</div>';
+  try {
+    const result = await window.wincmux.agentAssetsScan(ws.path);
+    area.dataset.scan = JSON.stringify(result);
+    area.dataset.provider = area.dataset.provider || "all";
+    area.innerHTML = `
+      <div class="agent-asset-toolbar">
+        <div>
+          <div class="agent-asset-title">Agent Assets</div>
+          <div class="agent-asset-subtitle">Provider registry 기반으로 Claude, Codex, Gemini, Cursor, Kiro, opencode 자산을 나눠 봅니다.</div>
+        </div>
+        <button data-agent-action="refresh">Refresh</button>
+      </div>
+      <div class="agent-assets-layout">
+        <div id="agentAssetBrowser" class="agent-asset-browser">
+          ${renderAgentAssetList(result, area.dataset.provider)}
+        </div>
+        <div id="agentAssetViewer" class="agent-asset-viewer">
+          <div class="agent-asset-viewer-empty">
+            <div class="agent-asset-viewer-empty-title">Select an asset</div>
+            <div>왼쪽에서 View를 누르면 여기에서 바로 읽거나 편집합니다.</div>
+          </div>
+        </div>
+      </div>
+    `;
+    area.onclick = (ev) => handleAgentAssetClick(ev, ws);
+  } catch (err) {
+    area.innerHTML = `<div class="agent-asset-loading">Agent asset scan failed: ${htmlEscape(String(err?.message ?? err))}</div>`;
+  }
+}
+
+function currentAgentAssetScan() {
+  const area = $("wsAgentAssets");
+  if (!area?.dataset.scan) return { items: [] };
+  try {
+    return JSON.parse(area.dataset.scan);
+  } catch {
+    return { items: [] };
+  }
+}
+
+function findAgentAssetItem(relativePath) {
+  return (currentAgentAssetScan().items ?? []).find((item) => item.relativePath === relativePath);
+}
+
+async function handleAgentAssetClick(ev, ws) {
+  const button = ev.target.closest("[data-agent-action]");
+  if (!button) return;
+  const action = button.dataset.agentAction;
+  if (action === "refresh") {
+    const area = $("wsAgentAssets");
+    if (area) area.style.display = "none";
+    await loadAgentAssets(ws);
+    return;
+  }
+  if (action === "provider-filter") {
+    const area = $("wsAgentAssets");
+    const browser = $("agentAssetBrowser");
+    if (!area || !browser) return;
+    area.dataset.provider = button.dataset.provider || "all";
+    browser.innerHTML = renderAgentAssetList(currentAgentAssetScan(), area.dataset.provider);
+    return;
+  }
+  if (action === "save-asset") {
+    const viewer = $("agentAssetViewer");
+    const rel = viewer?.dataset.path;
+    const editor = viewer?.querySelector("textarea");
+    if (!rel || !editor) return;
+    button.disabled = true;
+    button.textContent = "Saving...";
+    try {
+      await window.wincmux.agentAssetWrite(ws.path, rel, editor.value);
+      setStatus(`Agent asset saved: ${rel}`);
+      const area = $("wsAgentAssets");
+      if (area) area.style.display = "none";
+      await loadAgentAssets(ws);
+    } catch (err) {
+      setStatus(String(err?.message ?? err), true);
+      button.disabled = false;
+      button.textContent = "Save";
+    }
+    return;
+  }
+  if (action === "copy-content") {
+    const viewer = $("agentAssetViewer");
+    const editor = viewer?.querySelector("textarea");
+    if (editor) {
+      await window.wincmux.clipboardWrite(editor.value).catch(() => {});
+      setStatus("Agent asset content copied");
+    }
+    return;
+  }
+  if (action === "close-viewer") {
+    const viewer = $("agentAssetViewer");
+    if (viewer) viewer.style.display = "none";
+    return;
+  }
+
+  const itemEl = ev.target.closest("[data-path]");
+  const relativePath = itemEl?.dataset.path;
+  const item = relativePath ? findAgentAssetItem(relativePath) : null;
+  if (!item) return;
+
+  if (action === "view") {
+    await openAgentAssetViewer(ws, item);
+  } else if (action === "create") {
+    try {
+      await window.wincmux.agentAssetCreate(ws.path, item.relativePath, agentAssetTemplateKind(item.relativePath));
+      setStatus(`Agent asset created: ${item.relativePath}`);
+      const area = $("wsAgentAssets");
+      if (area) area.style.display = "none";
+      await loadAgentAssets(ws);
+      const created = findAgentAssetItem(item.relativePath);
+      if (created) await openAgentAssetViewer(ws, created);
+    } catch (err) {
+      setStatus(String(err?.message ?? err), true);
+    }
+  } else if (action === "copy-summary") {
+    await window.wincmux.clipboardWrite(agentAssetSummaryText(item)).catch(() => {});
+    setStatus("Agent asset summary copied");
+  } else if (action === "insert-summary") {
+    const paneId = state.selectedPaneId;
+    if (!paneId) {
+      setStatus("Select a pane before inserting an asset summary.", true);
+      return;
+    }
+    paneApi.writeToPane(paneId, agentAssetSummaryText(item));
+    setStatus("Agent asset summary inserted");
+  } else if (action === "copy-path") {
+    await window.wincmux.clipboardWrite(item.relativePath).catch(() => {});
+    setStatus("Agent asset path copied");
+  } else if (action === "reveal") {
+    await window.wincmux.agentAssetReveal(ws.path, item.relativePath).catch((err) => setStatus(String(err?.message ?? err), true));
+  }
+}
+
+async function openAgentAssetViewer(ws, item) {
+  const viewer = $("agentAssetViewer");
+  if (!viewer) return;
+  viewer.dataset.path = item.relativePath;
+  viewer.innerHTML = `<div class="agent-asset-loading">Loading ${htmlEscape(item.relativePath)}...</div>`;
+  try {
+    const result = await window.wincmux.agentAssetRead(ws.path, item.relativePath);
+    const content = result?.content ?? "";
+    viewer.innerHTML = `<div class="agent-asset-viewer-header">
+      <div>
+        <div class="agent-asset-viewer-title">${htmlEscape(item.relativePath)}</div>
+        <div class="agent-asset-viewer-meta">${item.editable ? "Editable" : "Read-only"} · ${content.length.toLocaleString()} chars</div>
+      </div>
+      <div class="agent-asset-viewer-actions">
+        <button data-agent-action="copy-content">Copy</button>
+        ${item.editable ? '<button data-agent-action="save-asset">Save</button>' : ""}
+        <button data-agent-action="close-viewer">Close</button>
+      </div>
+    </div>
+    <textarea class="agent-asset-editor" ${item.editable ? "" : "readonly"} spellcheck="false">${htmlEscape(content)}</textarea>`;
+  } catch (err) {
+    viewer.innerHTML = `<div class="agent-asset-loading">Preview unavailable: ${htmlEscape(String(err?.message ?? err))}</div>`;
+  }
+}
+
 function openWsInfoPanel(ws, anchorEl) {
   const overlay = $("wsInfoOverlay");
   const panel = $("wsInfoPanel");
@@ -1503,6 +2025,7 @@ function openWsInfoPanel(ws, anchorEl) {
   const summaryEl = $("wsSessionSummary");
   if (!overlay || !panel) return;
 
+  panel.classList.remove("ws-info-panel-agent-assets");
   titleEl.textContent = ws.name;
   descInput.value = ws.description ?? "";
   overlay.style.display = "";
@@ -1515,6 +2038,7 @@ function openWsInfoPanel(ws, anchorEl) {
       { label: "Explorer", title: "Open in File Explorer", fn: () => window.wincmux.openInExplorer(ws.path).catch((e) => setStatus(String(e), true)) },
       { label: "VSCode",   title: "Open in VSCode",        fn: () => window.wincmux.openInVscode(ws.path).catch((e) => setStatus(String(e), true)) },
       { label: "Git",      title: "Show git log & status", fn: () => loadGitSummary(ws) },
+      { label: "Agent Assets", title: "Inspect Claude/Codex workspace assets", fn: () => loadAgentAssets(ws) },
       { label: "+ Terminal",  title: "New PTY in selected pane", fn: () => { closeWsInfoPanel(); startSessionForPane(state.selectedPaneId, { force: true, workspaceId: ws.id }).catch((e) => setStatus(String(e), true)); } },
     ];
     for (const a of actions) {
@@ -1551,6 +2075,9 @@ function openWsInfoPanel(ws, anchorEl) {
   if (scanArea) { scanArea.style.display = "none"; scanArea.innerHTML = ""; }
   const gitArea = $("wsGitSummary");
   if (gitArea) { gitArea.style.display = "none"; gitArea.innerHTML = ""; }
+  const agentArea = $("wsAgentAssets");
+  if (agentArea) { agentArea.style.display = "none"; agentArea.innerHTML = ""; agentArea.dataset.wsId = ""; agentArea.dataset.scan = ""; agentArea.dataset.provider = "all"; }
+  summaryEl.style.display = "";
 
   // Load session summary
   summaryEl.innerHTML = '<span class="ws-summary-loading">Loading...</span>';
@@ -1704,6 +2231,12 @@ function closeWsInfoPanel() {
 async function loadGitSummary(ws) {
   const gitArea = $("wsGitSummary");
   if (!gitArea || !ws?.path) return;
+  const agentArea = $("wsAgentAssets");
+  if (agentArea) agentArea.style.display = "none";
+  const panel = $("wsInfoPanel");
+  if (panel) panel.classList.remove("ws-info-panel-agent-assets");
+  const summaryEl = $("wsSessionSummary");
+  if (summaryEl) summaryEl.style.display = "";
 
   // Toggle off if already shown
   if (gitArea.style.display !== "none" && gitArea.dataset.wsId === ws.id) {
@@ -1926,6 +2459,12 @@ function bindKeyboardShortcuts() {
       return;
     }
 
+    if (ev.key === "Escape" && state.paneMove?.sourcePaneId) {
+      ev.preventDefault();
+      cancelPaneMoveMode();
+      return;
+    }
+
     if (ctrl && !alt && !shift && ev.code === "Slash") {
       ev.preventDefault();
       toggleShortcutHelp();
@@ -1984,6 +2523,19 @@ function bindKeyboardShortcuts() {
       if (ev.key.toLowerCase() === "q") {
         ev.preventDefault();
         runPaneShortcut((paneId) => onClosePane(paneId));
+        return;
+      }
+      if (ev.key.toLowerCase() === "m") {
+        ev.preventDefault();
+        const paneId = selectedPaneForShortcut();
+        if (paneId) {
+          paneApi.togglePaneOverflowMenu(paneId);
+        }
+        return;
+      }
+      if (ev.key.toLowerCase() === "p") {
+        ev.preventDefault();
+        runPaneShortcut((paneId) => startPaneMove(paneId));
         return;
       }
     }
@@ -2068,6 +2620,9 @@ async function bootstrap() {
       adjustPaneFont: (paneId, delta) => onAdjustPaneFont(paneId, delta),
       insertQuickCommand: (paneId, text) => onInsertQuickCommand(paneId, text),
       markPaneNotificationsRead: (paneId) => markPaneNotificationsRead(paneId),
+      startPaneMove: (paneId) => startPaneMove(paneId),
+      swapPanePositions: (firstPaneId, secondPaneId) => swapPanePositions(firstPaneId, secondPaneId),
+      movePaneToPlacement: (sourcePaneId, targetPaneId, placement) => movePaneToPlacement(sourcePaneId, targetPaneId, placement),
       movePaneToGroup: (paneId, groupId) => movePaneToGroup(paneId, groupId),
       openSessionInSplit: (paneId, session, direction) => openSessionInSplit(paneId, session, direction),
     });
