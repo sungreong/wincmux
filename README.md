@@ -25,10 +25,10 @@ The screenshot above shows the current workspace-oriented UI:
 - **Pane surface**: terminal panes can be split, hidden, restored, restarted, moved, and grouped without killing the running session.
 - **Move Pane mode**: click `Move Pane` or press `Ctrl+Alt+P`, hover a target edge, then click the preview slot to place the pane above/below/left/right.
 - **Pane groups**: each workspace starts with `Default`; custom groups can be created/renamed, and panes can be moved between groups from the pane group pill.
-- **Workspace sidebar**: add workspaces, switch projects, delete individual workspaces, show branch/dirty status, and keep per-workspace notes.
+- **Workspace sidebar**: add workspaces from a collapsible form, switch projects, delete individual workspaces, show branch/dirty status in brief/detail modes, and keep per-workspace notes.
 - **Workspace info panel**: editable description, git summary, long-file scan, scoped running sessions, AI session history, and Agent Assets inventory.
 - **Agent Assets**: inspect workspace-scoped Claude/Codex/Gemini/Cursor/Kiro/opencode files such as `CLAUDE.md`, `AGENTS.md`, `.claude/skills`, `.cursor/rules`, `.gemini`, `.kiro`, `.mcp.json`, and `.agents` without opening Explorer.
-- **Input Assets**: save long pasted text and imported images under `.wincmux/input-assets`, then preview, copy, reveal, or insert them into the selected pane.
+- **Input Assets**: save long pasted text, clipboard images, and imported images under `.wincmux/input-assets`, then preview, copy, reveal, or insert path-based work prompts into the selected pane.
 - **Notifications panel**: unread assistant completions grouped by workspace, with workspace mark-read and clear actions.
 - **Top toolbar**: workspace/notification visibility, hidden pane drawer, equalize panes, keyboard help, font scale, and selected pane ID.
 
@@ -43,7 +43,7 @@ The screenshot above shows the current workspace-oriented UI:
 | Workspace info popup panel (description, git, scan, sessions) | Done |
 | Workspace Agent Assets inventory with provider filters and preview/editor pane | Done |
 | Agent asset provider registry (Claude/Codex/Gemini/Cursor/Kiro/opencode/Shared) | Done |
-| Workspace Input Assets for long paste snippets and image path insertion | Done |
+| Workspace Input Assets for long paste snippets, clipboard images, imports, and path-prompt insertion | Done |
 | Session run via `node-pty` (ConPTY on Windows) | Done |
 | Session delete (non-running sessions) via IPC | Done |
 | Redundant session history pruning (dedup sequential runs) | Done |
@@ -236,14 +236,32 @@ The implementation is provider-registry based. To add a future tool, add its ins
 
 Open a workspace card's info panel, then click `Input Assets`.
 
-Input Assets are user-provided materials that you may want to send to a terminal or AI CLI without flooding the pane immediately.
+Input Assets are user-provided materials that you may want an AI CLI to use without flooding the terminal with the full payload.
 
 - Long paste detection triggers at about `2KB` or `20` lines.
 - When a long paste is detected, choose `Paste Directly`, `Save Asset`, or `Save + Insert`.
+- When a clipboard image is detected on paste, WinCMux shows an image preview prompt and lets you save it as an asset before inserting a work prompt.
 - Text assets are stored as `.wincmux/input-assets/snippets/<id>.md`.
-- Image assets are imported to `.wincmux/input-assets/images/<id>.<ext>` and inserted as a workspace-relative path, not binary content.
+- Image assets are stored under `.wincmux/input-assets/images/`. Imported image files keep their source extension; clipboard images are saved as PNG.
+- `Save + Insert`, `Insert`, and `Copy` use a short Korean work prompt that includes the saved asset's absolute path instead of sending the original text/image bytes to the pane.
+- `Path` inserts only the saved file path.
 - The asset panel supports `View`, `Insert`, `Path`, `Copy`, `Rename`, `Explorer`, and `Delete`.
 - `.wincmux/.gitignore` is created with `input-assets/`, so these assets are private by default and do not appear in normal Git changes.
+- The repository `.gitignore` also ignores root `.wincmux/`, which keeps local test input assets out of source control.
+
+Inserted text assets use this shape:
+
+```text
+작업 문서 경로: C:\path\to\workspace\.wincmux\input-assets\snippets\<id>.md
+위의 경로에 적힌 작업 문서로 작업 진행해줘
+```
+
+Inserted image assets use this shape:
+
+```text
+이미지 작업 문서 경로: C:\path\to\workspace\.wincmux\input-assets\images\<id>.png
+위의 경로에 적힌 이미지 작업 문서로 작업 진행해줘
+```
 
 This feature is separate from Agent Assets: Agent Assets are configuration/instruction files that tools read; Input Assets are temporary or reusable inputs that the user chooses to send to a pane.
 
@@ -328,7 +346,7 @@ Electron Main Process
     ├── Named Pipe JSON-RPC client (auto-retry + core respawn on ENOENT)
     ├── Persistent stream sockets (session events / notify events)
     ├── Workspace Agent Assets scanner/editor IPC (provider registry + path safety)
-    ├── Workspace Input Assets store (long paste snippets + image imports)
+    ├── Workspace Input Assets store (long paste snippets + clipboard/imported images)
     └── Native Toast + Taskbar Badge (Electron Notification API)
 @wincmux/core (Node.js)
     ├── Workspace Manager
@@ -364,9 +382,12 @@ Desktop IPC additions:
 | `agentAssetReveal(workspacePath, relativePath)` | Reveal a scanned asset in Explorer |
 | `inputAssetsList(workspacePath)` | List saved long-paste snippets and imported images |
 | `inputAssetCreateText(workspacePath, payload)` | Save a text snippet under `.wincmux/input-assets` |
-| `inputAssetImportFile(workspacePath, payload)` | Copy an image into the workspace input asset store |
+| `inputAssetCreateImage(workspacePath, payload)` | Save a clipboard image under `.wincmux/input-assets/images` |
+| `inputAssetImportFile(workspacePath, payload)` | Copy an image file into the workspace input asset store |
+| `inputAssetPickFile(workspacePath)` | Pick and import an image file |
 | `inputAssetRead(workspacePath, assetId)` | Read snippet content or image preview data |
 | `inputAssetRename/Delete/Reveal(...)` | Manage saved input assets |
+| `clipboardReadImage()` | Read the current clipboard image for paste-to-asset flow |
 
 ---
 
