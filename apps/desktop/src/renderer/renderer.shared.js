@@ -1087,21 +1087,41 @@ function initResizeHandles(onResize) {
       ev.preventDefault();
       const startX = ev.clientX;
       const start = side === "left" ? state.leftWidth : state.rightWidth;
+      let dragRaf = null;
+
+      const flushDragResize = () => {
+        dragRaf = null;
+        applyPanelWidths();
+        onResize();
+      };
+
+      const scheduleDragResize = () => {
+        if (dragRaf) {
+          return;
+        }
+        dragRaf = window.requestAnimationFrame(flushDragResize);
+      };
 
       const onMove = (e) => {
         const delta = e.clientX - startX;
         if (side === "left") {
           state.leftWidth = start + delta;
-          localStorage.setItem(STORAGE_KEYS.leftWidth, String(state.leftWidth));
         } else {
           state.rightWidth = start - delta;
-          localStorage.setItem(STORAGE_KEYS.rightWidth, String(state.rightWidth));
         }
-        applyPanelWidths();
-        onResize();
+        scheduleDragResize();
       };
 
       const onUp = () => {
+        if (dragRaf) {
+          cancelAnimationFrame(dragRaf);
+          flushDragResize();
+        }
+        if (side === "left") {
+          localStorage.setItem(STORAGE_KEYS.leftWidth, String(state.leftWidth));
+        } else {
+          localStorage.setItem(STORAGE_KEYS.rightWidth, String(state.rightWidth));
+        }
         window.removeEventListener("mousemove", onMove);
         window.removeEventListener("mouseup", onUp);
       };

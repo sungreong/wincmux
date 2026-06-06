@@ -11,7 +11,7 @@
     "build:preload": "tsup src/preload/index.ts --format cjs --out-dir dist/preload --external electron",
     "build:renderer": "node scripts/build-renderer.mjs",
     "lint": "tsc --noEmit",
-    "package:win": "npm run build && npm --workspace @wincmux/core run build && cross-env WINCMUX_SPAWN_CORE=1 electron-builder --win portable"
+    "package:win": "npm run build && npm --workspace @wincmux/core run build && electron-builder --win nsis"
   },
   "devDependencies": {
     "@xterm/addon-fit": "^0.10.0",
@@ -27,19 +27,56 @@
   "build": {
     "appId": "ai.manaflow.wincmux",
     "productName": "WinCMux",
+    "electronVersion": "35.7.5",
+    "npmRebuild": false,
+    "nodeGypRebuild": false,
     "files": [
-      "dist/**/*",
+      "dist/main/**/*",
+      "dist/preload/**/*",
+      "dist/renderer/**/*",
       "assets/**/*",
-      "node_modules/**/*",
-      "../../packages/core/dist/**/*"
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../../packages/core/dist",
+        "to": "packages/core/dist"
+      },
+      {
+        "from": "../../node_modules/better-sqlite3",
+        "to": "node_modules/better-sqlite3"
+      },
+      {
+        "from": "../../node_modules/bindings",
+        "to": "node_modules/bindings"
+      },
+      {
+        "from": "../../node_modules/file-uri-to-path",
+        "to": "node_modules/file-uri-to-path"
+      },
+      {
+        "from": "../../node_modules/node-pty",
+        "to": "node_modules/node-pty"
+      },
+      {
+        "from": "../../node_modules/zod",
+        "to": "node_modules/zod"
+      }
     ],
     "asar": true,
     "win": {
       "icon": "assets/icon-terminal.ico",
       "target": [
-        "portable"
+        "nsis"
       ],
-      "artifactName": "WinCMux-${version}.exe"
+      "artifactName": "WinCMux-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
     }
   }
 }

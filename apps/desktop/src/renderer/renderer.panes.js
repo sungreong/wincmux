@@ -17,7 +17,11 @@ const INPUT_FLUSH_DELAY_MS = 12;
 const INPUT_RETRY_DELAY_MS = 120;
 const IME_COMMIT_WAIT_MS = 80;
 const IME_DUPLICATE_WINDOW_MS = 220;
+const OUTPUT_FLUSH_CHUNK_SIZE = 16_384;
+const OUTPUT_QUEUE_LIMIT = 256_000;
+const OUTPUT_QUEUE_KEEP = 180_000;
 const PANE_DEBUG_LOGS = localStorage.getItem("wincmux.debug.panes") === "1";
+let fitAllPanesRaf = null;
 
 function paneDebug(...args) {
   if (PANE_DEBUG_LOGS) {
@@ -339,29 +343,35 @@ function enqueueStreamOutput(paneId, output) {
   view.hasOutput = true;
   hidePaneOverlay(view);
   view.outputQueue += output;
-  if (view.outputQueue.length > 256_000) {
-    view.outputQueue = view.outputQueue.slice(-180_000);
+  if (view.outputQueue.length > OUTPUT_QUEUE_LIMIT) {
+    view.outputQueue = view.outputQueue.slice(-OUTPUT_QUEUE_KEEP);
     state.metrics.dropped_frames += 1;
     logPerf("stream.dropped", { pane_id: paneId, dropped_frames: state.metrics.dropped_frames });
   }
   state.metrics.stream_queue_depth = Math.max(state.metrics.stream_queue_depth, view.outputQueue.length);
 
-  if (!view.flushRaf) {
-    view.flushRaf = window.requestAnimationFrame(() => flushPaneOutput(paneId));
-  }
+  schedulePaneOutputFlush(view);
 }
+
+function schedulePaneOutputFlush(view) {
+  if (!view || view.flushRaf || view.outputWriteInFlight) {
+    return;
+  }
+  view.flushRaf = window.requestAnimationFrame(() => flushPaneOutput(view.paneId));
+}
+
 function flushPaneOutput(paneId) {
   const view = state.paneViews.get(paneId);
   if (!view) {
     return;
   }
   view.flushRaf = null;
-  if (!view.outputQueue) {
+  if (!view.outputQueue || view.outputWriteInFlight) {
     return;
   }
 
-  const chunk = view.outputQueue.slice(0, 16_384);
-  view.outputQueue = view.outputQueue.slice(16_384);
+  const chunk = view.outputQueue.slice(0, OUTPUT_FLUSH_CHUNK_SIZE);
+  view.outputQueue = view.outputQueue.slice(OUTPUT_FLUSH_CHUNK_SIZE);
 
   // If user has scrolled up, preserve viewport position after write.
   const buf = view.term.buffer.active;
@@ -369,14 +379,23 @@ function flushPaneOutput(paneId) {
   const savedViewportY = isScrolledUp ? buf.viewportY : null;
 
   view.renderedSessionId = view.sessionId;
-  view.term.write(normalizeTerminalOutput(chunk), () => {
-    if (savedViewportY !== null) {
-      view.term.scrollToLine(savedViewportY);
+  view.outputWriteInFlight = true;
+  try {
+    view.term.write(normalizeTerminalOutput(chunk), () => {
+      view.outputWriteInFlight = false;
+      if (savedViewportY !== null) {
+        view.term.scrollToLine(savedViewportY);
+      }
+      if (view.outputQueue.length > 0) {
+        schedulePaneOutputFlush(view);
+      }
+    });
+  } catch (err) {
+    view.outputWriteInFlight = false;
+    setStatus(`Terminal render error: ${err?.message ?? err}`, true);
+    if (view.outputQueue.length > 0) {
+      schedulePaneOutputFlush(view);
     }
-  });
-
-  if (view.outputQueue.length > 0) {
-    view.flushRaf = window.requestAnimationFrame(() => flushPaneOutput(paneId));
   }
 }
 function currentLayoutHash() {
@@ -615,6 +634,9 @@ function disposeView(view) {
   if (view.flushRaf) {
     cancelAnimationFrame(view.flushRaf);
   }
+  if (view.fitRaf) {
+    cancelAnimationFrame(view.fitRaf);
+  }
   if (view.observer) {
     view.observer.disconnect();
   }
@@ -640,6 +662,10 @@ function disposeView(view) {
 }
 
 function disposeAllViews() {
+  if (fitAllPanesRaf) {
+    cancelAnimationFrame(fitAllPanesRaf);
+    fitAllPanesRaf = null;
+  }
   for (const view of state.paneViews.values()) {
     disposeView(view);
   }
@@ -655,16 +681,63 @@ function disposeAllViews() {
   state._lastRenderedWorkspaceId = null;
 }
 
-function fitAllPanes() {
+function fitPaneView(view) {
+  if (!view?.term || !view.fitAddon) {
+    return;
+  }
+  if (view.fitRaf) {
+    cancelAnimationFrame(view.fitRaf);
+    view.fitRaf = null;
+  }
+  const beforeCols = view.term.cols;
+  const beforeRows = view.term.rows;
+  updatePaneActionLayout(view.paneId);
+  view.fitAddon.fit();
+  if (view.term.cols !== beforeCols || view.term.rows !== beforeRows) {
+    schedulePaneResize(view);
+  }
+}
+
+function schedulePaneFit(view) {
+  if (!view || view.fitRaf) {
+    return;
+  }
+  view.fitRaf = window.requestAnimationFrame(() => {
+    view.fitRaf = null;
+    try {
+      fitPaneView(view);
+    } catch {
+      // ignore fit errors during layout teardown
+    }
+  });
+}
+
+function performFitAllPanes() {
   for (const view of state.paneViews.values()) {
     try {
-      updatePaneActionLayout(view.paneId);
-      view.fitAddon.fit();
-      schedulePaneResize(view);
+      fitPaneView(view);
     } catch {
       // ignore fit errors during layout teardown
     }
   }
+}
+
+function fitAllPanes(options = {}) {
+  if (options?.immediate) {
+    if (fitAllPanesRaf) {
+      cancelAnimationFrame(fitAllPanesRaf);
+      fitAllPanesRaf = null;
+    }
+    performFitAllPanes();
+    return;
+  }
+  if (fitAllPanesRaf) {
+    return;
+  }
+  fitAllPanesRaf = window.requestAnimationFrame(() => {
+    fitAllPanesRaf = null;
+    performFitAllPanes();
+  });
 }
 
 function countLeaves(node, paneMap) {
@@ -746,8 +819,7 @@ function applyPaneFontToView(paneId, size) {
     return;
   }
   view.term.options.fontSize = nextSize;
-  view.fitAddon.fit();
-  schedulePaneResize(view);
+  fitPaneView(view);
 }
 
 const PANE_ACTION_COMPACT_BREAKPOINT = 1080;
@@ -857,6 +929,16 @@ function updatePaneActionLayout(paneId) {
     }
   }
 
+  const startFullLabel = meta.startBtn?.dataset?.fullLabel || "Start";
+  const layoutKey = `${level}|${autoEnabled ? "1" : "0"}|${startFullLabel}`;
+  if (meta._actionLayoutKey === layoutKey) {
+    if (!meta.actionsOverflowWrap.hidden && paneOverflowOpenPaneId === paneId && meta.actionsOverflowMenu.classList.contains("open")) {
+      window.requestAnimationFrame(() => positionPaneOverflowMenu(paneId));
+    }
+    return;
+  }
+  meta._actionLayoutKey = layoutKey;
+
   const allActionButtons = [
     meta.fontDownBtn,
     meta.fontUpBtn,
@@ -933,7 +1015,6 @@ function updatePaneActionLayout(paneId) {
   card.classList.toggle("pane-actions-compact", level > 0);
   card.classList.toggle("pane-actions-tight", level > 1);
 
-  const startFullLabel = meta.startBtn?.dataset?.fullLabel || "Start";
   if (meta.startBtn) {
     const isRestart = /^restart$/i.test(startFullLabel.trim());
     const isRestore = /^restore$/i.test(startFullLabel.trim());
@@ -982,8 +1063,7 @@ function setGlobalFontScale(scale, { resetPerPane = false } = {}) {
     }
     if (Number(view.term.options.fontSize) !== targetSize) {
       view.term.options.fontSize = targetSize;
-      view.fitAddon.fit();
-      schedulePaneResize(view);
+      fitPaneView(view);
     }
   }
 
@@ -1243,9 +1323,14 @@ function bindViewToSession(view, sessionId) {
     cancelAnimationFrame(view.flushRaf);
     view.flushRaf = null;
   }
+  if (view.fitRaf) {
+    cancelAnimationFrame(view.fitRaf);
+    view.fitRaf = null;
+  }
 
   view.pendingInput = "";
   view.outputQueue = "";
+  view.outputWriteInFlight = false;
   view.readBusy = false;
   view.sessionId = nextSession;
 
@@ -1290,9 +1375,7 @@ function restoreSessionTail(view, sessionId) {
   rpc("session.tail", { session_id: restoreId, max_bytes: 65536 })
     .then((res) => {
       if (res?.output && view.sessionId === restoreId && view.renderedSessionId === restoreId) {
-        view.hasOutput = true;
-        hidePaneOverlay(view);
-        view.term.write(normalizeTerminalOutput(res.output));
+        enqueueStreamOutput(view.paneId, res.output);
       }
     })
     .catch(() => {});
@@ -1320,17 +1403,7 @@ function startPanePolling(view) {
       });
       if (res?.output) {
         void maybeNotifyPromptFromOutput(activeSessionId, res.output, selectedWorkspace()?.id ?? null);
-        const buf = view.term.buffer.active;
-        const isScrolledUp = buf.viewportY < buf.baseY;
-        const savedViewportY = isScrolledUp ? buf.viewportY : null;
-        view.renderedSessionId = activeSessionId;
-        view.hasOutput = true;
-        hidePaneOverlay(view);
-        view.term.write(normalizeTerminalOutput(res.output), () => {
-          if (savedViewportY !== null) {
-            view.term.scrollToLine(savedViewportY);
-          }
-        });
+        enqueueStreamOutput(view.paneId, res.output);
       }
     } catch (err) {
       const message = String(err?.message ?? err);
@@ -1737,6 +1810,8 @@ function createPaneView(paneId, host) {
     inputFlushInFlight: false,
     flushRaf: null,
     outputQueue: "",
+    outputWriteInFlight: false,
+    fitRaf: null,
     resizeTimer: null,
     readBusy: false,
     detached: false,
@@ -1935,9 +2010,7 @@ function createPaneView(paneId, host) {
   view.imeBindTimer = setInterval(() => rebindImeTextarea(view), 800);
 
   const observer = new ResizeObserver(() => {
-    updatePaneActionLayout(paneId);
-    fitAddon.fit();
-    schedulePaneResize(view);
+    schedulePaneFit(view);
   });
   observer.observe(host);
   view.observer = observer;
@@ -1995,8 +2068,10 @@ function renderPaneSurface(force = false) {
         if (view.poller) { clearInterval(view.poller); view.poller = null; }
         if (view.flushTimer) { clearTimeout(view.flushTimer); view.flushTimer = null; }
         if (view.flushRaf) { cancelAnimationFrame(view.flushRaf); view.flushRaf = null; }
+        if (view.fitRaf) { cancelAnimationFrame(view.fitRaf); view.fitRaf = null; }
         view.readBusy = false;
         view.outputQueue = "";
+        view.outputWriteInFlight = false;
         view.inputFlushScheduled = false;
         view.inputFlushInFlight = false;
         view.pendingInput = "";
@@ -2069,9 +2144,7 @@ function renderPaneSurface(force = false) {
       rebindImeTextarea(existing);
       existing.observer?.disconnect();
       const observer = new ResizeObserver(() => {
-        updatePaneActionLayout(item.paneId);
-        existing.fitAddon.fit();
-        schedulePaneResize(existing);
+        schedulePaneFit(existing);
       });
       observer.observe(item.host);
       existing.observer = observer;
@@ -2084,7 +2157,7 @@ function renderPaneSurface(force = false) {
   applyPaneSelectionStyles();
   // Defer fit until after browser has applied layout, so xterm gets correct dimensions
   requestAnimationFrame(() => {
-    fitAllPanes();
+    fitAllPanes({ immediate: true });
   });
 }
 

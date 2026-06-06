@@ -163,13 +163,41 @@ npm run build
 npm run package:win
 ```
 
+This builds an NSIS setup wizard at:
+
+```text
+apps/desktop/dist/WinCMux-Setup-<version>.exe
+```
+
+The packaged app starts the WinCMux core process automatically. The installer includes the core runtime files and native terminal/database dependencies required by `node-pty` and `better-sqlite3`, so the desktop app can create the `\\.\pipe\wincmux-rpc` JSON-RPC pipe without a separate terminal.
+
+Before publishing a setup file, verify the packaged runtime:
+
+```bash
+npm run lint
+npm run package:win
+```
+
+Then launch `apps/desktop/dist/win-unpacked/WinCMux.exe` and confirm that workspace creation works. Core startup should also be visible in `%LOCALAPPDATA%\WinCMux\logs\core.log`.
+
 ## Runtime Paths
 
 | Item | Default |
 |---|---|
 | Database | `%APPDATA%\WinCMux\wincmux.db` |
-| Logs | `%LOCALAPPDATA%\WinCMux\logs` |
+| Performance log | `%LOCALAPPDATA%\WinCMux\logs\perf.jsonl` |
+| Main process log | `%LOCALAPPDATA%\WinCMux\logs\main.log` |
+| Core process log | `%LOCALAPPDATA%\WinCMux\logs\core.log` |
 | Named pipe | `\\.\pipe\wincmux-rpc` |
+
+If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the desktop process could not connect to the core RPC pipe. Check `main.log` and `core.log` first; they record the core entrypoint, runtime command, startup output, and crash/respawn details.
+
+## Recent Runtime Improvements
+
+- Terminal output is flushed through xterm sequentially so large command output does not pile up overlapping writes.
+- Pane fitting and resize work is coalesced with `requestAnimationFrame` to reduce repeated layout measurement while resizing panes or sidebars.
+- Packaged builds now avoid bundling stale `dist/win-unpacked` output into `app.asar`.
+- NSIS setup builds use the standard installer wizard (`oneClick=false`) and include the packaged core runtime resources.
 
 ## Roadmap
 

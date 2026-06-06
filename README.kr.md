@@ -180,13 +180,41 @@ npm run build
 npm run package:win
 ```
 
+이 명령은 NSIS 설치 마법사 방식의 Setup 파일을 만듭니다.
+
+```text
+apps/desktop/dist/WinCMux-Setup-<version>.exe
+```
+
+패키징된 앱은 WinCMux core 프로세스를 자동으로 실행합니다. 설치 파일에는 core runtime 파일과 `node-pty`, `better-sqlite3`에 필요한 native 터미널/DB 의존성이 포함됩니다. 따라서 별도 터미널에서 core를 켜지 않아도 desktop 앱이 `\\.\pipe\wincmux-rpc` JSON-RPC pipe를 만들고 연결할 수 있어야 합니다.
+
+Setup 파일을 배포하기 전에 다음 흐름을 확인합니다.
+
+```bash
+npm run lint
+npm run package:win
+```
+
+그 다음 `apps/desktop/dist/win-unpacked/WinCMux.exe`를 실행해 workspace 생성이 되는지 확인합니다. core 시작 상태는 `%LOCALAPPDATA%\WinCMux\logs\core.log`에서 볼 수 있습니다.
+
 ## 런타임 경로
 
 | 항목 | 기본 경로 |
 |---|---|
 | Database | `%APPDATA%\WinCMux\wincmux.db` |
-| Logs | `%LOCALAPPDATA%\WinCMux\logs` |
+| 성능 로그 | `%LOCALAPPDATA%\WinCMux\logs\perf.jsonl` |
+| Main 프로세스 로그 | `%LOCALAPPDATA%\WinCMux\logs\main.log` |
+| Core 프로세스 로그 | `%LOCALAPPDATA%\WinCMux\logs\core.log` |
 | Named pipe | `\\.\pipe\wincmux-rpc` |
+
+상태 표시줄에 `Error: connect ENOENT \\.\pipe\wincmux-rpc`가 보이면 desktop 프로세스가 core RPC pipe에 연결하지 못한 상태입니다. 먼저 `main.log`와 `core.log`를 확인하세요. 두 로그에는 core entrypoint, 실행 runtime, 시작 출력, crash/respawn 정보가 기록됩니다.
+
+## 최근 런타임 개선
+
+- xterm 출력은 이전 write가 끝난 뒤 다음 chunk를 쓰도록 순차 flush해 큰 출력에서 write queue가 겹치지 않게 했습니다.
+- pane fit과 resize 작업은 `requestAnimationFrame`으로 묶어 pane/사이드바 크기 조절 중 반복 layout 측정을 줄였습니다.
+- 패키징 시 오래된 `dist/win-unpacked` 산출물이 `app.asar` 안에 들어가지 않도록 구성했습니다.
+- NSIS setup은 일반 설치 마법사 방식(`oneClick=false`)으로 만들고, packaged core runtime resources를 포함합니다.
 
 ## Roadmap
 

@@ -79,6 +79,18 @@ function perfLogPath(): string {
   return path.join(dir, "perf.jsonl");
 }
 
+function appLogPath(name: "main.log" | "core.log"): string {
+  const localAppData = process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local");
+  const dir = path.join(localAppData, "WinCMux", "logs");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, name);
+}
+
+function appendAppLog(name: "main.log" | "core.log", message: string): void {
+  const line = `[${new Date().toISOString()}] ${message}\n`;
+  fs.appendFile(appLogPath(name), line, () => {});
+}
+
 function appendPerfLog(payload: unknown): void {
   const line = `${JSON.stringify(payload)}\n`;
   fs.appendFile(perfLogPath(), line, () => {});
@@ -849,12 +861,16 @@ async function stopNotifyStream(): Promise<void> {
 
 function resolveCoreEntrypoint(): string | null {
   const candidates = [
+    path.resolve(process.resourcesPath, "packages/core/dist/index.js"),
     path.resolve(__dirname, "../../../../packages/core/dist/index.js"),
-    path.resolve(process.cwd(), "packages/core/dist/index.js"),
-    path.resolve(process.resourcesPath, "packages/core/dist/index.js")
+    path.resolve(process.cwd(), "packages/core/dist/index.js")
   ];
 
   return candidates.find((p) => fs.existsSync(p)) ?? null;
+}
+
+function shouldSpawnCore(): boolean {
+  return process.env.WINCMUX_SPAWN_CORE === "1" || app.isPackaged;
 }
 
 function waitForPipeReady(timeoutMs = 20000): Promise<void> {
@@ -898,15 +914,19 @@ function waitForPipeReady(timeoutMs = 20000): Promise<void> {
 }
 
 async function ensureCoreReady(): Promise<void> {
-  if (process.env.WINCMUX_SPAWN_CORE !== "1") {
+  appendAppLog("main.log", `ensureCoreReady packaged=${app.isPackaged} envSpawn=${process.env.WINCMUX_SPAWN_CORE ?? ""}`);
+  if (!shouldSpawnCore()) {
+    appendAppLog("main.log", "core spawn skipped");
     return;
   }
 
   const entry = resolveCoreEntrypoint();
   if (!entry) {
+    appendAppLog("main.log", "core entrypoint not found");
     throw new Error("Unable to locate core dist/index.js");
   }
 
+  appendAppLog("main.log", `core entrypoint=${entry}`);
   const primaryRuntime = resolveCoreRuntime();
   startCoreProcess(entry, primaryRuntime);
 
@@ -954,31 +974,39 @@ function startCoreProcess(entry: string, runtime: { command: string; env: NodeJS
   }
 
   coreRuntimeHint = runtime.command;
+  appendAppLog("main.log", `starting core runtime=${runtime.command} entry=${entry}`);
   coreProc = spawn(runtime.command, [entry], {
     windowsHide: true,
-    stdio: ["ignore", "ignore", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"],
     env: runtime.env
   });
   coreExitReason = null;
   coreStderrTail = "";
+  coreProc.stdout?.setEncoding("utf8");
+  coreProc.stdout?.on("data", (chunk: string) => {
+    appendAppLog("core.log", chunk.trimEnd());
+  });
   coreProc.stderr?.setEncoding("utf8");
   coreProc.stderr?.on("data", (chunk: string) => {
     coreStderrTail = `${coreStderrTail}${chunk}`.slice(-4000).replace(/\s+/g, " ").trim();
+    appendAppLog("core.log", chunk.trimEnd());
     process.stderr.write(chunk);
   });
   coreProc.once("exit", (code, signal) => {
     coreExitReason = `core exited code=${code ?? "null"} signal=${signal ?? "null"}`;
-    if (process.env.WINCMUX_SPAWN_CORE === "1" && !appIsQuitting) {
+    appendAppLog("main.log", coreExitReason);
+    if (shouldSpawnCore() && !appIsQuitting) {
       setTimeout(() => { void respawnCore().catch(() => {}); }, 500);
     }
   });
   coreProc.once("error", (err) => {
     coreExitReason = `core spawn error: ${err.message}`;
+    appendAppLog("main.log", coreExitReason);
   });
 }
 
 function respawnCore(): Promise<void> {
-  if (process.env.WINCMUX_SPAWN_CORE !== "1") {
+  if (!shouldSpawnCore()) {
     return Promise.resolve();
   }
 
@@ -989,6 +1017,7 @@ function respawnCore(): Promise<void> {
   coreRespawnPromise = (async () => {
     const crashReason = coreExitReason;
     const crashStderr = coreStderrTail;
+    appendAppLog("main.log", `core respawn requested reason=${crashReason ?? ""} stderr=${crashStderr.slice(-500)}`);
     console.error("[core-crash] reason:", crashReason, "stderr:", crashStderr.slice(-500));
     broadcastToAllWindows("wincmux:core-status", { status: "respawning" });
     try {
