@@ -313,6 +313,7 @@ export class CoreEngine {
     const p = workspaceDeleteSchema.parse(params ?? {});
     const sessions = this.db.listSessions(p.id);
     for (const s of sessions) {
+      this.flushSessionOutputBatch(s.id);
       this.pty.close(s.id);
       this.drainBuffers.delete(s.id);
       this.tailBuffers.delete(s.id);
@@ -418,23 +419,6 @@ export class CoreEngine {
     pty.onData((chunk) => {
       this.appendSessionOutput(sessionId, chunk);
       this.queueSessionOutput(sessionId, p.workspace_id, chunk);
-      this.maybeIngestPromptPattern({
-        workspace_id: p.workspace_id,
-        session_id: sessionId,
-        output_chunk: chunk
-      });
-      this.maybeDeleteFailedAiResume({
-        workspace_id: p.workspace_id,
-        output_chunk: chunk
-      });
-      // Scan the recent tail of the buffer (not just the chunk) so resume markers
-      // split across multiple chunks are still detected.
-      const recentBuffer = this.tailBuffers.get(sessionId)?.slice(-2000) ?? chunk;
-      this.maybeRecordAiResume({
-        workspace_id: p.workspace_id,
-        session_id: sessionId,
-        output_chunk: recentBuffer
-      });
     });
     pty.onExit(({ exitCode }) => {
       this.db.updateSessionResult(sessionId, exitCode === 0 ? "exited" : "failed", new Date().toISOString(), exitCode);
@@ -448,12 +432,12 @@ export class CoreEngine {
           output_chunk: finalBuffer.slice(-3000)
         });
       }
+      this.flushSessionOutputBatch(sessionId);
       // Process has already exited — remove from map without re-killing
       this.pty.remove(sessionId);
       this.drainBuffers.delete(sessionId);
       this.clearPromptDetector(sessionId);
       this.seenAiResumeCmds.delete(sessionId);
-      this.flushSessionOutputBatch(sessionId);
       this.emitStreamEvent("session.exit", {
         session_id: sessionId,
         workspace_id: p.workspace_id,
@@ -479,12 +463,12 @@ export class CoreEngine {
   private sessionClose(params: unknown): { ok: true } {
     const p = sessionCloseSchema.parse(params ?? {});
     const workspaceId = this.sessionWorkspace.get(p.session_id) ?? null;
+    this.flushSessionOutputBatch(p.session_id);
     this.pty.close(p.session_id);
     this.drainBuffers.delete(p.session_id);
     this.tailBuffers.delete(p.session_id);
     this.clearPromptDetector(p.session_id);
     this.seenAiResumeCmds.delete(p.session_id);
-    this.flushSessionOutputBatch(p.session_id);
     this.db.updateSessionResult(p.session_id, "exited", new Date().toISOString(), 0);
     this.db.clearPaneSessionBindingBySession(p.session_id);
     if (workspaceId) {
@@ -669,6 +653,7 @@ export class CoreEngine {
   }): void {
     // Skip short chunks — resume patterns are always >50 chars
     if (input.output_chunk.length < 20) return;
+    if (!/\b(?:claude|codex)\b|--(?:resume|session)|\bsession\s+ID\b/i.test(input.output_chunk)) return;
     const marker = extractAiResumeMarker(input.output_chunk);
     if (!marker) return;
     // Dedup: same resume_cmd already recorded for this session
@@ -697,6 +682,19 @@ export class CoreEngine {
     }
   }
 
+  private shouldInspectPromptOutput(detectorState: PromptDetectorState, outputChunk: string): boolean {
+    if (
+      detectorState.assistant_session
+      || detectorState.response_active
+      || detectorState.ready_visible
+      || detectorState.user_turn_id > detectorState.notified_turn_id
+      || hasAssistantPromptContext(detectorState.buffer)
+    ) {
+      return true;
+    }
+    return /\b(?:claude|codex|gpt-\S+|sonnet|opus|run\s+shell\s+command|do\s+you\s+want|should\s+i|waiting|awaiting|need\s+(?:your\s+)?(?:input|response|confirmation|approval)|enter\s+to\s+confirm|esc\s+to\s+cancel|yes\s*\/\s*no|ready\s+to\s+help|how\s+can\s+i\s+help|what\s+would\s+you\s+like)\b|(?:대기\s*중입니다|도와드릴까요|입력을?\s*기다리고|응답을?\s*기다리고|실행|수정|변경|진행|계속|허용|승인)/i.test(outputChunk);
+  }
+
   private maybeIngestPromptPattern(input: {
     workspace_id: string;
     session_id: string;
@@ -704,6 +702,9 @@ export class CoreEngine {
   }): void {
     const detectorState = this.promptDetector.get(input.session_id);
     if (!detectorState) {
+      return;
+    }
+    if (!this.shouldInspectPromptOutput(detectorState, input.output_chunk)) {
       return;
     }
 
@@ -1089,6 +1090,29 @@ export class CoreEngine {
     }
   }
 
+  private processSessionOutputPatterns(sessionId: string, workspaceId: string, output: string): void {
+    if (!output) {
+      return;
+    }
+    this.maybeIngestPromptPattern({
+      workspace_id: workspaceId,
+      session_id: sessionId,
+      output_chunk: output
+    });
+    this.maybeDeleteFailedAiResume({
+      workspace_id: workspaceId,
+      output_chunk: output
+    });
+    // Scan recent tail, not only this batch, so resume markers split across
+    // multiple PTY chunks are still detected.
+    const recentBuffer = this.tailBuffers.get(sessionId)?.slice(-2000) ?? output;
+    this.maybeRecordAiResume({
+      workspace_id: workspaceId,
+      session_id: sessionId,
+      output_chunk: recentBuffer
+    });
+  }
+
   private flushSessionOutputBatch(sessionId: string): void {
     const batch = this.sessionOutputBatches.get(sessionId);
     if (!batch) {
@@ -1100,6 +1124,7 @@ export class CoreEngine {
     if (!output) {
       return;
     }
+    this.processSessionOutputPatterns(sessionId, batch.workspace_id, output);
     this.emitStreamEvent("session.output", {
       session_id: sessionId,
       workspace_id: batch.workspace_id,

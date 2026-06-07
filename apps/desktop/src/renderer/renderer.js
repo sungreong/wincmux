@@ -604,36 +604,62 @@ async function runShellSession(workspaceId, cwd) {
   const fallback = preferred.toLowerCase().includes("pwsh")
     ? "powershell.exe"
     : "pwsh.exe";
-  const argsFor = (cmd) =>
-    cmd.toLowerCase().includes("powershell.exe")
-      ? [
-          "-NoLogo",
-          "-NoExit",
-          "-Command",
-          "chcp.com 65001 > $null; [Console]::InputEncoding=[Text.UTF8Encoding]::new(); [Console]::OutputEncoding=[Text.UTF8Encoding]::new()",
-        ]
-      : [
-          "-NoLogo",
-          "-NoExit",
-          "-Command",
-          "$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); [Console]::InputEncoding=[Text.UTF8Encoding]::new(); if (Get-Variable PSStyle -ErrorAction SilentlyContinue) { $PSStyle.OutputRendering = 'Ansi' }",
-        ];
+  const argsFor = (cmd) => {
+    const lower = cmd.toLowerCase();
+    if (lower.includes("powershell.exe") || lower === "powershell") {
+      return [
+        "-NoLogo",
+        "-NoProfile",
+        "-NoExit",
+        "-Command",
+        "chcp.com 65001 > $null; [Console]::InputEncoding=[Text.UTF8Encoding]::new(); [Console]::OutputEncoding=[Text.UTF8Encoding]::new()",
+      ];
+    }
+    if (lower.includes("pwsh")) {
+      return [
+        "-NoLogo",
+        "-NoProfile",
+        "-NoExit",
+        "-Command",
+        "$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); [Console]::InputEncoding=[Text.UTF8Encoding]::new(); if (Get-Variable PSStyle -ErrorAction SilentlyContinue) { $PSStyle.OutputRendering = 'Ansi' }",
+      ];
+    }
+    if (lower.includes("cmd.exe") || lower === "cmd") {
+      return ["/d", "/k", "chcp 65001 > nul"];
+    }
+    return [];
+  };
   try {
+    const started = performance.now();
     const result = await rpc("session.run", {
       workspace_id: workspaceId,
       cmd: preferred,
       args: argsFor(preferred),
       cwd,
     });
+    logPerf("session.start.latency", {
+      workspace_id: workspaceId,
+      cmd: preferred,
+      default_shell: true,
+      latency_ms: Number((performance.now() - started).toFixed(2))
+    });
     rememberShellCommand(preferred);
     return result;
   } catch (primaryErr) {
     try {
+      const fallbackStarted = performance.now();
       const fallbackResult = await rpc("session.run", {
         workspace_id: workspaceId,
         cmd: fallback,
         args: argsFor(fallback),
         cwd,
+      });
+      logPerf("session.start.latency", {
+        workspace_id: workspaceId,
+        cmd: fallback,
+        default_shell: true,
+        fallback_from: preferred,
+        latency_ms: Number((performance.now() - fallbackStarted).toFixed(2))
       });
       setStatus(`Shell fallback: ${preferred} -> ${fallback}`);
       return fallbackResult;
@@ -701,11 +727,20 @@ async function startSessionForPane(paneId, options = {}) {
   let created;
   try {
     if (effectiveCmd) {
+      const started = performance.now();
       created = await rpc("session.run", {
         workspace_id: workspaceId,
         cmd: effectiveCmd,
         args: effectiveArgs ?? [],
         cwd: effectiveCwd ?? ws.path,
+      });
+      logPerf("session.start.latency", {
+        workspace_id: workspaceId,
+        pane_id: paneId,
+        cmd: effectiveCmd,
+        default_shell: false,
+        restore: Boolean(restoreFromDormant),
+        latency_ms: Number((performance.now() - started).toFixed(2))
       });
     } else {
       created = await runShellSession(workspaceId, ws.path);
