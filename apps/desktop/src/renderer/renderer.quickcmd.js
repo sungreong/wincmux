@@ -155,17 +155,22 @@ function positionQuickCommandPanel(paneId) {
 
   const anchorRect = anchor.getBoundingClientRect();
   const panelRect = panel.getBoundingClientRect();
-  const panelWidth = Math.min(panelRect.width || 420, Math.max(280, window.innerWidth - margin * 2));
+  const paneRect = state.paneCards.get(paneId)?.getBoundingClientRect();
+  const boundsLeft = Math.max(margin, paneRect ? paneRect.left + 8 : margin);
+  const boundsRight = Math.min(window.innerWidth - margin, paneRect ? paneRect.right - 8 : window.innerWidth - margin);
+  const availableWidth = Math.max(180, boundsRight - boundsLeft);
+  const panelWidth = Math.min(panelRect.width || 420, availableWidth);
+  panel.style.width = `${panelWidth}px`;
+  const nextPanelRect = panel.getBoundingClientRect();
 
   let left = anchorRect.right - panelWidth;
-  left = Math.max(margin, Math.min(left, window.innerWidth - panelWidth - margin));
+  left = Math.max(boundsLeft, Math.min(left, boundsRight - panelWidth));
 
   let top = anchorRect.bottom + 6;
-  if (top + panelRect.height > window.innerHeight - margin) {
-    top = Math.max(margin, anchorRect.top - panelRect.height - 6);
+  if (top + nextPanelRect.height > window.innerHeight - margin) {
+    top = Math.max(margin, anchorRect.top - nextPanelRect.height - 6);
   }
 
-  panel.style.width = `${panelWidth}px`;
   panel.style.left = `${Math.round(left)}px`;
   panel.style.top = `${Math.round(top)}px`;
   panel.style.visibility = "";

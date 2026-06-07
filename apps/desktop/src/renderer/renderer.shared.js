@@ -1091,8 +1091,45 @@ function logPerf(event, payload = {}) {
     event,
     ...payload
   };
-  window.wincmux.perfLog?.(line).catch(() => {});
+  enqueuePerfLog(line);
 }
+
+const PERF_LOG_FLUSH_DELAY_MS = 250;
+const PERF_LOG_BATCH_SIZE = 64;
+const PERF_LOG_QUEUE_LIMIT = 512;
+let perfLogTimer = null;
+const perfLogQueue = [];
+
+function enqueuePerfLog(line) {
+  if (typeof window.wincmux?.perfLog !== "function") {
+    return;
+  }
+  perfLogQueue.push(line);
+  if (perfLogQueue.length > PERF_LOG_QUEUE_LIMIT) {
+    perfLogQueue.splice(0, perfLogQueue.length - PERF_LOG_QUEUE_LIMIT);
+  }
+  if (perfLogQueue.length >= PERF_LOG_BATCH_SIZE) {
+    flushPerfLogQueue();
+    return;
+  }
+  if (!perfLogTimer) {
+    perfLogTimer = window.setTimeout(flushPerfLogQueue, PERF_LOG_FLUSH_DELAY_MS);
+  }
+}
+
+function flushPerfLogQueue() {
+  if (perfLogTimer) {
+    clearTimeout(perfLogTimer);
+    perfLogTimer = null;
+  }
+  if (perfLogQueue.length === 0 || typeof window.wincmux?.perfLog !== "function") {
+    return;
+  }
+  const batch = perfLogQueue.splice(0, perfLogQueue.length);
+  window.wincmux.perfLog(batch).catch(() => {});
+}
+
+window.addEventListener("beforeunload", flushPerfLogQueue);
 
 function logIme(event, payload = {}) {
   if (!state.terminal.ime_debug) {

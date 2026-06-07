@@ -92,7 +92,11 @@ function appendAppLog(name: "main.log" | "core.log", message: string): void {
 }
 
 function appendPerfLog(payload: unknown): void {
-  const line = `${JSON.stringify(payload)}\n`;
+  const rows = Array.isArray(payload) ? payload : [payload];
+  if (rows.length === 0) {
+    return;
+  }
+  const line = rows.map((row) => JSON.stringify(row)).join("\n") + "\n";
   fs.appendFile(perfLogPath(), line, () => {});
 }
 

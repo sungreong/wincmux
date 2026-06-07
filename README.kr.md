@@ -219,12 +219,13 @@ npm run package:win
 - 터미널 출력 normalization은 깨진 escape marker 후보가 있을 때만 regex replace를 실행해 renderer/core detector의 chunk당 작업을 줄였습니다.
 - notification list는 scroll 때마다 전체 DOM을 다시 만들지 않게 해 터미널이 바쁜 동안 불필요한 리렌더를 없앴습니다.
 - renderer webContents가 destroyed 되면 persistent stream socket도 닫아 window lifecycle 변경 뒤 stale stream send가 남지 않게 했습니다.
-- pane overflow와 quick command 메뉴는 body-level portal로 띄워 compact pane이나 split 경계에서 UI가 잘리지 않게 했습니다.
+- pane overflow와 quick command 메뉴는 high-priority body-level portal로 띄우고 소유 pane 경계 안으로 위치를 제한해 compact pane이나 split 경계에서 UI가 잘리거나 가려지지 않게 했습니다.
 - assistant prompt notification은 `press enter`가 포함된 Codex/npm 업데이트 로그를 억제해 CLI 업데이트 중 반복 native toast 오탐을 막았습니다.
 - pane binding refresh는 unread notification과 known session을 refresh당 한 번만 인덱싱해 pane마다 전체 목록을 다시 훑지 않게 했습니다.
 - core stream event는 emit당 한 번만 직렬화하고 socket당 한 번만 전송해 subscription이 겹칠 때 중복 output을 피합니다.
 - renderer terminal output flush는 공유 frame queue와 프레임당 pane budget을 사용해 많은 pane이 같은 프레임에 xterm write를 몰아넣지 않게 했습니다.
 - notification target parsing은 notification row별로 캐시해 workspace, notification, pane badge 렌더에서 재사용합니다.
+- renderer performance log는 IPC/file append 전에 batch로 묶어 input flush metric처럼 자주 찍히는 로그가 키 입력마다 IPC 부담을 만들지 않게 했습니다.
 - core drain/tail 출력 버퍼도 제한 크기의 chunk buffer로 바꿔 PTY 출력이 들어오는 동안 반복 문자열 concat/slice가 일어나지 않게 했습니다.
 - core stream batch는 flush 지연을 낮추고 큰 출력 burst는 즉시 flush해 interactive latency를 낮췄습니다.
 - core notification/resume detector는 stream batch 단위로 실행하고 일반 shell 출력은 fast-path로 건너뛰어 다중 터미널의 regex 작업량을 줄였습니다.

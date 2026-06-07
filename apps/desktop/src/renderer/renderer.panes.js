@@ -1129,19 +1129,25 @@ function positionPaneOverflowMenu(paneId) {
   menu.style.visibility = "hidden";
 
   const rect = menu.getBoundingClientRect();
-  const width = Math.min(rect.width || 220, Math.max(180, window.innerWidth - margin * 2));
+  const paneRect = state.paneCards.get(paneId)?.getBoundingClientRect();
+  const boundsLeft = Math.max(margin, paneRect ? paneRect.left + 8 : margin);
+  const boundsRight = Math.min(window.innerWidth - margin, paneRect ? paneRect.right - 8 : window.innerWidth - margin);
+  const availableWidth = Math.max(160, boundsRight - boundsLeft);
+  const width = Math.min(rect.width || 220, availableWidth);
+  menu.style.minWidth = `${Math.min(250, width)}px`;
+  menu.style.width = `${Math.round(width)}px`;
+  const nextRect = menu.getBoundingClientRect();
 
   let left = anchor.right - width;
-  left = Math.max(margin, Math.min(left, window.innerWidth - width - margin));
+  left = Math.max(boundsLeft, Math.min(left, boundsRight - width));
 
   let top = anchor.bottom + 6;
-  if (top + rect.height > window.innerHeight - margin) {
-    top = Math.max(margin, anchor.top - rect.height - 6);
+  if (top + nextRect.height > window.innerHeight - margin) {
+    top = Math.max(margin, anchor.top - nextRect.height - 6);
   }
 
   menu.style.left = `${Math.round(left)}px`;
   menu.style.top = `${Math.round(top)}px`;
-  menu.style.width = `${Math.round(width)}px`;
   menu.style.visibility = "";
 }
 
@@ -1157,6 +1163,7 @@ function closePaneOverflowMenus(exceptPaneId = null) {
     meta.actionsOverflowMenu.style.left = "";
     meta.actionsOverflowMenu.style.top = "";
     meta.actionsOverflowMenu.style.width = "";
+    meta.actionsOverflowMenu.style.minWidth = "";
     meta.actionsOverflowMenu.style.visibility = "";
     meta.actionsOverflowMenu.style.maxHeight = "";
     meta.actionsOverflowBtn?.setAttribute("aria-expanded", "false");
@@ -1979,6 +1986,7 @@ function createPaneLeaf(node, hosts) {
     actionsOverflowMenu.style.left = "";
     actionsOverflowMenu.style.top = "";
     actionsOverflowMenu.style.width = "";
+    actionsOverflowMenu.style.minWidth = "";
     actionsOverflowMenu.style.visibility = "";
     actionsOverflowMenu.style.maxHeight = "";
     paneOverflowOpenPaneId = null;

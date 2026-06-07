@@ -202,12 +202,13 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Terminal output normalization skips regex replacement unless malformed escape markers are present, reducing per-chunk renderer/core detector work.
 - The notification list no longer re-renders on scroll, avoiding unnecessary DOM rebuilds while terminals are active.
 - Persistent stream sockets are closed when their renderer webContents is destroyed, avoiding stale stream sends after window lifecycle changes.
-- Pane overflow and quick command menus render through body-level portals so compact panes and split boundaries do not clip the UI.
+- Pane overflow and quick command menus render through high-priority body-level portals and clamp to the owning pane bounds so compact panes and split boundaries do not clip or hide the UI.
 - Assistant prompt notifications suppress Codex/npm update logs that mention pressing enter, avoiding repeated false native toasts during CLI updates.
 - Pane binding refresh indexes unread notifications and known sessions once per refresh instead of rescanning them for every pane.
 - Core stream events are serialized once per emit and sent once per socket, avoiding duplicate output when subscriptions overlap.
 - Renderer terminal output flushes now use a shared frame queue with a per-frame pane budget, preventing many panes from writing to xterm in the same frame.
 - Notification target parsing is cached per notification row and reused during workspace, notification, and pane badge renders.
+- Renderer performance logs are batched before IPC/file append so high-frequency input flush metrics do not add per-keystroke IPC overhead.
 - Core drain/tail output buffers also use bounded chunk buffers, avoiding repeated string concat/slice while PTY output is still arriving.
 - Core stream batches use a shorter flush delay and flush immediately for large output bursts to lower interactive latency.
 - Core notification/resume detectors run on stream batches and skip generic shell output with a fast-path filter, reducing regex work across many terminals.
