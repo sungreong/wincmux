@@ -149,6 +149,9 @@ const activeWorkspacePing = {
   workspaceId: null,
   sentAt: 0
 };
+const activeContextSync = {
+  key: null
+};
 
 function dormantPaneSession(paneId) {
   return paneId ? (state.dormantPaneSessions[paneId] ?? null) : null;
@@ -420,15 +423,17 @@ function activeSessionId() {
 }
 
 async function syncActiveContext() {
-  if (typeof window.wincmux?.updateActiveContext !== "function") {
-    return;
-  }
-  await window.wincmux.updateActiveContext({
+  const payload = {
     workspace_id: state.selectedWorkspaceId ?? null,
     pane_id: state.selectedPaneId ?? null,
     session_id: activeSessionId(),
     app_focused: document.hasFocus()
-  }).catch(() => {});
+  };
+  const contextKey = `${payload.workspace_id ?? ""}|${payload.pane_id ?? ""}|${payload.session_id ?? ""}|${payload.app_focused ? "1" : "0"}`;
+  if (typeof window.wincmux?.updateActiveContext === "function" && activeContextSync.key !== contextKey) {
+    activeContextSync.key = contextKey;
+    await window.wincmux.updateActiveContext(payload).catch(() => {});
+  }
   const now = Date.now();
   if (
     state.selectedWorkspaceId &&

@@ -365,11 +365,17 @@ async function rpc(method, params = {}) {
   return window.wincmux.rpc({ method, params });
 }
 
+let lastUnreadBadgeCount = null;
+
 async function updateUnreadBadge(count) {
   if (typeof window.wincmux?.setUnreadBadge !== "function") {
     return;
   }
   const normalized = Number.isFinite(Number(count)) ? Math.max(0, Math.floor(Number(count))) : 0;
+  if (lastUnreadBadgeCount === normalized) {
+    return;
+  }
+  lastUnreadBadgeCount = normalized;
   await window.wincmux.setUnreadBadge(normalized).catch(() => {});
 }
 

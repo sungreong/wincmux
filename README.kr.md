@@ -229,6 +229,7 @@ npm run package:win
 - renderer notification refresh는 notification array별 workspace/pane/session unread map을 한 번 만들고 workspace badge, notification grouping, pane badge에서 재사용해 알림 burst 중 반복 scan을 줄였습니다.
 - pane binding refresh는 pane별 visible-state signature를 보관해 반복 refresh 중 변하지 않은 DOM write, session rebind, action layout 측정을 건너뜁니다.
 - workspace 전환은 unread notification을 불러올 때 즉시 pane binding을 다시 만들지 않고, 준비된 unread UI 갱신을 메인 pane refresh에 합쳐 중복 refresh를 줄였습니다.
+- renderer IPC는 active context와 unread badge 값이 바뀌지 않은 경우 preload/main 왕복을 건너뛰어 pane 선택, focus 변경, notification refresh 중 반복 호출을 줄였습니다.
 - renderer performance log는 IPC/file append 전에 batch로 묶어 input flush metric처럼 자주 찍히는 로그가 키 입력마다 IPC 부담을 만들지 않게 했습니다.
 - tail 복원 중 모아 두는 live stream output도 제한 크기의 chunk queue로 바꿔 pane 재연결이나 화면 전환 중 반복 문자열 concat/slice가 생기지 않게 했습니다.
 - main에서 renderer로 보내는 stream event는 짧은 IPC window로 batch하고, 같은 session의 인접 output은 전달 전에 합쳐 다중 터미널 부하에서 Electron IPC wake-up을 줄였습니다.

@@ -212,6 +212,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Renderer notification refresh builds shared workspace/pane/session unread maps once per notification array and reuses them across workspace badges, notification grouping, and pane badges.
 - Pane binding refresh now keeps a per-pane visible-state signature and skips unchanged DOM writes, session rebinds, and action layout measurement during repeated refreshes.
 - Workspace switches load unread notifications without immediately rebuilding pane bindings, then fold the unread UI update into the main pane refresh when it is ready.
+- Renderer IPC now skips unchanged active-context and unread-badge updates, reducing repeated preload/main round trips during pane selection, focus changes, and notification refreshes.
 - Renderer performance logs are batched before IPC/file append so high-frequency input flush metrics do not add per-keystroke IPC overhead.
 - Deferred live stream output collected during tail restore now uses a bounded chunk queue, avoiding repeated string concat/slice while panes reconnect or screens switch.
 - Main-to-renderer stream events are batched over a short IPC window, and adjacent output for the same session is merged before delivery to reduce Electron IPC wake-ups under multi-terminal load.
