@@ -23,6 +23,7 @@ const INPUT_PERF_SUMMARY_MAX_SAMPLES = 32;
 const IME_COMMIT_WAIT_MS = 80;
 const IME_DUPLICATE_WINDOW_MS = 220;
 const OUTPUT_FLUSH_CHUNK_SIZE = 16_384;
+const OUTPUT_FAST_FLUSH_MAX_CHARS = 4_096;
 const OUTPUT_FLUSH_MAX_PANES_PER_FRAME = 3;
 const OUTPUT_QUEUE_LIMIT = 256_000;
 const OUTPUT_QUEUE_KEEP = 180_000;
@@ -41,6 +42,7 @@ const STREAM_TAIL_OVERLAP_LIMIT = 16_384;
 const PANE_PORTAL_MARGIN = 10;
 let fitAllPanesRaf = null;
 let outputFlushRaf = null;
+let outputFastFlushQueued = false;
 let paneResizeSyncTimer = null;
 let paneResizeSyncRaf = null;
 const outputFlushPaneQueue = new Set();
@@ -769,7 +771,58 @@ function schedulePaneOutputFlush(view) {
   }
   view.outputFlushQueued = true;
   outputFlushPaneQueue.add(view.paneId);
+  if (canFastFlushPaneOutput(view)) {
+    scheduleOutputFastFlush();
+    return;
+  }
   scheduleOutputFlushFrame();
+}
+
+function canFastFlushPaneOutput(view) {
+  return Boolean(
+    view
+    && view.paneId === state.selectedPaneId
+    && !view.outputWriteInFlight
+    && view.outputQueueLength > 0
+    && view.outputQueueLength <= OUTPUT_FAST_FLUSH_MAX_CHARS
+  );
+}
+
+function scheduleOutputFastFlush() {
+  if (outputFastFlushQueued) {
+    return;
+  }
+  outputFastFlushQueued = true;
+  const run = () => {
+    outputFastFlushQueued = false;
+    flushFastPaneOutput();
+  };
+  if (typeof queueMicrotask === "function") {
+    queueMicrotask(run);
+  } else {
+    Promise.resolve().then(run).catch(() => {});
+  }
+}
+
+function flushFastPaneOutput() {
+  const paneId = state.selectedPaneId ?? null;
+  if (!paneId || !outputFlushPaneQueue.has(paneId)) {
+    if (outputFlushPaneQueue.size > 0) {
+      scheduleOutputFlushFrame();
+    }
+    return;
+  }
+  const view = state.paneViews.get(paneId);
+  if (!canFastFlushPaneOutput(view)) {
+    scheduleOutputFlushFrame();
+    return;
+  }
+  outputFlushPaneQueue.delete(paneId);
+  view.outputFlushQueued = false;
+  flushPaneOutput(paneId);
+  if (outputFlushPaneQueue.size > 0) {
+    scheduleOutputFlushFrame();
+  }
 }
 
 function scheduleOutputFlushFrame() {

@@ -236,6 +236,7 @@ npm run package:win
 - pane 이동 hover와 선택 스타일은 가능한 경우 변경된 카드만 갱신해 고빈도 pointer move 중 전체 pane-card class churn을 피합니다.
 - renderer performance log는 IPC/file append 전에 batch로 묶어 input flush metric처럼 자주 찍히는 로그가 키 입력마다 IPC 부담을 만들지 않게 했습니다.
 - tail 복원 중 모아 두는 live stream output도 제한 크기의 chunk queue로 바꿔 pane 재연결이나 화면 전환 중 반복 문자열 concat/slice가 생기지 않게 했습니다.
+- renderer output flush는 선택된 pane의 작은 출력만 shared frame budget 전에 microtask fast gate로 먼저 처리해 echo/prompt 레이턴시를 줄이고, 큰 출력과 background pane은 기존 RAF scheduler의 공정성을 유지합니다.
 - main에서 renderer로 보내는 stream event는 짧은 IPC window로 batch하고, 같은 session의 인접 output은 전달 전에 합쳐 다중 터미널 부하에서 Electron IPC wake-up을 줄였습니다.
 - focus된 active session의 작은 stream output은 main에서 renderer로 `setImmediate` fast flush해 interactive echo/prompt 갱신의 batch timer 지연을 줄이고, 큰 출력과 background 출력은 계속 batch합니다.
 - core session output은 `session.write` 직후 짧은 시간 안에 들어온 작은 PTY output만 빠르게 flush해 main IPC 이전 단계의 echo/prompt latency를 줄이고, unrelated background 출력은 일반 batch timer를 유지합니다.

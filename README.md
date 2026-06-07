@@ -228,6 +228,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Renderer `session.output` handling now routes through a direct visible-session output fast path, avoiding per-event option objects and duplicate pane lookup work on high-volume terminal streams.
 - Electron main stream batching now stores merged `session.output` payloads as chunks and joins once before IPC send, avoiding repeated large-string copies during bursty terminal output.
 - Renderer output enqueue avoids redundant hidden-overlay DOM writes and summarizes queue-drop perf logs during sustained output overload, reducing UI-thread churn while preserving overload visibility.
+- Renderer output flushing now fast-gates small selected-pane output through a microtask before the shared frame budget, reducing echo/prompt latency while leaving large/background panes on the fair RAF scheduler.
 - Main-to-renderer stream events are batched over a short IPC window, and adjacent output for the same session is merged before delivery to reduce Electron IPC wake-ups under multi-terminal load.
 - Renderer stream output routing now uses cached session-to-pane lookup maps, avoiding a pane scan for every output event while keeping stale cache validation.
 - Cached stream output routing now uses a fast session/view check on hits and reserves DOM attached validation for lookup rebuilds, reducing per-output event DOM work.
