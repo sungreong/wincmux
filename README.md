@@ -208,6 +208,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Pane binding refresh indexes unread notifications and known sessions once per refresh instead of rescanning them for every pane.
 - Core stream events are serialized once per emit and sent once per socket, avoiding duplicate output when subscriptions overlap.
 - Renderer terminal output flushes now use a shared frame queue with a per-frame pane budget, preventing many panes from writing to xterm in the same frame.
+- The renderer output flush queue prioritizes the selected pane within each frame budget so the pane under active attention is less likely to sit behind background output bursts.
 - Notification target parsing is cached per notification row and reused during workspace, notification, and pane badge renders.
 - Renderer notification refresh builds shared workspace/pane/session unread maps once per notification array and reuses them across workspace badges, notification grouping, and pane badges.
 - Pane binding refresh now keeps a per-pane visible-state signature and skips unchanged DOM writes, session rebinds, and action layout measurement during repeated refreshes.

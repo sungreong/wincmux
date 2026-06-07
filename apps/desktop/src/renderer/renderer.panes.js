@@ -656,17 +656,24 @@ function scheduleOutputFlushFrame() {
 function flushQueuedPaneOutputs() {
   outputFlushRaf = null;
   let processed = 0;
-  for (const paneId of outputFlushPaneQueue) {
+  const flushQueuedPane = (paneId) => {
     outputFlushPaneQueue.delete(paneId);
     const view = state.paneViews.get(paneId);
     if (view) {
       view.outputFlushQueued = false;
     }
     if (!view || !view.outputQueueLength || view.outputWriteInFlight) {
-      continue;
+      return false;
     }
     flushPaneOutput(paneId);
-    processed += 1;
+    return true;
+  };
+  const selectedPaneId = state.selectedPaneId ?? null;
+  if (selectedPaneId && outputFlushPaneQueue.has(selectedPaneId)) {
+    processed += flushQueuedPane(selectedPaneId) ? 1 : 0;
+  }
+  for (const paneId of outputFlushPaneQueue) {
+    processed += flushQueuedPane(paneId) ? 1 : 0;
     if (processed >= OUTPUT_FLUSH_MAX_PANES_PER_FRAME) {
       break;
     }

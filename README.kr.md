@@ -225,6 +225,7 @@ npm run package:win
 - pane binding refresh는 unread notification과 known session을 refresh당 한 번만 인덱싱해 pane마다 전체 목록을 다시 훑지 않게 했습니다.
 - core stream event는 emit당 한 번만 직렬화하고 socket당 한 번만 전송해 subscription이 겹칠 때 중복 output을 피합니다.
 - renderer terminal output flush는 공유 frame queue와 프레임당 pane budget을 사용해 많은 pane이 같은 프레임에 xterm write를 몰아넣지 않게 했습니다.
+- renderer output flush queue는 프레임 budget 안에서 선택된 pane을 먼저 처리해 사용자가 보고 있는 pane이 background 출력 burst 뒤에 밀릴 가능성을 줄였습니다.
 - notification target parsing은 notification row별로 캐시해 workspace, notification, pane badge 렌더에서 재사용합니다.
 - renderer notification refresh는 notification array별 workspace/pane/session unread map을 한 번 만들고 workspace badge, notification grouping, pane badge에서 재사용해 알림 burst 중 반복 scan을 줄였습니다.
 - pane binding refresh는 pane별 visible-state signature를 보관해 반복 refresh 중 변하지 않은 DOM write, session rebind, action layout 측정을 건너뜁니다.
