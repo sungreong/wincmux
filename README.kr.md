@@ -236,6 +236,7 @@ npm run package:win
 - renderer fallback polling은 이전 `session.read`가 끝난 뒤 다음 read를 예약하고 pane별 stable jitter로 분산하며, 입력 직후에는 poll을 앞당겨 non-stream 모드에서도 동시 read spike 없이 응답성을 유지합니다.
 - renderer IME textarea binding은 pane별 800ms timer 대신 focus와 제한된 mutation observer를 사용해 한글 조합 처리는 유지하면서 많은 터미널의 idle DOM polling을 없앴습니다.
 - renderer PTY resize sync는 shared queue와 프레임당 pane budget을 사용해 split, equalize, window resize 직후 모든 pane이 동시에 resize RPC를 보내는 burst를 줄였습니다.
+- split pane divider drag는 flex update를 `requestAnimationFrame`으로 묶어 pane 크기 조절 중 layout churn을 줄였습니다.
 - core stream fan-out은 subscription을 topic과 workspace/session scope로 인덱싱해 session output batch마다 모든 subscription을 훑지 않고 matching socket으로 라우팅합니다.
 - core AI resume detector는 current output batch에 resume 단서가 있을 때만 recent tail buffer를 복사해 일반 shell 출력에서 tail join 비용을 피하면서 split resume marker 감지는 유지합니다.
 - core prompt/completion detector는 큰 output batch에서 ANSI normalization 전에 tail만 검사해 output 끝의 prompt 감지는 유지하면서 대량 터미널 burst 중 full-batch scan을 피합니다.

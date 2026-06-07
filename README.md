@@ -219,6 +219,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Renderer fallback polling now schedules the next `session.read` only after the previous read settles, staggers panes with stable jitter, and accelerates after input so non-stream mode avoids synchronized read spikes without feeling sluggish.
 - Renderer IME textarea binding now uses focus and a targeted mutation observer instead of a per-pane 800ms timer, preserving Korean composition handling while removing idle DOM polling across many terminals.
 - Renderer PTY resize sync now uses a shared queue with a per-frame pane budget, so split, equalize, and window resize changes do not send resize RPC bursts for every pane at once.
+- Split-pane divider dragging now batches flex updates through `requestAnimationFrame`, reducing layout churn while panes are being resized.
 - Core stream fan-out indexes subscriptions by topic plus workspace/session scope, so session output is routed to matching sockets without scanning every subscription on each batch.
 - Core AI resume detection now probes the current output batch before copying the recent tail buffer, avoiding tail joins for ordinary shell output while still catching split resume markers.
 - Core prompt/completion detection now inspects only the tail of large output batches before ANSI normalization, preserving end-of-output prompts while avoiding full-batch scans during huge terminal bursts.

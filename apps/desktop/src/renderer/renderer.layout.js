@@ -38,24 +38,43 @@ function makeSplitResizable(splitEl, firstEl, secondEl, divider, direction, spli
     const totalSize = direction === "horizontal"
       ? firstRect.width + secondRect.width
       : firstRect.height + secondRect.height;
+    let pendingFirstSize = startFirstSize;
+    let dragRaf = null;
 
     splitEl.classList.add("resizing");
+
+    const flushDragResize = () => {
+      dragRaf = null;
+      const nextFirst = pendingFirstSize;
+      firstEl.style.flex = `0 0 ${nextFirst}px`;
+      secondEl.style.flex = "1 1 0";
+      fitAllPanes();
+    };
+
+    const scheduleDragResize = () => {
+      if (dragRaf) {
+        return;
+      }
+      dragRaf = window.requestAnimationFrame(flushDragResize);
+    };
 
     const onMove = (moveEvent) => {
       const delta = direction === "horizontal"
         ? moveEvent.clientX - startX
         : moveEvent.clientY - startY;
 
-      const nextFirst = Math.max(minSize, Math.min(totalSize - minSize, startFirstSize + delta));
-      firstEl.style.flex = `0 0 ${nextFirst}px`;
-      secondEl.style.flex = "1 1 0";
-      fitAllPanes();
+      pendingFirstSize = Math.max(minSize, Math.min(totalSize - minSize, startFirstSize + delta));
+      scheduleDragResize();
     };
 
     const onUp = () => {
       splitEl.classList.remove("resizing");
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      if (dragRaf) {
+        window.cancelAnimationFrame(dragRaf);
+        flushDragResize();
+      }
       const firstRect = firstEl.getBoundingClientRect();
       const secondRect = secondEl.getBoundingClientRect();
       const total = direction === "horizontal"
