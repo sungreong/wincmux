@@ -260,6 +260,9 @@ export class CoreEngine {
   private readonly sessionWorkspace = new Map<string, string>();
   private readonly streamSubscriptions = new Map<string, StreamSubscription>();
   private readonly socketSubscriptions = new Map<net.Socket, Set<string>>();
+  private readonly streamGlobalSubscriptions = new Map<StreamTopic, Set<string>>();
+  private readonly streamWorkspaceSubscriptions = new Map<StreamTopic, Map<string, Set<string>>>();
+  private readonly streamSessionSubscriptions = new Map<StreamTopic, Map<string, Set<string>>>();
   private readonly sessionOutputBatches = new Map<string, SessionOutputBatch>();
   private readonly gitNextDue = new Map<string, number>();
   // Tracks resume_cmd strings already recorded per PTY session to avoid per-chunk re-upserts
@@ -308,6 +311,9 @@ export class CoreEngine {
     this.promptDetector.clear();
     this.streamSubscriptions.clear();
     this.socketSubscriptions.clear();
+    this.streamGlobalSubscriptions.clear();
+    this.streamWorkspaceSubscriptions.clear();
+    this.streamSessionSubscriptions.clear();
     this.sessionOutputBatches.clear();
     this.gitNextDue.clear();
     this.server.close();
@@ -700,6 +706,7 @@ export class CoreEngine {
     };
 
     this.streamSubscriptions.set(subscriptionId, subscription);
+    this.addSubscriptionIndex(subscription);
     let socketSubs = this.socketSubscriptions.get(socket);
     if (!socketSubs) {
       socketSubs = new Set<string>();
@@ -1314,10 +1321,9 @@ export class CoreEngine {
       if (!subIds) {
         return;
       }
-      for (const id of subIds) {
-        this.streamSubscriptions.delete(id);
+      for (const id of [...subIds]) {
+        this.removeSubscription(id);
       }
-      this.socketSubscriptions.delete(socket);
     });
 
     socket.on("data", (chunk: Buffer) => {
@@ -1333,8 +1339,9 @@ export class CoreEngine {
     const topic = this.eventTopic(method);
     const sentSockets = new Set<net.Socket>();
     let line: string | null = null;
-    for (const subscription of this.streamSubscriptions.values()) {
-      if (!subscription.topics.includes(topic)) {
+    for (const subscriptionId of this.collectStreamSubscriptionIds(topic, params)) {
+      const subscription = this.streamSubscriptions.get(subscriptionId);
+      if (!subscription) {
         continue;
       }
       if (!this.matchesStreamSubscription(subscription, params)) {
@@ -1367,6 +1374,31 @@ export class CoreEngine {
     return "session";
   }
 
+  private collectStreamSubscriptionIds(topic: StreamTopic, params: Record<string, unknown>): Set<string> {
+    const ids = new Set<string>();
+    const addIds = (set?: Set<string>): void => {
+      if (!set) {
+        return;
+      }
+      for (const id of set) {
+        ids.add(id);
+      }
+    };
+    const sessionId = typeof params.session_id === "string" ? params.session_id : undefined;
+    const workspaceId = typeof params.workspace_id === "string" ? params.workspace_id : undefined;
+    const effectiveWorkspaceId = workspaceId ?? (sessionId ? this.sessionWorkspace.get(sessionId) : undefined);
+
+    addIds(this.streamGlobalSubscriptions.get(topic));
+    if (effectiveWorkspaceId) {
+      addIds(this.streamWorkspaceSubscriptions.get(topic)?.get(effectiveWorkspaceId));
+    }
+    if (sessionId) {
+      addIds(this.streamSessionSubscriptions.get(topic)?.get(sessionId));
+    }
+
+    return ids;
+  }
+
   private matchesStreamSubscription(subscription: StreamSubscription, params: Record<string, unknown>): boolean {
     const sessionId = typeof params.session_id === "string" ? params.session_id : undefined;
     const workspaceId = typeof params.workspace_id === "string" ? params.workspace_id : undefined;
@@ -1385,6 +1417,7 @@ export class CoreEngine {
     if (!subscription) {
       return;
     }
+    this.removeSubscriptionIndex(subscription);
     this.streamSubscriptions.delete(subscriptionId);
     const socketSubs = this.socketSubscriptions.get(subscription.socket);
     if (!socketSubs) {
@@ -1393,6 +1426,79 @@ export class CoreEngine {
     socketSubs.delete(subscriptionId);
     if (socketSubs.size === 0) {
       this.socketSubscriptions.delete(subscription.socket);
+    }
+  }
+
+  private addSubscriptionIndex(subscription: StreamSubscription): void {
+    for (const topic of subscription.topics) {
+      if (subscription.session_id) {
+        this.addNestedSubscriptionIndex(this.streamSessionSubscriptions, topic, subscription.session_id, subscription.id);
+      } else if (subscription.workspace_id) {
+        this.addNestedSubscriptionIndex(this.streamWorkspaceSubscriptions, topic, subscription.workspace_id, subscription.id);
+      } else {
+        this.getSubscriptionSet(this.streamGlobalSubscriptions, topic).add(subscription.id);
+      }
+    }
+  }
+
+  private removeSubscriptionIndex(subscription: StreamSubscription): void {
+    for (const topic of subscription.topics) {
+      if (subscription.session_id) {
+        this.removeNestedSubscriptionIndex(this.streamSessionSubscriptions, topic, subscription.session_id, subscription.id);
+      } else if (subscription.workspace_id) {
+        this.removeNestedSubscriptionIndex(this.streamWorkspaceSubscriptions, topic, subscription.workspace_id, subscription.id);
+      } else {
+        this.removeSubscriptionSetId(this.streamGlobalSubscriptions, topic, subscription.id);
+      }
+    }
+  }
+
+  private getSubscriptionSet(index: Map<StreamTopic, Set<string>>, topic: StreamTopic): Set<string> {
+    let set = index.get(topic);
+    if (!set) {
+      set = new Set<string>();
+      index.set(topic, set);
+    }
+    return set;
+  }
+
+  private addNestedSubscriptionIndex(index: Map<StreamTopic, Map<string, Set<string>>>, topic: StreamTopic, key: string, id: string): void {
+    let topicIndex = index.get(topic);
+    if (!topicIndex) {
+      topicIndex = new Map<string, Set<string>>();
+      index.set(topic, topicIndex);
+    }
+    let set = topicIndex.get(key);
+    if (!set) {
+      set = new Set<string>();
+      topicIndex.set(key, set);
+    }
+    set.add(id);
+  }
+
+  private removeNestedSubscriptionIndex(index: Map<StreamTopic, Map<string, Set<string>>>, topic: StreamTopic, key: string, id: string): void {
+    const topicIndex = index.get(topic);
+    const set = topicIndex?.get(key);
+    if (!topicIndex || !set) {
+      return;
+    }
+    set.delete(id);
+    if (set.size === 0) {
+      topicIndex.delete(key);
+    }
+    if (topicIndex.size === 0) {
+      index.delete(topic);
+    }
+  }
+
+  private removeSubscriptionSetId(index: Map<StreamTopic, Set<string>>, topic: StreamTopic, id: string): void {
+    const set = index.get(topic);
+    if (!set) {
+      return;
+    }
+    set.delete(id);
+    if (set.size === 0) {
+      index.delete(topic);
     }
   }
 

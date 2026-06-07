@@ -50,6 +50,20 @@ function promptDetectorFixture(overrides: Partial<PromptDetectorStateForTest> = 
   };
 }
 
+function fakeWritableSocket(): net.Socket & { writes: string[] } {
+  const writes: string[] = [];
+  return {
+    writes,
+    destroyed: false,
+    writable: true,
+    writableEnded: false,
+    write: (line: string) => {
+      writes.push(line);
+      return true;
+    }
+  } as unknown as net.Socket & { writes: string[] };
+}
+
 describe("core engine", () => {
   test("dispatch health.check", () => {
     const engine = new CoreEngine({ dbPath: tempDbPath(), pipeName: "\\\\.\\pipe\\wincmux-test-a" });
@@ -422,6 +436,73 @@ describe("core engine", () => {
 
     const parsed = JSON.parse(response) as { result?: { status: string } };
     expect(parsed.result?.status).toBe("ok");
+    engine.stop();
+  });
+
+  test("stream subscriptions route by indexed topic and scope", () => {
+    const engine = new CoreEngine({ dbPath: tempDbPath(), pipeName: "\\\\.\\pipe\\wincmux-test-stream-index" });
+    const workspaceA = randomUUID();
+    const workspaceB = randomUUID();
+    const sessionA = randomUUID();
+    const sessionB = randomUUID();
+    const socketWorkspaceA = fakeWritableSocket();
+    const socketWorkspaceB = fakeWritableSocket();
+    const socketSessionA = fakeWritableSocket();
+    const socketNotify = fakeWritableSocket();
+
+    const subscribe = (id: number, params: Record<string, unknown>, socket: net.Socket) => {
+      const res = engine.dispatch({ jsonrpc: "2.0", id, method: "session.stream.subscribe", params }, socket);
+      expect(res.error).toBeUndefined();
+      return (res.result as { subscription_id: string }).subscription_id;
+    };
+
+    subscribe(1, { workspace_id: workspaceA, topics: ["session"] }, socketWorkspaceA);
+    subscribe(2, { workspace_id: workspaceB, topics: ["session"] }, socketWorkspaceB);
+    const sessionSub = subscribe(3, { session_id: sessionA, topics: ["session"] }, socketSessionA);
+    subscribe(4, { topics: ["notify"] }, socketNotify);
+
+    const internals = engine as unknown as {
+      emitStreamEvent: (method: string, params: Record<string, unknown>) => void;
+    };
+    internals.emitStreamEvent("session.output", {
+      workspace_id: workspaceA,
+      session_id: sessionA,
+      output: "hello"
+    });
+
+    expect(socketWorkspaceA.writes).toHaveLength(1);
+    expect(socketWorkspaceB.writes).toHaveLength(0);
+    expect(socketSessionA.writes).toHaveLength(1);
+    expect(socketNotify.writes).toHaveLength(0);
+
+    const unsubscribed = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session.stream.unsubscribe",
+      params: { subscription_id: sessionSub }
+    });
+    expect(unsubscribed.error).toBeUndefined();
+
+    internals.emitStreamEvent("session.output", {
+      workspace_id: workspaceA,
+      session_id: sessionA,
+      output: "again"
+    });
+    internals.emitStreamEvent("session.output", {
+      workspace_id: workspaceB,
+      session_id: sessionB,
+      output: "other"
+    });
+    internals.emitStreamEvent("notify.created", {
+      workspace_id: workspaceA,
+      session_id: sessionA,
+      notification: { id: randomUUID() }
+    });
+
+    expect(socketWorkspaceA.writes).toHaveLength(2);
+    expect(socketWorkspaceB.writes).toHaveLength(1);
+    expect(socketSessionA.writes).toHaveLength(1);
+    expect(socketNotify.writes).toHaveLength(1);
     engine.stop();
   });
 
