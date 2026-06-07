@@ -293,6 +293,7 @@ const state = {
   }
 };
 const notificationTargetCache = new WeakMap();
+let notificationStatsCache = null;
 if (!localStorage.getItem(STORAGE_KEYS.terminalDefaultShell)) {
   localStorage.setItem(STORAGE_KEYS.terminalDefaultShell, state.terminal.default_shell);
 }
@@ -1228,17 +1229,63 @@ function initResizeHandles(onResize) {
   bindDrag(rightHandle, "right");
 }
 
-function unreadCountsByWorkspace() {
-  const counts = new Map();
+function notificationStats() {
+  const rows = state.notifications;
+  if (notificationStatsCache?.rows === rows && notificationStatsCache.length === rows.length) {
+    return notificationStatsCache.stats;
+  }
+  const byWorkspace = new Map();
+  const paneByWorkspace = new Map();
+  const sessionByWorkspace = new Map();
+  const grouped = new Map();
   for (const row of state.notifications) {
     const target = normalizeNotificationTarget(row);
-    const workspaceId = target.workspaceId ?? row.workspace_id ?? null;
+    const workspaceId = target.workspaceId ?? row.workspace_id ?? "unknown";
     if (!workspaceId) {
       continue;
     }
-    counts.set(workspaceId, (counts.get(workspaceId) ?? 0) + 1);
+    byWorkspace.set(workspaceId, (byWorkspace.get(workspaceId) ?? 0) + 1);
+    if (!grouped.has(workspaceId)) {
+      grouped.set(workspaceId, []);
+    }
+    grouped.get(workspaceId).push({ row, target });
+    if (target.paneId) {
+      let paneCounts = paneByWorkspace.get(workspaceId);
+      if (!paneCounts) {
+        paneCounts = new Map();
+        paneByWorkspace.set(workspaceId, paneCounts);
+      }
+      paneCounts.set(target.paneId, (paneCounts.get(target.paneId) ?? 0) + 1);
+      continue;
+    }
+    if (target.sessionId) {
+      let sessionCounts = sessionByWorkspace.get(workspaceId);
+      if (!sessionCounts) {
+        sessionCounts = new Map();
+        sessionByWorkspace.set(workspaceId, sessionCounts);
+      }
+      sessionCounts.set(target.sessionId, (sessionCounts.get(target.sessionId) ?? 0) + 1);
+    }
   }
-  return counts;
+  const stats = { byWorkspace, paneByWorkspace, sessionByWorkspace, grouped };
+  notificationStatsCache = { rows, length: rows.length, stats };
+  return stats;
+}
+
+function unreadCountsByWorkspace() {
+  return notificationStats().byWorkspace;
+}
+
+function notificationCountsForWorkspacePanes(workspaceId) {
+  const stats = notificationStats();
+  return {
+    pane: stats.paneByWorkspace.get(workspaceId) ?? new Map(),
+    session: stats.sessionByWorkspace.get(workspaceId) ?? new Map()
+  };
+}
+
+function groupedNotificationsByWorkspace() {
+  return notificationStats().grouped;
 }
 
 function renderWorkspaceSidebarControls() {
@@ -1417,15 +1464,7 @@ function renderNotifications() {
     return;
   }
 
-  const grouped = new Map();
-  for (const n of state.notifications) {
-    const target = normalizeNotificationTarget(n);
-    const workspaceId = target.workspaceId ?? n.workspace_id ?? "unknown";
-    if (!grouped.has(workspaceId)) {
-      grouped.set(workspaceId, []);
-    }
-    grouped.get(workspaceId).push({ row: n, target });
-  }
+  const grouped = groupedNotificationsByWorkspace();
 
   for (const [workspaceId, entries] of grouped) {
     const header = document.createElement("li");

@@ -813,6 +813,9 @@ function clearPaneMoveTarget(paneId = null) {
 }
 
 function unreadCountsForWorkspacePanes(workspaceId) {
+  if (typeof notificationCountsForWorkspacePanes === "function") {
+    return notificationCountsForWorkspacePanes(workspaceId);
+  }
   const counts = {
     pane: new Map(),
     session: new Map()
@@ -1259,21 +1262,19 @@ function positionPaneOverflowMenu(paneId) {
   const menu = meta.actionsOverflowMenu;
   const margin = 10;
 
+  menu.style.width = "";
+  menu.style.minWidth = "";
   menu.style.maxHeight = `${Math.max(180, window.innerHeight - margin * 2)}px`;
   menu.style.visibility = "hidden";
 
   const rect = menu.getBoundingClientRect();
-  const paneRect = state.paneCards.get(paneId)?.getBoundingClientRect();
-  const boundsLeft = Math.max(margin, paneRect ? paneRect.left + 8 : margin);
-  const boundsRight = Math.min(window.innerWidth - margin, paneRect ? paneRect.right - 8 : window.innerWidth - margin);
-  const availableWidth = Math.max(160, boundsRight - boundsLeft);
-  const width = Math.min(rect.width || 220, availableWidth);
-  menu.style.minWidth = `${Math.min(250, width)}px`;
+  const viewportWidth = Math.max(160, window.innerWidth - margin * 2);
+  const width = Math.min(Math.max(rect.width || 250, 250), Math.min(360, viewportWidth));
   menu.style.width = `${Math.round(width)}px`;
   const nextRect = menu.getBoundingClientRect();
 
   let left = anchor.right - width;
-  left = Math.max(boundsLeft, Math.min(left, boundsRight - width));
+  left = Math.max(margin, Math.min(left, window.innerWidth - margin - width));
 
   let top = anchor.bottom + 6;
   if (top + nextRect.height > window.innerHeight - margin) {

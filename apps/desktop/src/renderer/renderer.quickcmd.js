@@ -149,22 +149,20 @@ function positionQuickCommandPanel(paneId) {
   const anchor = meta.quickBtn;
   const margin = 10;
 
+  panel.style.width = "";
   panel.style.maxHeight = `${Math.max(220, window.innerHeight - margin * 2)}px`;
   panel.style.visibility = "hidden";
   panel.classList.add("open");
 
   const anchorRect = anchor.getBoundingClientRect();
   const panelRect = panel.getBoundingClientRect();
-  const paneRect = state.paneCards.get(paneId)?.getBoundingClientRect();
-  const boundsLeft = Math.max(margin, paneRect ? paneRect.left + 8 : margin);
-  const boundsRight = Math.min(window.innerWidth - margin, paneRect ? paneRect.right - 8 : window.innerWidth - margin);
-  const availableWidth = Math.max(180, boundsRight - boundsLeft);
-  const panelWidth = Math.min(panelRect.width || 420, availableWidth);
-  panel.style.width = `${panelWidth}px`;
+  const viewportWidth = Math.max(180, window.innerWidth - margin * 2);
+  const panelWidth = Math.min(panelRect.width || 480, viewportWidth);
+  panel.style.width = `${Math.round(panelWidth)}px`;
   const nextPanelRect = panel.getBoundingClientRect();
 
   let left = anchorRect.right - panelWidth;
-  left = Math.max(boundsLeft, Math.min(left, boundsRight - panelWidth));
+  left = Math.max(margin, Math.min(left, window.innerWidth - margin - panelWidth));
 
   let top = anchorRect.bottom + 6;
   if (top + nextPanelRect.height > window.innerHeight - margin) {
