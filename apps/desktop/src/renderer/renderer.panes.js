@@ -26,6 +26,7 @@ const OUTPUT_FLUSH_CHUNK_SIZE = 16_384;
 const OUTPUT_FLUSH_MAX_PANES_PER_FRAME = 3;
 const OUTPUT_QUEUE_LIMIT = 256_000;
 const OUTPUT_QUEUE_KEEP = 180_000;
+const OUTPUT_DROP_LOG_INTERVAL_MS = 1000;
 const PANE_POLL_ACTIVE_DELAY_MS = 45;
 const PANE_POLL_IDLE_DELAY_MS = 90;
 const PANE_POLL_ERROR_DELAY_MS = 500;
@@ -219,8 +220,9 @@ function takeDeferredStreamOutput(view) {
 
 function trimPaneOutputQueue(view, keepLength = OUTPUT_QUEUE_KEEP) {
   if (!view || view.outputQueueLength <= keepLength) {
-    return;
+    return 0;
   }
+  const beforeLength = view.outputQueueLength;
   let dropLength = view.outputQueueLength - keepLength;
   while (dropLength > 0 && view.outputQueueHead < view.outputQueueChunks.length) {
     const first = view.outputQueueChunks[view.outputQueueHead];
@@ -235,6 +237,30 @@ function trimPaneOutputQueue(view, keepLength = OUTPUT_QUEUE_KEEP) {
     dropLength = 0;
   }
   compactPaneOutputQueue(view);
+  return Math.max(0, beforeLength - view.outputQueueLength);
+}
+
+function recordPaneOutputDrop(view, droppedBytes) {
+  if (!view) {
+    return;
+  }
+  view.outputDropCount = (view.outputDropCount ?? 0) + 1;
+  view.outputDropBytes = (view.outputDropBytes ?? 0) + Math.max(0, Number(droppedBytes) || 0);
+  const now = performance.now();
+  if (view.outputDropLastLogAt && now - view.outputDropLastLogAt < OUTPUT_DROP_LOG_INTERVAL_MS) {
+    return;
+  }
+  view.outputDropLastLogAt = now;
+  const dropCount = view.outputDropCount;
+  const dropBytes = view.outputDropBytes;
+  view.outputDropCount = 0;
+  view.outputDropBytes = 0;
+  logPerf("stream.dropped", {
+    pane_id: view.paneId,
+    dropped_frames: state.metrics.dropped_frames,
+    drop_count: dropCount,
+    dropped_bytes: dropBytes
+  });
 }
 
 function appendPaneOutputQueue(view, output) {
@@ -244,9 +270,9 @@ function appendPaneOutputQueue(view, output) {
   view.outputQueueChunks.push(output);
   view.outputQueueLength += output.length;
   if (view.outputQueueLength > OUTPUT_QUEUE_LIMIT) {
-    trimPaneOutputQueue(view);
+    const droppedBytes = trimPaneOutputQueue(view);
     state.metrics.dropped_frames += 1;
-    logPerf("stream.dropped", { pane_id: view.paneId, dropped_frames: state.metrics.dropped_frames });
+    recordPaneOutputDrop(view, droppedBytes);
   }
 }
 
@@ -601,7 +627,7 @@ function setPaneOverlay(view, mode, title, detail = "", actionLabel = "") {
 }
 
 function hidePaneOverlay(view) {
-  if (view?.overlayEl) {
+  if (view?.overlayEl && !view.overlayEl.hidden) {
     view.overlayEl.hidden = true;
   }
 }
@@ -672,10 +698,14 @@ function enqueueStreamOutput(paneId, output, options = {}) {
   if (view.sessionId) {
     view.renderedSessionId = view.sessionId;
   }
+  if (!view.hasOutput || (view.overlayEl && !view.overlayEl.hidden)) {
+    hidePaneOverlay(view);
+  }
   view.hasOutput = true;
-  hidePaneOverlay(view);
   appendPaneOutputQueue(view, output);
-  state.metrics.stream_queue_depth = Math.max(state.metrics.stream_queue_depth, view.outputQueueLength);
+  if (view.outputQueueLength > state.metrics.stream_queue_depth) {
+    state.metrics.stream_queue_depth = view.outputQueueLength;
+  }
 
   schedulePaneOutputFlush(view);
 }
@@ -2702,6 +2732,9 @@ function createPaneView(paneId, host) {
     outputQueueChunks: [],
     outputQueueHead: 0,
     outputQueueLength: 0,
+    outputDropCount: 0,
+    outputDropBytes: 0,
+    outputDropLastLogAt: 0,
     outputWriteInFlight: false,
     tailRestoreSessionId: null,
     deferredStreamChunks: [],
