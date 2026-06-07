@@ -819,6 +819,9 @@ function disposeView(view) {
   if (view.observer) {
     view.observer.disconnect();
   }
+  const meta = state.paneMeta.get(view.paneId);
+  meta?.actionsOverflowMenu?.remove();
+  meta?.quickPanel?.remove();
   if (view.imeBindTimer) {
     clearInterval(view.imeBindTimer);
     view.imeBindTimer = null;
@@ -837,6 +840,14 @@ function disposeView(view) {
   }
   if (view.term) {
     view.term.dispose();
+  }
+}
+
+function removePanePortalElements() {
+  closePaneOverflowMenus(null);
+  for (const meta of state.paneMeta.values()) {
+    meta?.actionsOverflowMenu?.remove();
+    meta?.quickPanel?.remove();
   }
 }
 
@@ -1822,7 +1833,8 @@ function createPaneLeaf(node, hosts) {
   actionsOverflowBtn.setAttribute("aria-expanded", "false");
   const actionsOverflowMenu = document.createElement("div");
   actionsOverflowMenu.className = "pane-overflow-menu";
-  actionsOverflowWrap.append(actionsOverflowBtn, actionsOverflowMenu);
+  actionsOverflowWrap.append(actionsOverflowBtn);
+  document.body.appendChild(actionsOverflowMenu);
   actions.append(actionsPrimary);
   const makeBtn = (text, title, onClick, cls = "pane-btn", iconHtml = "", shortcut = "") => {
     const btn = document.createElement("button");
@@ -1924,7 +1936,7 @@ function createPaneLeaf(node, hosts) {
     paneOverflowCloseBound = true;
     document.addEventListener("pointerdown", (ev) => {
       const target = ev.target;
-      if (target instanceof HTMLElement && target.closest(".pane-overflow")) {
+      if (target instanceof HTMLElement && (target.closest(".pane-overflow") || target.closest(".pane-overflow-menu"))) {
         return;
       }
       closePaneOverflowMenus();
@@ -1943,9 +1955,10 @@ function createPaneLeaf(node, hosts) {
   header.append(idWrap, statusWrap, actions);
   const quickPanel = document.createElement("div");
   quickPanel.className = "quickcmd-popover";
+  document.body.appendChild(quickPanel);
   const terminalHost = document.createElement("div");
   terminalHost.className = "pane-terminal-host";
-  card.append(header, quickPanel, terminalHost);
+  card.append(header, terminalHost);
   card.addEventListener("pointermove", (ev) => {
     const sourcePaneId = state.paneMove?.sourcePaneId ?? null;
     if (!sourcePaneId || sourcePaneId === paneId) {
@@ -2345,6 +2358,7 @@ function renderPaneSurface(force = false) {
   if (!state.selectedWorkspaceId) {
     paneSurface.innerHTML = "";
     state.paneCards.clear();
+    removePanePortalElements();
     state.paneMeta.clear();
     state.quickCommandOpenPaneId = null;
     disposeAllViews();
@@ -2355,6 +2369,7 @@ function renderPaneSurface(force = false) {
   if (state.panes.length === 0) {
     paneSurface.innerHTML = "";
     state.paneCards.clear();
+    removePanePortalElements();
     state.paneMeta.clear();
     state.quickCommandOpenPaneId = null;
     disposeAllViews();
@@ -2368,6 +2383,7 @@ function renderPaneSurface(force = false) {
   if (!root) {
     paneSurface.innerHTML = "";
     state.paneCards.clear();
+    removePanePortalElements();
     state.paneMeta.clear();
     state.quickCommandOpenPaneId = null;
     disposeAllViews();
@@ -2435,6 +2451,7 @@ function renderPaneSurface(force = false) {
 
   paneSurface.innerHTML = "";
   state.paneCards.clear();
+  removePanePortalElements();
   state.paneMeta.clear();
   state.quickCommandOpenPaneId = null;
 

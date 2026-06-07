@@ -28,6 +28,23 @@ describe("notify-detector prompt markers", () => {
     expect(marker?.key).toBe("yes/no choice");
   });
 
+  it("ignores Codex update logs that mention pressing enter", () => {
+    const marker = extractPromptMarker([
+      "Updating Codex via `npm install -g @openai/codex`...",
+      "npm warn cleanup Failed to remove some directories",
+      "changed 2 packages in 31s",
+      "Update ran successfully! Please restart Codex.",
+      "Press enter to continue"
+    ].join("\n"));
+    expect(marker).toBeNull();
+  });
+
+  it("still detects real press-enter prompts", () => {
+    const marker = extractPromptMarker("Claude Code\nPress enter to continue");
+    expect(marker).not.toBeNull();
+    expect(marker?.key).toBe("press enter");
+  });
+
   it("recognizes assistant command context without explicit claude token", () => {
     const text = "Bash command\nRun shell command\nDo you want to proceed?";
     expect(hasAssistantPromptContext(text)).toBe(true);

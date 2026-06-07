@@ -3054,7 +3054,6 @@ function bindEvents() {
   $("clearUnreadBtn").addEventListener("click", () =>
     onClearUnread().catch((err) => setStatus(String(err), true)),
   );
-  notificationList.addEventListener("scroll", () => renderNotifications());
   notificationList.addEventListener("click", (event) =>
     onNotificationClick(event).catch((err) => setStatus(String(err), true)),
   );

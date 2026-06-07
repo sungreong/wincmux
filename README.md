@@ -199,6 +199,11 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Renderer pane output queues consume chunks with a head pointer instead of repeated array shifts, keeping multi-terminal bursts cheaper to drain.
 - Workspace/pane tail restore now uses a linear overlap scan when deduplicating live stream output, reducing UI stalls after screen switches.
 - Notification stream UI updates are coalesced into one animation-frame refresh so bursts do not repeatedly re-render sidebars and pane badges.
+- Terminal output normalization skips regex replacement unless malformed escape markers are present, reducing per-chunk renderer/core detector work.
+- The notification list no longer re-renders on scroll, avoiding unnecessary DOM rebuilds while terminals are active.
+- Persistent stream sockets are closed when their renderer webContents is destroyed, avoiding stale stream sends after window lifecycle changes.
+- Pane overflow and quick command menus render through body-level portals so compact panes and split boundaries do not clip the UI.
+- Assistant prompt notifications suppress Codex/npm update logs that mention pressing enter, avoiding repeated false native toasts during CLI updates.
 - Core drain/tail output buffers also use bounded chunk buffers, avoiding repeated string concat/slice while PTY output is still arriving.
 - Core stream batches use a shorter flush delay and flush immediately for large output bursts to lower interactive latency.
 - Core notification/resume detectors run on stream batches and skip generic shell output with a fast-path filter, reducing regex work across many terminals.

@@ -663,6 +663,9 @@ function normalizeTerminalOutput(output) {
   }
 
   if (!output.includes("\u001b")) {
+    if (!output.includes("<-[") && !output.includes("\u2190[")) {
+      return output;
+    }
     return output.replace(/(?:\u2190|<-)\[/g, "\u001b[");
   }
   return output;
@@ -685,6 +688,14 @@ function normalizePromptText(value) {
     .replace(/\u0000/g, "")
     .replace(/[ \t]+/g, " ")
     .trim();
+}
+
+function shouldSuppressPromptMarker(key, snippet, recent) {
+  if (key !== "press enter") {
+    return false;
+  }
+  const haystack = `${snippet}\n${recent}`;
+  return /\b(?:updating\s+codex|please\s+restart\s+codex|update\s+ran\s+successfully|npm\s+(?:install|warn|notice|cleanup)|changed\s+\d+\s+packages?|failed\s+to\s+remove\s+some\s+directories)\b|@openai\/codex/i.test(haystack);
 }
 
 function promptSessionState(sessionId) {
@@ -850,6 +861,9 @@ function extractPromptMarker(bufferText) {
         .replace(/\s+/g, " ")
         .trim()
         .slice(0, 180);
+      if (shouldSuppressPromptMarker(check.key, snippet, recent)) {
+        continue;
+      }
       return {
         key: check.key,
         snippet: snippet || check.key

@@ -573,6 +573,10 @@ function createPersistentStream(webContents: WebContents, filter: StreamFilter):
     let buffer = "";
     const requestId = streamRequestSeq++;
     let resolved = false;
+    const closeForDestroyedWebContents = () => {
+      socket.destroy();
+    };
+    webContents.once("destroyed", closeForDestroyedWebContents);
 
     socket.once("error", (err) => {
       if (!resolved) {
@@ -608,6 +612,10 @@ function createPersistentStream(webContents: WebContents, filter: StreamFilter):
           }
 
           if (parsed.method && !parsed.id) {
+            if (webContents.isDestroyed()) {
+              socket.destroy();
+              return;
+            }
             webContents.send("wincmux:stream-event", {
               method: parsed.method,
               params: parsed.params ?? {}
@@ -619,6 +627,7 @@ function createPersistentStream(webContents: WebContents, filter: StreamFilter):
     });
 
     socket.on("close", () => {
+      webContents.removeListener("destroyed", closeForDestroyedWebContents);
       for (const [subscriptionId, conn] of streamConnections.entries()) {
         if (conn.socket === socket) {
           streamConnections.delete(subscriptionId);
