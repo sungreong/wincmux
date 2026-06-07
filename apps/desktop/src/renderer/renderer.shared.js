@@ -286,6 +286,7 @@ const state = {
     placement: null
   }
 };
+const notificationTargetCache = new WeakMap();
 if (!localStorage.getItem(STORAGE_KEYS.terminalDefaultShell)) {
   localStorage.setItem(STORAGE_KEYS.terminalDefaultShell, state.terminal.default_shell);
 }
@@ -793,7 +794,7 @@ function parseNotificationSource(source) {
 }
 
 function normalizeNotificationTarget(row) {
-  if (!row) {
+  if (!row || typeof row !== "object") {
     return {
       kind: "unknown",
       workspaceId: null,
@@ -802,16 +803,24 @@ function normalizeNotificationTarget(row) {
     };
   }
 
+  const cached = notificationTargetCache.get(row);
+  if (cached) {
+    return cached;
+  }
+
+  let target;
   if (row.kind || row.session_id || row.pane_id) {
-    return {
+    target = {
       kind: row.kind ?? "unknown",
       workspaceId: row.workspace_id ?? null,
       paneId: row.pane_id ?? null,
       sessionId: row.session_id ?? null
     };
+  } else {
+    target = parseNotificationSource(row.source);
   }
-
-  return parseNotificationSource(row.source);
+  notificationTargetCache.set(row, target);
+  return target;
 }
 
 function isRendererPromptFallbackEnabled() {
@@ -1345,17 +1354,17 @@ function renderNotifications() {
     if (!grouped.has(workspaceId)) {
       grouped.set(workspaceId, []);
     }
-    grouped.get(workspaceId).push(n);
+    grouped.get(workspaceId).push({ row: n, target });
   }
 
-  for (const [workspaceId, rows] of grouped) {
+  for (const [workspaceId, entries] of grouped) {
     const header = document.createElement("li");
     header.className = "notif-group";
     header.dataset.workspaceId = workspaceId;
 
     const label = document.createElement("div");
     label.className = "notif-group-title";
-    label.textContent = `${workspaceNameById(workspaceId)} (${rows.length})`;
+    label.textContent = `${workspaceNameById(workspaceId)} (${entries.length})`;
 
     const markBtn = document.createElement("button");
     markBtn.className = "notif-group-mark";
@@ -1367,10 +1376,9 @@ function renderNotifications() {
     header.append(label, markBtn);
     notificationList.appendChild(header);
 
-    for (const n of rows) {
+    for (const { row: n, target } of entries) {
       const li = document.createElement("li");
       li.dataset.notificationId = n.id;
-      const target = normalizeNotificationTarget(n);
       const paneLabel = target.paneId
         ? `pane ${target.paneId.slice(0, 8)}`
         : (target.sessionId ? `session ${target.sessionId.slice(0, 8)}` : "pane -");
