@@ -2290,7 +2290,7 @@ async function pollPaneOutput(view) {
     });
     if (res?.output) {
       nextDelay = PANE_POLL_ACTIVE_DELAY_MS;
-      void maybeNotifyPromptFromOutput(activeSessionId, res.output, selectedWorkspace()?.id ?? null);
+      queuePromptNotificationFromOutput(activeSessionId, res.output, selectedWorkspace()?.id ?? null);
       enqueueStreamOutput(view.paneId, res.output, { sessionId: activeSessionId, source: "poll" });
     }
   } catch (err) {

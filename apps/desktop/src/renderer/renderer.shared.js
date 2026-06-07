@@ -753,6 +753,20 @@ function promptSessionState(sessionId) {
   return entry;
 }
 
+function promptSessionStateForOutput(sessionId, outputChunk) {
+  if (!sessionId) {
+    return null;
+  }
+  const existing = state.promptDetector.sessions.get(sessionId);
+  if (existing) {
+    return existing;
+  }
+  if (!mightContainPromptSignal(outputChunk, "")) {
+    return null;
+  }
+  return promptSessionState(sessionId);
+}
+
 function clearPromptDetectorSession(sessionId) {
   if (!sessionId) {
     return;
@@ -971,34 +985,39 @@ async function refreshUnreadAfterPromptPush() {
   await updateUnreadBadge(state.notifications.length);
 }
 
-async function maybeNotifyPromptFromOutput(sessionId, outputChunk, workspaceIdHint = null) {
+function preparePromptNotificationFromOutput(sessionId, outputChunk, workspaceIdHint = null) {
   if (!isRendererPromptFallbackEnabled()) {
-    return false;
+    return null;
   }
 
-  const sessionState = promptSessionState(sessionId);
+  const sessionState = promptSessionStateForOutput(sessionId, outputChunk);
   if (!sessionState || sessionState.notifying) {
-    return false;
+    return null;
   }
 
   const detected = detectPromptSignal(sessionState, outputChunk);
   if (!detected) {
-    return false;
+    return null;
   }
 
   const now = Date.now();
   if (now - sessionState.last_notified_at < state.promptDetector.cooldownMs) {
-    return false;
+    return null;
   }
 
   const workspaceId = resolveWorkspaceIdForSession(sessionId, workspaceIdHint);
   if (!workspaceId) {
-    return false;
+    return null;
   }
 
   sessionState.last_notified_at = now;
   sessionState.last_signature = detected.signature;
   sessionState.notifying = true;
+  return { sessionId, sessionState, detected, workspaceId };
+}
+
+async function pushPreparedPromptNotification(prepared) {
+  const { sessionId, sessionState, detected, workspaceId } = prepared;
 
   const shortSession = sessionId ? sessionId.slice(0, 8) : "unknown";
   const title = "Assistant input requested";
@@ -1027,6 +1046,23 @@ async function maybeNotifyPromptFromOutput(sessionId, outputChunk, workspaceIdHi
   } finally {
     sessionState.notifying = false;
   }
+}
+
+function queuePromptNotificationFromOutput(sessionId, outputChunk, workspaceIdHint = null) {
+  const prepared = preparePromptNotificationFromOutput(sessionId, outputChunk, workspaceIdHint);
+  if (!prepared) {
+    return false;
+  }
+  void pushPreparedPromptNotification(prepared);
+  return true;
+}
+
+async function maybeNotifyPromptFromOutput(sessionId, outputChunk, workspaceIdHint = null) {
+  const prepared = preparePromptNotificationFromOutput(sessionId, outputChunk, workspaceIdHint);
+  if (!prepared) {
+    return false;
+  }
+  return pushPreparedPromptNotification(prepared);
 }
 
 function applyPanelWidths() {

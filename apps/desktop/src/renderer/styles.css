@@ -2049,8 +2049,9 @@ li.active .ws-info-btn {
 .ws-info-panel {
   position: fixed;
   z-index: calc(var(--z-modal) + 1);
-  width: 640px;
+  width: min(640px, calc(100vw - 16px));
   max-height: min(720px, calc(100vh - 24px));
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border);

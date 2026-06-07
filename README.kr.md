@@ -243,6 +243,7 @@ npm run package:win
 - cached stream output routing은 hit 경로에서 session/view만 빠르게 확인하고 DOM attached 검증은 lookup rebuild 때 수행해 output event당 DOM 작업을 줄였습니다.
 - renderer session refresh는 running-session index를 한 번 만들어 pane binding, group badge, hidden pane, prompt fallback 경로에서 반복 filter/find/map 스캔을 줄였습니다.
 - renderer prompt fallback detector는 ANSI 제거와 prompt regex scan 전에 가벼운 fast-path probe를 사용해 fallback을 켠 상태에서도 일반 command output은 detector 비용을 건너뜁니다.
+- renderer prompt fallback notification은 동기 queue gate를 먼저 통과하고 prompt가 감지된 뒤에만 async notification 작업을 만들어, 대량 `session.output`에서 Promise churn을 줄였습니다.
 - main/core socket line parsing은 cursor로 진행하고 chunk당 남은 tail만 한 번 slice해 JSON-RPC와 stream traffic 처리 중 문자열 복사를 줄였습니다.
 - renderer fallback polling은 이전 `session.read`가 끝난 뒤 다음 read를 예약하고 pane별 stable jitter로 분산하며, 입력 직후에는 poll을 앞당겨 non-stream 모드에서도 동시 read spike 없이 응답성을 유지합니다.
 - renderer IME textarea binding은 pane별 800ms timer 대신 focus와 제한된 mutation observer를 사용해 한글 조합 처리는 유지하면서 많은 터미널의 idle DOM polling을 없앴습니다.
@@ -253,6 +254,7 @@ npm run package:win
 - core AI resume detector는 current output batch에 resume 단서가 있을 때만 recent tail buffer를 복사해 일반 shell 출력에서 tail join 비용을 피하면서 split resume marker 감지는 유지합니다.
 - core prompt/completion detector는 큰 output batch에서 ANSI normalization 전에 tail만 검사해 output 끝의 prompt 감지는 유지하면서 대량 터미널 burst 중 full-batch scan을 피합니다.
 - core drain/tail 출력 버퍼도 제한 크기의 chunk buffer로 바꿔 PTY 출력이 들어오는 동안 반복 문자열 concat/slice가 일어나지 않게 했습니다.
+- Workspace info 패널은 viewport 기준 폭 제한과 open/resize/asset view 확장 시 좌표 재보정을 적용해 터미널 창 밖으로 floating panel이 잘리지 않게 했습니다.
 - core stream batch는 flush 지연을 낮추고 큰 출력 burst는 즉시 flush해 interactive latency를 낮췄습니다.
 - core notification/resume detector는 stream batch 단위로 실행하고 일반 shell 출력은 fast-path로 건너뛰어 다중 터미널의 regex 작업량을 줄였습니다.
 - 터미널 입력 flush는 adaptive 방식으로 바꿔 Enter, escape/control sequence, 작은 키 입력은 즉시 보내고 큰 paste는 짧게 batch합니다.

@@ -374,7 +374,7 @@ function handleStreamEvent(event) {
       return;
     }
     if (isRendererPromptFallbackEnabled()) {
-      void maybeNotifyPromptFromOutput(
+      queuePromptNotificationFromOutput(
         sessionId,
         output,
         params.workspace_id ?? null,
@@ -2120,10 +2120,7 @@ async function loadInputAssets(ws) {
   if (panel) {
     panel.classList.add("ws-info-panel-input-assets");
     requestAnimationFrame(() => {
-      const rect = panel.getBoundingClientRect();
-      if (rect.right > window.innerWidth - 8) {
-        panel.style.left = `${Math.max(8, window.innerWidth - rect.width - 8)}px`;
-      }
+      clampWsInfoPanelToViewport(panel);
     });
   }
   const summaryEl = $("wsSessionSummary");
@@ -2477,10 +2474,7 @@ async function loadAgentAssets(ws) {
     panel.classList.remove("ws-info-panel-input-assets");
     panel.classList.add("ws-info-panel-agent-assets");
     requestAnimationFrame(() => {
-      const rect = panel.getBoundingClientRect();
-      if (rect.right > window.innerWidth - 8) {
-        panel.style.left = `${Math.max(8, window.innerWidth - rect.width - 8)}px`;
-      }
+      clampWsInfoPanelToViewport(panel);
     });
   }
   const summaryEl = $("wsSessionSummary");
@@ -2675,6 +2669,40 @@ async function openAgentAssetViewer(ws, item) {
   }
 }
 
+function clampWsInfoPanelToViewport(panel, margin = 8) {
+  if (!panel) return;
+  const rect = panel.getBoundingClientRect();
+  const width = Math.min(rect.width || 0, Math.max(1, window.innerWidth - margin * 2));
+  const height = Math.min(rect.height || 0, Math.max(1, window.innerHeight - margin * 2));
+  const maxLeft = Math.max(margin, window.innerWidth - margin - width);
+  const maxTop = Math.max(margin, window.innerHeight - margin - height);
+  const left = Math.max(margin, Math.min(rect.left, maxLeft));
+  const top = Math.max(margin, Math.min(rect.top, maxTop));
+  panel.style.left = `${Math.round(left)}px`;
+  panel.style.top = `${Math.round(top)}px`;
+}
+
+function positionWsInfoPanel(panel, anchorEl) {
+  if (!panel || !anchorEl) return;
+  const rect = anchorEl.getBoundingClientRect();
+  const margin = 8;
+  const gap = 6;
+  const panelRect = panel.getBoundingClientRect();
+  const panelW = Math.min(panelRect.width || 640, Math.max(1, window.innerWidth - margin * 2));
+  const panelH = Math.min(panelRect.height || Math.min(720, window.innerHeight * 0.9), Math.max(1, window.innerHeight - margin * 2));
+  let left = rect.right + gap;
+  if (left + panelW > window.innerWidth - margin) {
+    left = rect.left - panelW - gap;
+  }
+  let top = rect.top;
+  const maxLeft = Math.max(margin, window.innerWidth - margin - panelW);
+  const maxTop = Math.max(margin, window.innerHeight - margin - panelH);
+  left = Math.max(margin, Math.min(left, maxLeft));
+  top = Math.max(margin, Math.min(top, maxTop));
+  panel.style.left = `${Math.round(left)}px`;
+  panel.style.top = `${Math.round(top)}px`;
+}
+
 function openWsInfoPanel(ws, anchorEl) {
   const overlay = $("wsInfoOverlay");
   const panel = $("wsInfoPanel");
@@ -2710,24 +2738,8 @@ function openWsInfoPanel(ws, anchorEl) {
     }
   }
 
-  // Position popup to the right of the anchor (workspace list item)
-  if (anchorEl) {
-    const rect = anchorEl.getBoundingClientRect();
-    const panelW = 640;
-    const margin = 6;
-    let left = rect.right + margin;
-    let top = rect.top;
-    // If overflows right edge of viewport, flip left
-    if (left + panelW > window.innerWidth - 8) {
-      left = rect.left - panelW - margin;
-    }
-    // Clamp top so panel doesn't go off bottom (panel height is dynamic, use 80vh estimate)
-    const maxTop = window.innerHeight - Math.min(720, window.innerHeight * 0.9) - 8;
-    if (top > maxTop) top = maxTop;
-    if (top < 8) top = 8;
-    panel.style.left = `${left}px`;
-    panel.style.top = `${top}px`;
-  }
+  // Position popup near the workspace row while keeping it inside the viewport.
+  positionWsInfoPanel(panel, anchorEl);
 
   // Reset scan + git areas on open
   const scanArea = $("wsScanArea");
@@ -3007,6 +3019,13 @@ function bindWsInfoPanel() {
       if (ev.target === overlay) closeWsInfoPanel();
     });
   }
+  window.addEventListener("resize", () => {
+    const panel = $("wsInfoPanel");
+    const overlay = $("wsInfoOverlay");
+    if (panel && overlay?.style.display !== "none") {
+      clampWsInfoPanelToViewport(panel);
+    }
+  });
 }
 
 globalThis.openWsInfoPanel = openWsInfoPanel;

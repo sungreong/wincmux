@@ -233,6 +233,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Cached stream output routing now uses a fast session/view check on hits and reserves DOM attached validation for lookup rebuilds, reducing per-output event DOM work.
 - Renderer session refresh builds reusable running-session indexes, avoiding repeated filter/find/map scans during pane binding, group badges, hidden panes, and prompt fallback checks.
 - Renderer prompt fallback detection now uses a cheap fast-path probe before ANSI stripping and prompt regex scans, so generic command output does not pay detector costs when the fallback is enabled.
+- Renderer prompt fallback notification now runs through a synchronous queue gate and only creates async notification work after a prompt is detected, reducing Promise churn on high-volume `session.output`.
 - Main/core socket line parsing now advances with a cursor and slices only the remaining tail once per chunk, reducing string copies while routing JSON-RPC and stream traffic.
 - Renderer fallback polling now schedules the next `session.read` only after the previous read settles, staggers panes with stable jitter, and accelerates after input so non-stream mode avoids synchronized read spikes without feeling sluggish.
 - Renderer IME textarea binding now uses focus and a targeted mutation observer instead of a per-pane 800ms timer, preserving Korean composition handling while removing idle DOM polling across many terminals.
@@ -243,6 +244,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Core AI resume detection now probes the current output batch before copying the recent tail buffer, avoiding tail joins for ordinary shell output while still catching split resume markers.
 - Core prompt/completion detection now inspects only the tail of large output batches before ANSI normalization, preserving end-of-output prompts while avoiding full-batch scans during huge terminal bursts.
 - Core drain/tail output buffers also use bounded chunk buffers, avoiding repeated string concat/slice while PTY output is still arriving.
+- Workspace info panels now use viewport-bounded width and are reclamped when opened, resized, or expanded into asset views, so floating panels do not clip outside the terminal window.
 - Core stream batches use a shorter flush delay and flush immediately for large output bursts to lower interactive latency.
 - Core notification/resume detectors run on stream batches and skip generic shell output with a fast-path filter, reducing regex work across many terminals.
 - Terminal input flushing is adaptive: Enter, escape/control sequences, and small interactive keystrokes flush immediately while large paste payloads still batch briefly.
