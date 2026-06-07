@@ -231,6 +231,7 @@ npm run package:win
 - workspace 전환은 unread notification을 불러올 때 즉시 pane binding을 다시 만들지 않고, 준비된 unread UI 갱신을 메인 pane refresh에 합쳐 중복 refresh를 줄였습니다.
 - renderer IPC는 active context와 unread badge 값이 바뀌지 않은 경우 preload/main 왕복을 건너뛰어 pane 선택, focus 변경, notification refresh 중 반복 호출을 줄였습니다.
 - pane 선택은 이미 선택된 pane의 layout focus 저장 RPC를 건너뛰고, cached pane/session unread count가 0이면 notification scan도 생략합니다.
+- pane 이동 hover와 선택 스타일은 가능한 경우 변경된 카드만 갱신해 고빈도 pointer move 중 전체 pane-card class churn을 피합니다.
 - renderer performance log는 IPC/file append 전에 batch로 묶어 input flush metric처럼 자주 찍히는 로그가 키 입력마다 IPC 부담을 만들지 않게 했습니다.
 - tail 복원 중 모아 두는 live stream output도 제한 크기의 chunk queue로 바꿔 pane 재연결이나 화면 전환 중 반복 문자열 concat/slice가 생기지 않게 했습니다.
 - main에서 renderer로 보내는 stream event는 짧은 IPC window로 batch하고, 같은 session의 인접 output은 전달 전에 합쳐 다중 터미널 부하에서 Electron IPC wake-up을 줄였습니다.

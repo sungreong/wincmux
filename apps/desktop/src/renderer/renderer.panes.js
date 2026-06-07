@@ -40,6 +40,18 @@ let paneResizeSyncTimer = null;
 let paneResizeSyncRaf = null;
 const outputFlushPaneQueue = new Set();
 const paneResizeSyncQueue = new Set();
+const PANE_DROP_CLASS_KEYS = ["left", "right", "above", "below"];
+const paneSelectionStyleState = {
+  selectedPaneId: null,
+  moveSourcePaneId: null,
+  moveTargetPaneId: null,
+  placement: null,
+  cardCount: 0
+};
+
+function invalidatePaneSelectionStyleCache() {
+  paneSelectionStyleState.cardCount = -1;
+}
 
 function paneDebug(...args) {
   if (PANE_DEBUG_LOGS) {
@@ -769,20 +781,53 @@ function normalizePaneSessions() {
   rebuildPaneSessionLookup();
 }
 
+function applyPaneSelectionClasses(paneId, card, moveSourcePaneId, moveTargetPaneId, placement) {
+  card.classList.toggle("active", paneId === state.selectedPaneId);
+  card.classList.toggle("pane-move-source", paneId === moveSourcePaneId);
+  card.classList.toggle("pane-move-target", Boolean(moveSourcePaneId) && paneId !== moveSourcePaneId);
+  card.classList.toggle("pane-drop-active", paneId === moveTargetPaneId);
+  for (const key of PANE_DROP_CLASS_KEYS) {
+    card.classList.toggle(`pane-drop-${key}`, paneId === moveTargetPaneId && placement === key);
+  }
+}
+
 function applyPaneSelectionStyles() {
+  const selectedPaneId = state.selectedPaneId ?? null;
   const moveSourcePaneId = state.paneMove?.sourcePaneId ?? null;
   const moveTargetPaneId = state.paneMove?.targetPaneId ?? null;
   const placement = state.paneMove?.placement ?? null;
-  for (const [paneId, card] of state.paneCards.entries()) {
-    card.classList.toggle("active", paneId === state.selectedPaneId);
-    card.classList.toggle("pane-move-source", paneId === moveSourcePaneId);
-    card.classList.toggle("pane-move-target", Boolean(moveSourcePaneId) && paneId !== moveSourcePaneId);
-    card.classList.toggle("pane-drop-active", paneId === moveTargetPaneId);
-    for (const key of ["left", "right", "above", "below"]) {
-      card.classList.toggle(`pane-drop-${key}`, paneId === moveTargetPaneId && placement === key);
+  const prev = paneSelectionStyleState;
+  const fullRefresh = prev.cardCount !== state.paneCards.size || prev.moveSourcePaneId !== moveSourcePaneId;
+
+  if (fullRefresh) {
+    for (const [paneId, card] of state.paneCards.entries()) {
+      applyPaneSelectionClasses(paneId, card, moveSourcePaneId, moveTargetPaneId, placement);
+    }
+  } else {
+    const dirtyPaneIds = new Set([
+      prev.selectedPaneId,
+      selectedPaneId,
+      prev.moveTargetPaneId,
+      moveTargetPaneId
+    ].filter(Boolean));
+    for (const paneId of dirtyPaneIds) {
+      const card = state.paneCards.get(paneId);
+      if (card) {
+        applyPaneSelectionClasses(paneId, card, moveSourcePaneId, moveTargetPaneId, placement);
+      }
     }
   }
-  selectedPaneLabel.textContent = `Selected Pane: ${state.selectedPaneId ? state.selectedPaneId.slice(0, 8) : "-"}`;
+
+  paneSelectionStyleState.selectedPaneId = selectedPaneId;
+  paneSelectionStyleState.moveSourcePaneId = moveSourcePaneId;
+  paneSelectionStyleState.moveTargetPaneId = moveTargetPaneId;
+  paneSelectionStyleState.placement = placement;
+  paneSelectionStyleState.cardCount = state.paneCards.size;
+
+  const selectedText = `Selected Pane: ${selectedPaneId ? selectedPaneId.slice(0, 8) : "-"}`;
+  if (selectedPaneLabel.textContent !== selectedText) {
+    selectedPaneLabel.textContent = selectedText;
+  }
 }
 
 function paneDropPlacement(card, clientX, clientY) {
@@ -798,6 +843,9 @@ function paneDropPlacement(card, clientX, clientY) {
 }
 
 function setPaneMoveTarget(paneId, placement) {
+  if (state.paneMove.targetPaneId === paneId && state.paneMove.placement === placement) {
+    return;
+  }
   state.paneMove.targetPaneId = paneId;
   state.paneMove.placement = placement;
   applyPaneSelectionStyles();
@@ -805,6 +853,9 @@ function setPaneMoveTarget(paneId, placement) {
 
 function clearPaneMoveTarget(paneId = null) {
   if (paneId && state.paneMove.targetPaneId !== paneId) {
+    return;
+  }
+  if (!state.paneMove.targetPaneId && !state.paneMove.placement) {
     return;
   }
   state.paneMove.targetPaneId = null;
@@ -2712,6 +2763,7 @@ function renderPaneSurface(force = false) {
   if (!state.selectedWorkspaceId) {
     paneSurface.innerHTML = "";
     state.paneCards.clear();
+    invalidatePaneSelectionStyleCache();
     removePanePortalElements();
     state.paneMeta.clear();
     state.quickCommandOpenPaneId = null;
@@ -2723,6 +2775,7 @@ function renderPaneSurface(force = false) {
   if (state.panes.length === 0) {
     paneSurface.innerHTML = "";
     state.paneCards.clear();
+    invalidatePaneSelectionStyleCache();
     removePanePortalElements();
     state.paneMeta.clear();
     state.quickCommandOpenPaneId = null;
@@ -2737,6 +2790,7 @@ function renderPaneSurface(force = false) {
   if (!root) {
     paneSurface.innerHTML = "";
     state.paneCards.clear();
+    invalidatePaneSelectionStyleCache();
     removePanePortalElements();
     state.paneMeta.clear();
     state.quickCommandOpenPaneId = null;
@@ -2805,6 +2859,7 @@ function renderPaneSurface(force = false) {
 
   paneSurface.innerHTML = "";
   state.paneCards.clear();
+  invalidatePaneSelectionStyleCache();
   removePanePortalElements();
   state.paneMeta.clear();
   state.quickCommandOpenPaneId = null;
