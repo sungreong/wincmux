@@ -162,6 +162,18 @@ function clampQuickCommandPosition(left, top, width, height, margin) {
   };
 }
 
+function clampQuickCommandSize(width, height = 0, margin = 10) {
+  if (typeof globalThis.clampPanePortalSize === "function") {
+    return globalThis.clampPanePortalSize(width, height, margin);
+  }
+  const maxWidth = Math.max(1, window.innerWidth - margin * 2);
+  const maxHeight = Math.max(1, window.innerHeight - margin * 2);
+  return {
+    width: Math.max(1, Math.min(Math.max(1, Number(width) || maxWidth), maxWidth)),
+    height: Math.max(1, Math.min(Math.max(1, Number(height) || maxHeight), maxHeight))
+  };
+}
+
 function positionQuickCommandPanel(paneId) {
   const meta = state.paneMeta.get(paneId);
   if (!meta?.quickPanel || !meta?.quickBtn) {
@@ -173,6 +185,7 @@ function positionQuickCommandPanel(paneId) {
   ensureQuickCommandPortal(panel);
 
   panel.style.width = "";
+  panel.style.minWidth = "0";
   panel.style.maxWidth = `${Math.max(1, window.innerWidth - margin * 2)}px`;
   panel.style.maxHeight = `${Math.max(1, window.innerHeight - margin * 2)}px`;
   panel.style.visibility = "hidden";
@@ -180,19 +193,21 @@ function positionQuickCommandPanel(paneId) {
 
   const anchorRect = anchor.getBoundingClientRect();
   const panelRect = panel.getBoundingClientRect();
-  const viewportWidth = Math.max(1, window.innerWidth - margin * 2);
-  const panelWidth = Math.min(panelRect.width || 480, viewportWidth);
+  const panelSize = clampQuickCommandSize(Math.min(panelRect.width || 480, 480), panelRect.height, margin);
+  const panelWidth = panelSize.width;
   panel.style.width = `${Math.round(panelWidth)}px`;
+  panel.style.maxWidth = `${Math.round(panelWidth)}px`;
   const nextPanelRect = panel.getBoundingClientRect();
+  const panelHeight = Math.min(nextPanelRect.height || panelSize.height, panelSize.height);
 
   let left = anchorRect.right - panelWidth;
   left = Math.max(margin, Math.min(left, window.innerWidth - margin - panelWidth));
 
   let top = anchorRect.bottom + 6;
-  if (top + nextPanelRect.height > window.innerHeight - margin) {
-    top = Math.max(margin, anchorRect.top - nextPanelRect.height - 6);
+  if (top + panelHeight > window.innerHeight - margin) {
+    top = Math.max(margin, anchorRect.top - panelHeight - 6);
   }
-  const position = clampQuickCommandPosition(left, top, panelWidth, nextPanelRect.height, margin);
+  const position = clampQuickCommandPosition(left, top, panelWidth, panelHeight, margin);
 
   panel.style.left = `${Math.round(position.left)}px`;
   panel.style.top = `${Math.round(position.top)}px`;
@@ -249,6 +264,7 @@ function setQuickCommandPanelVisibility(paneId, isOpen) {
     meta.quickPanel.style.left = "";
     meta.quickPanel.style.top = "";
     meta.quickPanel.style.width = "";
+    meta.quickPanel.style.minWidth = "";
     meta.quickPanel.style.maxWidth = "";
     meta.quickPanel.style.maxHeight = "";
     meta.quickPanel.style.visibility = "";

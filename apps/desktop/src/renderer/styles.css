@@ -1545,12 +1545,12 @@ li.active .ws-delete-btn {
 
 .hidden-panes-popover {
   display: none;
-  position: absolute;
-  right: 0;
-  top: 38px;
+  position: fixed;
+  right: auto;
+  top: auto;
   z-index: var(--z-popover);
-  width: min(460px, calc(100% - 12px));
-  max-height: 340px;
+  width: min(460px, calc(100vw - 20px));
+  max-height: calc(100vh - 20px);
   overflow: auto;
   border: 1px solid #2d4059;
   border-radius: 8px;

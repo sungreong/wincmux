@@ -5,6 +5,76 @@ const hiddenPaneHandlers = {
 
 let hiddenPaneUiBound = false;
 
+function ensureHiddenPanesPortal() {
+  if (!hiddenPanesPopover || !document.body) {
+    return;
+  }
+  if (typeof globalThis.ensurePanePortalElement === "function") {
+    globalThis.ensurePanePortalElement(hiddenPanesPopover);
+    return;
+  }
+  if (hiddenPanesPopover.parentElement !== document.body) {
+    document.body.appendChild(hiddenPanesPopover);
+  }
+}
+
+function clampHiddenPanesPopoverSize(width, height = 0, margin = 10) {
+  if (typeof globalThis.clampPanePortalSize === "function") {
+    return globalThis.clampPanePortalSize(width, height, margin);
+  }
+  const maxWidth = Math.max(1, window.innerWidth - margin * 2);
+  const maxHeight = Math.max(1, window.innerHeight - margin * 2);
+  return {
+    width: Math.max(1, Math.min(Math.max(1, Number(width) || maxWidth), maxWidth)),
+    height: Math.max(1, Math.min(Math.max(1, Number(height) || maxHeight), maxHeight))
+  };
+}
+
+function clampHiddenPanesPopoverPosition(left, top, width, height, margin = 10) {
+  if (typeof globalThis.clampPanePortalPosition === "function") {
+    return globalThis.clampPanePortalPosition(left, top, width, height, margin);
+  }
+  const maxLeft = Math.max(margin, window.innerWidth - margin - Math.max(0, Number(width) || 0));
+  const maxTop = Math.max(margin, window.innerHeight - margin - Math.max(0, Number(height) || 0));
+  return {
+    left: Math.max(margin, Math.min(Number(left) || margin, maxLeft)),
+    top: Math.max(margin, Math.min(Number(top) || margin, maxTop))
+  };
+}
+
+function positionHiddenPanesPopover() {
+  if (!hiddenPanesPopover?.classList.contains("open")) {
+    return;
+  }
+  const anchor = hiddenPanesBtn?.getBoundingClientRect?.();
+  if (!anchor) {
+    return;
+  }
+  const margin = 10;
+  ensureHiddenPanesPortal();
+  hiddenPanesPopover.style.width = "";
+  hiddenPanesPopover.style.minWidth = "0";
+  hiddenPanesPopover.style.maxWidth = `${Math.max(1, window.innerWidth - margin * 2)}px`;
+  hiddenPanesPopover.style.maxHeight = `${Math.max(1, window.innerHeight - margin * 2)}px`;
+  hiddenPanesPopover.style.visibility = "hidden";
+
+  const measured = hiddenPanesPopover.getBoundingClientRect();
+  const size = clampHiddenPanesPopoverSize(Math.min(measured.width || 460, 460), measured.height || 340, margin);
+  hiddenPanesPopover.style.width = `${Math.round(size.width)}px`;
+  const nextRect = hiddenPanesPopover.getBoundingClientRect();
+  const height = Math.min(nextRect.height || size.height, size.height);
+
+  let left = anchor.right - size.width;
+  let top = anchor.bottom + 6;
+  if (top + height > window.innerHeight - margin) {
+    top = anchor.top - height - 6;
+  }
+  const position = clampHiddenPanesPopoverPosition(left, top, size.width, height, margin);
+  hiddenPanesPopover.style.left = `${Math.round(position.left)}px`;
+  hiddenPanesPopover.style.top = `${Math.round(position.top)}px`;
+  hiddenPanesPopover.style.visibility = "";
+}
+
 function hiddenPanesForWorkspace(workspaceId = state.selectedWorkspaceId) {
   if (!workspaceId) {
     return [];
@@ -107,6 +177,13 @@ function closeHiddenPanesPopover() {
     return;
   }
   hiddenPanesPopover.classList.remove("open");
+  hiddenPanesPopover.style.left = "";
+  hiddenPanesPopover.style.top = "";
+  hiddenPanesPopover.style.width = "";
+  hiddenPanesPopover.style.minWidth = "";
+  hiddenPanesPopover.style.maxWidth = "";
+  hiddenPanesPopover.style.maxHeight = "";
+  hiddenPanesPopover.style.visibility = "";
 }
 
 function toggleHiddenPanesPopover(force) {
@@ -119,7 +196,9 @@ function toggleHiddenPanesPopover(force) {
     return;
   }
   renderHiddenPanesPopover();
+  ensureHiddenPanesPortal();
   hiddenPanesPopover.classList.add("open");
+  positionHiddenPanesPopover();
 }
 
 function renderHiddenPanesPopover() {
@@ -222,6 +301,7 @@ function refreshHiddenPanesUi() {
   }
   if (hiddenPanesPopover?.classList.contains("open")) {
     renderHiddenPanesPopover();
+    positionHiddenPanesPopover();
   }
 }
 
@@ -256,6 +336,10 @@ function bindHiddenPaneUi() {
       closeHiddenPanesPopover();
     }
   });
+
+  const reposition = () => positionHiddenPanesPopover();
+  window.addEventListener("resize", reposition);
+  window.addEventListener("scroll", reposition, true);
 }
 
 globalThis.setHiddenPaneHandlers = setHiddenPaneHandlers;
