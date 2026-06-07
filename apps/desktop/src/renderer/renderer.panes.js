@@ -402,6 +402,22 @@ function paneForSession(sessionId, options = {}) {
   return rebuilt && isPaneSessionLookupValid(rebuilt, sessionId, visibleOnly) ? rebuilt : null;
 }
 
+function visiblePaneForSessionFast(sessionId) {
+  if (!sessionId) {
+    return null;
+  }
+  let paneId = state.visibleSessionPaneLookup.get(sessionId);
+  if (paneId) {
+    const view = state.paneViews.get(paneId);
+    if (state.paneSessions[paneId] === sessionId && view?.sessionId === sessionId) {
+      return paneId;
+    }
+  }
+  rebuildPaneSessionLookup();
+  paneId = state.visibleSessionPaneLookup.get(sessionId);
+  return paneId && isPaneSessionLookupValid(paneId, sessionId, true) ? paneId : null;
+}
+
 function isPaneSessionLookupValid(paneId, sessionId, visibleOnly = false, options = {}) {
   if (!paneId || state.paneSessions[paneId] !== sessionId) {
     return false;
@@ -662,6 +678,18 @@ function enqueueStreamOutput(paneId, output, options = {}) {
   state.metrics.stream_queue_depth = Math.max(state.metrics.stream_queue_depth, view.outputQueueLength);
 
   schedulePaneOutputFlush(view);
+}
+
+function enqueueSessionStreamOutput(sessionId, output) {
+  if (!sessionId || !output) {
+    return false;
+  }
+  const paneId = visiblePaneForSessionFast(sessionId);
+  if (!paneId) {
+    return false;
+  }
+  enqueueStreamOutput(paneId, output, sessionId);
+  return true;
 }
 
 function schedulePaneOutputFlush(view) {
@@ -3670,6 +3698,7 @@ async function openSessionPicker(paneId, anchorBtn) {
 globalThis.setPaneHandlers = setPaneHandlers;
 globalThis.paneForSession = paneForSession;
 globalThis.enqueueStreamOutput = enqueueStreamOutput;
+globalThis.enqueueSessionStreamOutput = enqueueSessionStreamOutput;
 globalThis.normalizePaneSessions = normalizePaneSessions;
 globalThis.renderPaneSurface = renderPaneSurface;
 globalThis.refreshPaneBindings = refreshPaneBindings;

@@ -47,6 +47,10 @@ const paneApi = {
     }
     return false;
   },
+  enqueueSessionStreamOutput: (sessionId, output) =>
+    typeof globalThis.enqueueSessionStreamOutput === "function"
+      ? globalThis.enqueueSessionStreamOutput(sessionId, output)
+      : false,
   normalizePaneSessions: () => {
     if (typeof globalThis.normalizePaneSessions === "function") {
       globalThis.normalizePaneSessions();
@@ -364,20 +368,19 @@ function handleStreamEvent(event) {
     ) {
       return;
     }
+    const sessionId = params.session_id;
+    const output = params.output ?? "";
+    if (!sessionId || !output) {
+      return;
+    }
     if (isRendererPromptFallbackEnabled()) {
       void maybeNotifyPromptFromOutput(
-        params.session_id,
-        params.output ?? "",
+        sessionId,
+        output,
         params.workspace_id ?? null,
       );
     }
-    const paneId = paneApi.paneForSession(params.session_id, { visibleOnly: true });
-    if (paneId) {
-      paneApi.enqueueStreamOutput(paneId, params.output ?? "", {
-        sessionId: params.session_id,
-        source: "stream"
-      });
-    }
+    paneApi.enqueueSessionStreamOutput(sessionId, output);
     return;
   }
   if (
