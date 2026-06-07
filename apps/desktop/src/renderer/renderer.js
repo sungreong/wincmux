@@ -1035,6 +1035,14 @@ async function markPaneNotificationsRead(paneId) {
     return 0;
   }
   const sessionId = state.paneSessions[paneId] ?? null;
+  if (typeof notificationCountsForWorkspacePanes === "function") {
+    const counts = notificationCountsForWorkspacePanes(ws.id);
+    const paneCount = counts?.pane?.get(paneId) ?? 0;
+    const sessionCount = sessionId ? (counts?.session?.get(sessionId) ?? 0) : 0;
+    if (paneCount <= 0 && sessionCount <= 0) {
+      return 0;
+    }
+  }
   const rows = state.notifications.filter((row) =>
     isNotificationForPane(row, ws.id, paneId, sessionId),
   );

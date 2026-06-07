@@ -894,10 +894,11 @@ async function selectPane(paneId, options = {}) {
     return;
   }
 
+  const wasSelected = state.selectedPaneId === paneId;
   state.selectedPaneId = paneId;
   applyPaneSelectionStyles();
 
-  if (persist) {
+  if (persist && !wasSelected) {
     const ws = selectedWorkspace();
     if (ws) {
       await rpc("layout.focus", { workspace_id: ws.id, pane_id: paneId });
