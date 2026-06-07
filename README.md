@@ -197,6 +197,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Terminal output is flushed through xterm sequentially so large command output does not pile up overlapping writes.
 - Renderer output buffering uses chunk queues instead of repeated string concat/slice, reducing copy and GC pressure during high-volume terminal output.
 - Renderer pane output queues consume chunks with a head pointer instead of repeated array shifts, keeping multi-terminal bursts cheaper to drain.
+- Renderer pane output draining returns single queued chunks directly when possible, avoiding per-write array allocation and joins on the common terminal output path.
 - Workspace/pane tail restore now uses a linear overlap scan when deduplicating live stream output, reducing UI stalls after screen switches.
 - Notification stream UI updates are coalesced into one animation-frame refresh so bursts do not repeatedly re-render sidebars and pane badges.
 - Terminal output normalization skips regex replacement unless malformed escape markers are present, reducing per-chunk renderer/core detector work.

@@ -214,6 +214,7 @@ npm run package:win
 - xterm 출력은 이전 write가 끝난 뒤 다음 chunk를 쓰도록 순차 flush해 큰 출력에서 write queue가 겹치지 않게 했습니다.
 - renderer 출력 버퍼는 문자열 concat/slice 대신 chunk queue를 사용해 대량 터미널 출력 중 copy와 GC 부담을 줄였습니다.
 - renderer pane 출력 큐는 반복 `Array.shift()` 대신 head pointer로 chunk를 소비해 다중 터미널 burst를 더 가볍게 drain합니다.
+- renderer pane 출력 drain은 단일 queued chunk를 바로 반환해 일반 터미널 출력 경로에서 write마다 배열 할당과 join을 피합니다.
 - workspace/pane tail 복원 중 live stream 중복 제거는 선형 overlap scan을 사용해 화면 전환 직후 UI stall을 줄였습니다.
 - notification stream UI 갱신은 animation frame 하나로 합쳐 알림 burst가 sidebar와 pane badge를 반복 리렌더하지 않게 했습니다.
 - 터미널 출력 normalization은 깨진 escape marker 후보가 있을 때만 regex replace를 실행해 renderer/core detector의 chunk당 작업을 줄였습니다.

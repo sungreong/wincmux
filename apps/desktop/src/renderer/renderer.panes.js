@@ -289,24 +289,53 @@ function takePaneOutputChunk(view, maxLength = OUTPUT_FLUSH_CHUNK_SIZE) {
   if (!view?.outputQueueLength) {
     return "";
   }
-  const parts = [];
   let remaining = maxLength;
+  const chunks = view.outputQueueChunks;
+  const head = view.outputQueueHead;
+  if (remaining <= 0) {
+    return "";
+  }
+  if (head >= chunks.length) {
+    resetPaneOutputQueue(view);
+    return "";
+  }
+
+  const first = chunks[head];
+  if (first.length > remaining) {
+    const output = first.slice(0, remaining);
+    chunks[head] = first.slice(remaining);
+    view.outputQueueLength -= remaining;
+    return output;
+  }
+
+  const nextHead = head + 1;
+  if (first.length === remaining || nextHead >= chunks.length) {
+    view.outputQueueHead = nextHead;
+    view.outputQueueLength -= first.length;
+    compactPaneOutputQueue(view);
+    return first;
+  }
+
+  const parts = [first];
+  view.outputQueueHead = nextHead;
+  view.outputQueueLength -= first.length;
+  remaining -= first.length;
   while (remaining > 0 && view.outputQueueHead < view.outputQueueChunks.length) {
-    const first = view.outputQueueChunks[view.outputQueueHead];
-    if (first.length <= remaining) {
-      parts.push(first);
+    const next = view.outputQueueChunks[view.outputQueueHead];
+    if (next.length <= remaining) {
+      parts.push(next);
       view.outputQueueHead += 1;
-      view.outputQueueLength -= first.length;
-      remaining -= first.length;
+      view.outputQueueLength -= next.length;
+      remaining -= next.length;
       continue;
     }
-    parts.push(first.slice(0, remaining));
-    view.outputQueueChunks[view.outputQueueHead] = first.slice(remaining);
+    parts.push(next.slice(0, remaining));
+    view.outputQueueChunks[view.outputQueueHead] = next.slice(remaining);
     view.outputQueueLength -= remaining;
     remaining = 0;
   }
   compactPaneOutputQueue(view);
-  return parts.length === 1 ? parts[0] : parts.join("");
+  return parts.join("");
 }
 
 function appendDeferredStreamOutput(view, output) {
