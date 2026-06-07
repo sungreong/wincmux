@@ -64,13 +64,47 @@ function trimRestoredOutputPrefix(tailOutput, liveOutput) {
   if (tailOutput.endsWith(liveOutput)) {
     return "";
   }
+  const overlap = restoredOutputOverlapLength(tailOutput, liveOutput);
+  return overlap > 0 ? liveOutput.slice(overlap) : liveOutput;
+}
+
+function restoredOutputOverlapLength(tailOutput, liveOutput) {
   const maxOverlap = Math.min(tailOutput.length, liveOutput.length, STREAM_TAIL_OVERLAP_LIMIT);
-  for (let size = maxOverlap; size > 0; size -= 1) {
-    if (tailOutput.endsWith(liveOutput.slice(0, size))) {
-      return liveOutput.slice(size);
-    }
+  if (maxOverlap <= 0) {
+    return 0;
   }
-  return liveOutput;
+  const livePrefix = liveOutput.slice(0, maxOverlap);
+  const tailSuffix = tailOutput.slice(-maxOverlap);
+  const separator = ["\u0000", "\u0001", "\u0002", "\u0003", "\uE000"]
+    .find((candidate) => !livePrefix.includes(candidate) && !tailSuffix.includes(candidate)) ?? "\uE001";
+  const probe = `${livePrefix}${separator}${tailSuffix}`;
+  const prefixLengths = new Array(probe.length).fill(0);
+  for (let index = 1; index < probe.length; index += 1) {
+    let candidate = prefixLengths[index - 1];
+    while (candidate > 0 && probe[index] !== probe[candidate]) {
+      candidate = prefixLengths[candidate - 1];
+    }
+    if (probe[index] === probe[candidate]) {
+      candidate += 1;
+    }
+    prefixLengths[index] = candidate;
+  }
+  return Math.min(prefixLengths[prefixLengths.length - 1] ?? 0, maxOverlap);
+}
+
+function compactPaneOutputQueue(view) {
+  if (!view?.outputQueueHead) {
+    return;
+  }
+  if (view.outputQueueHead >= view.outputQueueChunks.length) {
+    view.outputQueueChunks = [];
+    view.outputQueueHead = 0;
+    return;
+  }
+  if (view.outputQueueHead >= 64 && view.outputQueueHead * 2 >= view.outputQueueChunks.length) {
+    view.outputQueueChunks = view.outputQueueChunks.slice(view.outputQueueHead);
+    view.outputQueueHead = 0;
+  }
 }
 
 function resetPaneOutputQueue(view) {
@@ -78,6 +112,7 @@ function resetPaneOutputQueue(view) {
     return;
   }
   view.outputQueueChunks = [];
+  view.outputQueueHead = 0;
   view.outputQueueLength = 0;
 }
 
@@ -86,18 +121,19 @@ function trimPaneOutputQueue(view, keepLength = OUTPUT_QUEUE_KEEP) {
     return;
   }
   let dropLength = view.outputQueueLength - keepLength;
-  while (dropLength > 0 && view.outputQueueChunks.length > 0) {
-    const first = view.outputQueueChunks[0];
+  while (dropLength > 0 && view.outputQueueHead < view.outputQueueChunks.length) {
+    const first = view.outputQueueChunks[view.outputQueueHead];
     if (first.length <= dropLength) {
-      view.outputQueueChunks.shift();
+      view.outputQueueHead += 1;
       view.outputQueueLength -= first.length;
       dropLength -= first.length;
       continue;
     }
-    view.outputQueueChunks[0] = first.slice(dropLength);
+    view.outputQueueChunks[view.outputQueueHead] = first.slice(dropLength);
     view.outputQueueLength -= dropLength;
     dropLength = 0;
   }
+  compactPaneOutputQueue(view);
 }
 
 function appendPaneOutputQueue(view, output) {
@@ -119,20 +155,21 @@ function takePaneOutputChunk(view, maxLength = OUTPUT_FLUSH_CHUNK_SIZE) {
   }
   const parts = [];
   let remaining = maxLength;
-  while (remaining > 0 && view.outputQueueChunks.length > 0) {
-    const first = view.outputQueueChunks[0];
+  while (remaining > 0 && view.outputQueueHead < view.outputQueueChunks.length) {
+    const first = view.outputQueueChunks[view.outputQueueHead];
     if (first.length <= remaining) {
       parts.push(first);
-      view.outputQueueChunks.shift();
+      view.outputQueueHead += 1;
       view.outputQueueLength -= first.length;
       remaining -= first.length;
       continue;
     }
     parts.push(first.slice(0, remaining));
-    view.outputQueueChunks[0] = first.slice(remaining);
+    view.outputQueueChunks[view.outputQueueHead] = first.slice(remaining);
     view.outputQueueLength -= remaining;
     remaining = 0;
   }
+  compactPaneOutputQueue(view);
   return parts.length === 1 ? parts[0] : parts.join("");
 }
 
@@ -249,19 +286,26 @@ function paneForSession(sessionId, options = {}) {
     return null;
   }
   const visibleOnly = Boolean(options?.visibleOnly);
-  const matches = Object.keys(state.paneSessions).filter((paneId) => state.paneSessions[paneId] === sessionId);
-  const attached = matches.find((paneId) => {
+  let firstMatch = null;
+  let boundMatch = null;
+  for (const paneId in state.paneSessions) {
+    if (state.paneSessions[paneId] !== sessionId) {
+      continue;
+    }
+    firstMatch ??= paneId;
     const view = state.paneViews.get(paneId);
-    return view?.sessionId === sessionId && isPaneViewAttached(view);
-  });
-  if (attached) {
-    return attached;
+    if (view?.sessionId !== sessionId) {
+      continue;
+    }
+    boundMatch ??= paneId;
+    if (isPaneViewAttached(view)) {
+      return paneId;
+    }
   }
   if (visibleOnly) {
     return null;
   }
-  const bound = matches.find((paneId) => state.paneViews.get(paneId)?.sessionId === sessionId);
-  return bound ?? matches[0] ?? null;
+  return boundMatch ?? firstMatch;
 }
 
 function openPaneGroupMenu(paneId, anchorBtn) {
@@ -2069,6 +2113,7 @@ function createPaneView(paneId, host) {
     inputFlushInFlight: false,
     flushRaf: null,
     outputQueueChunks: [],
+    outputQueueHead: 0,
     outputQueueLength: 0,
     outputWriteInFlight: false,
     tailRestoreSessionId: null,

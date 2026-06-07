@@ -316,6 +316,21 @@ function scheduleSessionRefresh() {
     hiddenRefreshPanesUi();
   }, 80);
 }
+
+let notificationUiRefreshRaf = null;
+function scheduleNotificationUiRefresh() {
+  if (notificationUiRefreshRaf) {
+    return;
+  }
+  notificationUiRefreshRaf = window.requestAnimationFrame(() => {
+    notificationUiRefreshRaf = null;
+    renderNotifications();
+    renderWorkspaces();
+    paneApi.refreshPaneBindings();
+    void updateUnreadBadge(state.notifications.length);
+  });
+}
+
 function handleStreamEvent(event) {
   if (!event?.method) {
     return;
@@ -331,10 +346,7 @@ function handleStreamEvent(event) {
     }
     if (!state.notifications.some((item) => item.id === row.id)) {
       state.notifications = [row, ...state.notifications];
-      renderNotifications();
-      renderWorkspaces();
-      paneApi.refreshPaneBindings();
-      void updateUnreadBadge(state.notifications.length);
+      scheduleNotificationUiRefresh();
     }
     return;
   }
