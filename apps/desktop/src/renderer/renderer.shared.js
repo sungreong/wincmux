@@ -710,6 +710,16 @@ function normalizePromptText(value) {
     .trim();
 }
 
+const PROMPT_FAST_PATH_RX = /\b(?:claude|codex|gpt-\S+|sonnet|opus|waiting|awaiting|input|response|confirmation|approval|need|proceed|continue|should\s+i|would\s+you|do\s+you\s+want|run\s+shell\s+command|enter\s+to\s+confirm|esc\s+to\s+cancel|press\s+enter|hit\s+enter|yes\s*\/\s*no|select|choose|number|choice)\b|(?:진행|계속|선택|번호|입력|응답|기다리고|실행|수정|변경|허용|승인|도와드릴까요)/i;
+
+function mightContainPromptSignal(rawChunk, existingBuffer = "") {
+  if (!rawChunk && !existingBuffer) {
+    return false;
+  }
+  const probe = `${String(existingBuffer ?? "").slice(-240)} ${String(rawChunk ?? "").slice(0, 1200)}`;
+  return PROMPT_FAST_PATH_RX.test(probe);
+}
+
 function shouldSuppressPromptMarker(key, snippet, recent) {
   if (key !== "press enter") {
     return false;
@@ -915,6 +925,10 @@ function hasAssistantPromptContext(bufferText) {
 }
 
 function detectPromptSignal(sessionState, outputChunk) {
+  if (!mightContainPromptSignal(outputChunk, sessionState.buffer)) {
+    return null;
+  }
+
   const text = normalizePromptText(outputChunk);
   if (!text) {
     return null;
