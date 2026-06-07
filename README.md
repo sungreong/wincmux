@@ -210,6 +210,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Renderer terminal output flushes now use a shared frame queue with a per-frame pane budget, preventing many panes from writing to xterm in the same frame.
 - Notification target parsing is cached per notification row and reused during workspace, notification, and pane badge renders.
 - Renderer notification refresh builds shared workspace/pane/session unread maps once per notification array and reuses them across workspace badges, notification grouping, and pane badges.
+- Pane binding refresh now keeps a per-pane visible-state signature and skips unchanged DOM writes, session rebinds, and action layout measurement during repeated refreshes.
 - Renderer performance logs are batched before IPC/file append so high-frequency input flush metrics do not add per-keystroke IPC overhead.
 - Deferred live stream output collected during tail restore now uses a bounded chunk queue, avoiding repeated string concat/slice while panes reconnect or screens switch.
 - Main-to-renderer stream events are batched over a short IPC window, and adjacent output for the same session is merged before delivery to reduce Electron IPC wake-ups under multi-terminal load.

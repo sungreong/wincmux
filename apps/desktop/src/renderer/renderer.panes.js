@@ -849,6 +849,45 @@ function unreadCountForPane(unreadCounts, paneId, sessionId) {
   return sessionId ? (unreadCounts?.session?.get(sessionId) ?? 0) : 0;
 }
 
+function paneBindingState(paneId, sessionId, runningMap, dormant, fontSize, unreadCount, leafCount, view) {
+  const session = sessionId ? runningMap.get(sessionId) : null;
+  const group = typeof groupForPane === "function" ? groupForPane(paneId) : null;
+  const statusText = sessionId
+    ? (session ? `Running - pid ${session.pid}` : "Attached")
+    : (dormant?.spawn_cmd ? `Dormant - ${dormant.spawn_cmd}` : "No session");
+  const statusTitle = sessionId ? "" : (dormant?.spawn_cmd ? "Restore available" : "");
+  const startLabel = sessionId ? "Restart" : (dormant?.spawn_cmd ? "Restore" : "Start");
+  const closeDisabled = !sessionId;
+  const unreadText = unreadCount > 99 ? "99+" : String(unreadCount);
+  const groupText = group ? `${group.name} ▾` : "";
+  const groupTitle = group ? `Move this terminal from ${group.name} to another group` : "Move this terminal to a group";
+  const key = [
+    sessionId ?? "",
+    session?.pid ?? "",
+    dormant?.session_id ?? "",
+    dormant?.spawn_cmd ?? "",
+    fontSize,
+    view?.sessionId ?? "",
+    unreadCount,
+    leafCount,
+    group?.id ?? "",
+    group?.name ?? "",
+    group?.color ?? "",
+    state.paneAutoResize === false ? "manual" : "auto"
+  ].join("|");
+  return {
+    key,
+    statusText,
+    statusTitle,
+    startLabel,
+    closeDisabled,
+    unreadText,
+    group,
+    groupText,
+    groupTitle
+  };
+}
+
 async function selectPane(paneId, options = {}) {
   const { persist = true, focusTerm = true } = options;
   if (!paneId || !leafPanes().some((p) => p.pane_id === paneId)) {
@@ -2856,48 +2895,43 @@ function refreshPaneBindings() {
     const fontSize = currentPaneFontSize(state.selectedWorkspaceId, paneId);
     const unreadCount = unreadCountForPane(unreadCounts, paneId, sessionId);
     const dormant = state.dormantPaneSessions[paneId] ?? null;
-    if (meta) {
-      if (sessionId) {
-        const session = runningMap.get(sessionId);
-        meta.statusEl.textContent = session ? `Running - pid ${session.pid}` : "Attached";
-        meta.statusEl.title = "";
-        meta.startBtn.dataset.fullLabel = "Restart";
-        meta.closeBtn.disabled = false;
-      } else if (dormant?.spawn_cmd) {
-        meta.statusEl.textContent = `Dormant - ${dormant.spawn_cmd}`;
-        meta.statusEl.title = "Restore available";
-        meta.startBtn.dataset.fullLabel = "Restore";
-        meta.closeBtn.disabled = true;
-      } else {
-        meta.statusEl.textContent = "No session";
-        meta.statusEl.title = "";
-        meta.startBtn.dataset.fullLabel = "Start";
-        meta.closeBtn.disabled = true;
-      }
-      meta.fontDownBtn.disabled = fontSize <= PANE_FONT_LIMITS.min;
-      meta.fontUpBtn.disabled = fontSize >= PANE_FONT_LIMITS.max;
-      meta.closePaneBtn.disabled = leafCount <= 1;
-      meta.hidePaneBtn.disabled = leafCount <= 1;
-      meta.unreadBadgeEl.hidden = unreadCount <= 0;
-      meta.unreadBadgeEl.textContent = unreadCount > 99 ? "99+" : String(unreadCount);
-      const group = typeof groupForPane === "function" ? groupForPane(paneId) : null;
-      if (meta.groupBadgeEl) {
-        meta.groupBadgeEl.hidden = !group;
-        meta.groupBadgeEl.textContent = group ? `${group.name} ▾` : "";
-        meta.groupBadgeEl.title = group ? `Move this terminal from ${group.name} to another group` : "Move this terminal to a group";
-        meta.groupBadgeEl.setAttribute("aria-label", meta.groupBadgeEl.title);
-        meta.groupBadgeEl.style.setProperty("--group-color", group?.color ?? "#6b7c93");
-      }
-    }
+    const view = state.paneViews.get(paneId);
+    const binding = paneBindingState(paneId, sessionId, runningMap, dormant, fontSize, unreadCount, leafCount, view);
     const card = state.paneCards.get(paneId);
-    if (card) {
+    const shouldUpdateBinding = meta?._bindingKey !== binding.key;
+    if (meta) {
+      if (shouldUpdateBinding) {
+        meta.statusEl.textContent = binding.statusText;
+        meta.statusEl.title = binding.statusTitle;
+        meta.startBtn.dataset.fullLabel = binding.startLabel;
+        meta.closeBtn.disabled = binding.closeDisabled;
+        meta.fontDownBtn.disabled = fontSize <= PANE_FONT_LIMITS.min;
+        meta.fontUpBtn.disabled = fontSize >= PANE_FONT_LIMITS.max;
+        meta.closePaneBtn.disabled = leafCount <= 1;
+        meta.hidePaneBtn.disabled = leafCount <= 1;
+        meta.unreadBadgeEl.hidden = unreadCount <= 0;
+        meta.unreadBadgeEl.textContent = binding.unreadText;
+      }
+      if (meta.groupBadgeEl) {
+        if (shouldUpdateBinding) {
+          meta.groupBadgeEl.hidden = !binding.group;
+          meta.groupBadgeEl.textContent = binding.groupText;
+          meta.groupBadgeEl.title = binding.groupTitle;
+          meta.groupBadgeEl.setAttribute("aria-label", binding.groupTitle);
+          meta.groupBadgeEl.style.setProperty("--group-color", binding.group?.color ?? "#6b7c93");
+        }
+      }
+      meta._bindingKey = binding.key;
+    }
+    if (card && shouldUpdateBinding) {
       card.classList.toggle("pane-has-unread", unreadCount > 0);
       card.classList.toggle("pane-dormant", !sessionId && Boolean(dormant));
     }
-    updatePaneActionLayout(paneId);
+    if (shouldUpdateBinding) {
+      updatePaneActionLayout(paneId);
+    }
 
-    const view = state.paneViews.get(paneId);
-    if (view) {
+    if (view && shouldUpdateBinding) {
       applyPaneFontToView(paneId, fontSize);
       bindViewToSession(view, sessionId);
     }
