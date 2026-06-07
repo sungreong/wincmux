@@ -221,6 +221,7 @@ npm run package:win
 - renderer webContents가 destroyed 되면 persistent stream socket도 닫아 window lifecycle 변경 뒤 stale stream send가 남지 않게 했습니다.
 - pane overflow와 quick command 메뉴는 body-level portal로 띄워 compact pane이나 split 경계에서 UI가 잘리지 않게 했습니다.
 - assistant prompt notification은 `press enter`가 포함된 Codex/npm 업데이트 로그를 억제해 CLI 업데이트 중 반복 native toast 오탐을 막았습니다.
+- pane binding refresh는 unread notification과 known session을 refresh당 한 번만 인덱싱해 pane마다 전체 목록을 다시 훑지 않게 했습니다.
 - core drain/tail 출력 버퍼도 제한 크기의 chunk buffer로 바꿔 PTY 출력이 들어오는 동안 반복 문자열 concat/slice가 일어나지 않게 했습니다.
 - core stream batch는 flush 지연을 낮추고 큰 출력 burst는 즉시 flush해 interactive latency를 낮췄습니다.
 - core notification/resume detector는 stream batch 단위로 실행하고 일반 shell 출력은 fast-path로 건너뛰어 다중 터미널의 regex 작업량을 줄였습니다.

@@ -675,26 +675,38 @@ function clearPaneMoveTarget(paneId = null) {
   applyPaneSelectionStyles();
 }
 
-function unreadRowsForPane(paneId, sessionId) {
-  const workspaceId = selectedWorkspace()?.id ?? null;
+function unreadCountsForWorkspacePanes(workspaceId) {
+  const counts = {
+    pane: new Map(),
+    session: new Map()
+  };
   if (!workspaceId) {
-    return [];
+    return counts;
   }
 
-  return state.notifications.filter((row) => {
+  for (const row of state.notifications) {
     const target = normalizeNotificationTarget(row);
     const targetWorkspaceId = target.workspaceId ?? row.workspace_id ?? null;
     if (targetWorkspaceId !== workspaceId) {
-      return false;
+      continue;
     }
     if (target.paneId) {
-      return target.paneId === paneId;
+      counts.pane.set(target.paneId, (counts.pane.get(target.paneId) ?? 0) + 1);
+      continue;
     }
-    if (sessionId && target.sessionId) {
-      return target.sessionId === sessionId;
+    if (target.sessionId) {
+      counts.session.set(target.sessionId, (counts.session.get(target.sessionId) ?? 0) + 1);
     }
-    return false;
-  });
+  }
+  return counts;
+}
+
+function unreadCountForPane(unreadCounts, paneId, sessionId) {
+  const paneCount = unreadCounts?.pane?.get(paneId) ?? 0;
+  if (paneCount > 0) {
+    return paneCount;
+  }
+  return sessionId ? (unreadCounts?.session?.get(sessionId) ?? 0) : 0;
 }
 
 async function selectPane(paneId, options = {}) {
@@ -2515,11 +2527,15 @@ function renderPaneEmptyState(title, description) {
 }
 
 function refreshPaneBindings() {
-  const runningMap = new Map(runningSessions().map((s) => [s.id, s]));
-  const leafCount = leafPanes().length;
+  const runningRows = runningSessions();
+  const runningMap = new Map(runningRows.map((s) => [s.id, s]));
+  const knownSessionIds = new Set(state.sessions.map((s) => s.id));
+  const leaves = leafPanes();
+  const leafCount = leaves.length;
+  const unreadCounts = unreadCountsForWorkspacePanes(selectedWorkspace()?.id ?? null);
   paneDebug("[refreshBindings] called, running sessions:", [...runningMap.keys()].map(s=>s.slice(0,8)), "paneSessions:", Object.entries(state.paneSessions).map(([p,s])=>`${p.slice(0,8)}->${s?.slice(0,8)}`));
 
-  for (const pane of leafPanes()) {
+  for (const pane of leaves) {
     const paneId = pane.pane_id;
     let sessionId = state.paneSessions[paneId] ?? null;
 
@@ -2528,7 +2544,7 @@ function refreshPaneBindings() {
       // not merely absent from runningSessions yet (could be newly starting).
       // runningSessions() reflects state.sessions which may lag behind session.run.
       // We rely on normalizePaneSessions (which also checks leafIds) for thorough cleanup.
-      const knownToState = state.sessions.some((s) => s.id === sessionId);
+      const knownToState = knownSessionIds.has(sessionId);
       if (!knownToState) {
         delete state.paneSessions[paneId];
         sessionId = null;
@@ -2537,7 +2553,7 @@ function refreshPaneBindings() {
 
     const meta = state.paneMeta.get(paneId);
     const fontSize = currentPaneFontSize(state.selectedWorkspaceId, paneId);
-    const unreadCount = unreadRowsForPane(paneId, sessionId).length;
+    const unreadCount = unreadCountForPane(unreadCounts, paneId, sessionId);
     const dormant = state.dormantPaneSessions[paneId] ?? null;
     if (meta) {
       if (sessionId) {
