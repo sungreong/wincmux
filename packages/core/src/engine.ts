@@ -65,6 +65,11 @@ const DEFAULT_PIPE = "\\\\.\\pipe\\wincmux-rpc";
 const SESSION_OUTPUT_BATCH_DELAY_MS = 8;
 const SESSION_OUTPUT_BATCH_MAX_CHARS = 32_768;
 const SESSION_OUTPUT_BUFFER_KEEP_CHARS = 200_000;
+const GIT_STATUS_TIMER_INTERVAL_MS = 3_000;
+const GIT_STATUS_ACTIVE_INTERVAL_MS = 8_000;
+const GIT_STATUS_INACTIVE_INTERVAL_MS = 45_000;
+const GIT_STATUS_MAX_IN_FLIGHT = 1;
+const GIT_STATUS_TERMINAL_IDLE_MS = 1_500;
 
 interface StreamSubscription {
   id: string;
@@ -122,12 +127,13 @@ export class CoreEngine {
   private gitTimer?: NodeJS.Timeout;
   private gitInFlight = 0;
   private activeWorkspaceId: string | null = null;
+  private lastTerminalActivityAt = 0;
   private stopped = false;
 
   constructor(private readonly options: CoreOptions) {
     this.db = new DbStore(options.dbPath);
     this.server = net.createServer((socket) => this.handleSocket(socket));
-    this.gitTimer = setInterval(() => { void this.refreshGitStatus(); }, 3000);
+    this.gitTimer = setInterval(() => { void this.refreshGitStatus(); }, GIT_STATUS_TIMER_INTERVAL_MS);
   }
 
   async start(): Promise<void> {
@@ -417,6 +423,7 @@ export class CoreEngine {
       pid: pty.pid
     });
     pty.onData((chunk) => {
+      this.noteTerminalActivity();
       this.appendSessionOutput(sessionId, chunk);
       this.queueSessionOutput(sessionId, p.workspace_id, chunk);
     });
@@ -515,6 +522,7 @@ export class CoreEngine {
 
   private sessionWrite(params: unknown): { ok: true } {
     const p = sessionWriteSchema.parse(params ?? {});
+    this.noteTerminalActivity();
     this.noteSessionInput(p.session_id, p.data);
     this.pty.write(p.session_id, p.data);
     return { ok: true };
@@ -1022,8 +1030,20 @@ export class CoreEngine {
     this.db.saveLayoutSnapshot(workspaceId, this.layout.serialize(workspaceId), new Date().toISOString());
   }
 
+  private noteTerminalActivity(): void {
+    this.lastTerminalActivityAt = Date.now();
+  }
+
+  private hasRecentTerminalActivity(now = Date.now()): boolean {
+    return now - this.lastTerminalActivityAt < GIT_STATUS_TERMINAL_IDLE_MS;
+  }
+
   private async refreshGitStatus(): Promise<void> {
     if (this.stopped || this.gitInFlight > 0) {
+      return;
+    }
+    const now = Date.now();
+    if (this.hasRecentTerminalActivity(now)) {
       return;
     }
     const workspaces = this.db.listWorkspaces().sort((a, b) => {
@@ -1031,17 +1051,16 @@ export class CoreEngine {
       if (b.id === this.activeWorkspaceId) return 1;
       return 0;
     });
-    const now = Date.now();
     for (const ws of workspaces) {
       const nextDue = this.gitNextDue.get(ws.id) ?? 0;
       if (nextDue > now) {
         continue;
       }
-      if (this.gitInFlight >= 2) {
+      if (this.gitInFlight >= GIT_STATUS_MAX_IN_FLIGHT) {
         break;
       }
       this.gitInFlight += 1;
-      this.gitNextDue.set(ws.id, now + (ws.id === this.activeWorkspaceId ? 5_000 : 30_000));
+      this.gitNextDue.set(ws.id, now + (ws.id === this.activeWorkspaceId ? GIT_STATUS_ACTIVE_INTERVAL_MS : GIT_STATUS_INACTIVE_INTERVAL_MS));
       void readGitStatus(ws.path)
         .then((status) => {
           if (this.stopped) {

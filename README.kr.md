@@ -218,6 +218,7 @@ npm run package:win
 - 터미널 입력 flush는 adaptive 방식으로 바꿔 Enter, escape/control sequence, 작은 키 입력은 즉시 보내고 큰 paste는 짧게 batch합니다.
 - 기본 Windows shell은 profile/AutoRun 작업을 건너뛰도록 실행합니다(`pwsh`/PowerShell `-NoProfile`, `cmd.exe /d`). profile이 필요한 경우 custom command를 사용할 수 있습니다.
 - shell 시작 변경 효과를 추측하지 않도록 session startup latency를 성능 로그에 기록합니다.
+- 백그라운드 git status refresh는 최근 터미널 입력/출력이 있으면 미루고, 한 번에 workspace 하나만 확인해 활성 터미널과의 CPU/디스크 경쟁을 줄였습니다.
 - pane fit과 resize 작업은 `requestAnimationFrame`으로 묶어 pane/사이드바 크기 조절 중 반복 layout 측정을 줄였습니다.
 - 워크스페이스/그룹 전환 시 stream 출력은 해당 세션이 실제로 붙어 있는 visible pane에만 전달하고, tail 복원 중 들어온 live 출력은 중복 prefix를 제거합니다.
 - 터미널 fit/resize는 DOM에서 떨어졌거나 아직 0px인 pane host를 건너뛰고, cols/rows가 바뀌지 않은 PTY resize RPC는 중복 전송하지 않습니다.

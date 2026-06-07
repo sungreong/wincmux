@@ -201,6 +201,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Terminal input flushing is adaptive: Enter, escape/control sequences, and small interactive keystrokes flush immediately while large paste payloads still batch briefly.
 - Default Windows shells start with profile/AutoRun work disabled (`pwsh`/PowerShell `-NoProfile`, `cmd.exe /d`) while custom commands remain available for users who need profile-driven setup.
 - Session startup latency is recorded in the performance log so shell startup changes can be measured instead of guessed.
+- Background git status refresh now backs off during recent terminal input/output and runs one workspace check at a time to avoid competing with active terminals.
 - Pane fitting and resize work is coalesced with `requestAnimationFrame` to reduce repeated layout measurement while resizing panes or sidebars.
 - Workspace/group switches now route stream output only to the visible pane bound to that session, and tail restore deduplicates live output that arrives during the restore window.
 - Terminal fit/resize now skips detached or zero-size pane hosts, avoids duplicate PTY resize RPCs for unchanged cols/rows, and retries only after layout is measurable.
