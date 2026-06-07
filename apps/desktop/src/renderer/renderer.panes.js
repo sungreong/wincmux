@@ -17,6 +17,9 @@ const INPUT_FLUSH_DELAY_MS = 12;
 const INPUT_INTERACTIVE_FLUSH_DELAY_MS = 0;
 const INPUT_BULK_THRESHOLD = 256;
 const INPUT_RETRY_DELAY_MS = 120;
+const INPUT_PERF_DETAIL_LATENCY_MS = 16;
+const INPUT_PERF_SUMMARY_INTERVAL_MS = 1000;
+const INPUT_PERF_SUMMARY_MAX_SAMPLES = 32;
 const IME_COMMIT_WAIT_MS = 80;
 const IME_DUPLICATE_WINDOW_MS = 220;
 const OUTPUT_FLUSH_CHUNK_SIZE = 16_384;
@@ -1078,6 +1081,7 @@ function disposeView(view) {
   }
   view.inputFlushToken = (view.inputFlushToken ?? 0) + 1;
   view.inputFlushScheduled = false;
+  clearPaneInputPerfSummary(view, { flush: true, reason: "dispose" });
   if (view.compositionFlushTimer) {
     clearTimeout(view.compositionFlushTimer);
   }
@@ -1728,6 +1732,105 @@ function schedulePaneInputFlush(view, delayMs = INPUT_FLUSH_DELAY_MS) {
   view.flushTimer = setTimeout(() => runScheduledPaneInputFlush(view, token), normalizedDelay);
 }
 
+function clearPaneInputPerfSummary(view, { flush = false, reason = "clear" } = {}) {
+  if (!view) {
+    return;
+  }
+  if (view.inputPerfTimer) {
+    clearTimeout(view.inputPerfTimer);
+    view.inputPerfTimer = null;
+  }
+  if (flush) {
+    flushPaneInputPerfSummary(view, reason);
+  } else {
+    view.inputPerfSummary = null;
+  }
+}
+
+function flushPaneInputPerfSummary(view, reason = "interval") {
+  const summary = view?.inputPerfSummary;
+  if (!summary || summary.count <= 0) {
+    return;
+  }
+  if (view.inputPerfTimer) {
+    clearTimeout(view.inputPerfTimer);
+    view.inputPerfTimer = null;
+  }
+  view.inputPerfSummary = null;
+  logPerf("input.flush.summary", {
+    pane_id: view.paneId,
+    session_id: summary.sessionId,
+    count: summary.count,
+    bytes: summary.bytes,
+    max_queued: summary.maxQueued,
+    avg_latency_ms: Number((summary.latencySum / summary.count).toFixed(2)),
+    max_latency_ms: Number(summary.maxLatency.toFixed(2)),
+    reason
+  });
+}
+
+function recordPaneInputPerf(view, sessionId, queued, sent, dropped, latency) {
+  if (!view) {
+    return;
+  }
+  const roundedLatency = Number(latency.toFixed(2));
+  const shouldLogDetail = dropped > 0
+    || sent <= 0
+    || queued > INPUT_BULK_THRESHOLD
+    || latency >= INPUT_PERF_DETAIL_LATENCY_MS;
+
+  if (shouldLogDetail) {
+    flushPaneInputPerfSummary(view, "detail");
+    if (sent > 0) {
+      logPerf("input.latency", {
+        pane_id: view.paneId,
+        session_id: sessionId,
+        latency_ms: roundedLatency
+      });
+    }
+    logPerf("input.flush", {
+      pane_id: view.paneId,
+      session_id: sessionId,
+      queued,
+      sent,
+      dropped,
+      in_flight_ms: roundedLatency
+    });
+    return;
+  }
+
+  const now = performance.now();
+  let summary = view.inputPerfSummary;
+  if (!summary || summary.sessionId !== sessionId || now - summary.startedAt >= INPUT_PERF_SUMMARY_INTERVAL_MS) {
+    flushPaneInputPerfSummary(view, summary ? "session" : "start");
+    summary = {
+      sessionId,
+      startedAt: now,
+      count: 0,
+      bytes: 0,
+      maxQueued: 0,
+      latencySum: 0,
+      maxLatency: 0
+    };
+    view.inputPerfSummary = summary;
+  }
+
+  summary.count += 1;
+  summary.bytes += queued;
+  summary.maxQueued = Math.max(summary.maxQueued, queued);
+  summary.latencySum += latency;
+  summary.maxLatency = Math.max(summary.maxLatency, latency);
+
+  if (summary.count >= INPUT_PERF_SUMMARY_MAX_SAMPLES) {
+    flushPaneInputPerfSummary(view, "count");
+    return;
+  }
+
+  if (!view.inputPerfTimer) {
+    view.inputPerfTimer = setTimeout(() => flushPaneInputPerfSummary(view, "timer"), INPUT_PERF_SUMMARY_INTERVAL_MS);
+  }
+}
+
 function queuePaneInput(view, data) {
   if (!view.sessionId || !data) {
     return;
@@ -1794,19 +1897,7 @@ async function flushPaneInput(view) {
         if (state.metrics.input_latency_ms.length > 50) {
           state.metrics.input_latency_ms.shift();
         }
-        logPerf("input.latency", {
-          pane_id: view.paneId,
-          session_id: sessionId,
-          latency_ms: Number(latency.toFixed(2))
-        });
-        logPerf("input.flush", {
-          pane_id: view.paneId,
-          session_id: sessionId,
-          queued,
-          sent: queued,
-          dropped: 0,
-          in_flight_ms: Number(latency.toFixed(2))
-        });
+        recordPaneInputPerf(view, sessionId, queued, queued, 0, latency);
         if (!state.useStream) {
           schedulePanePolling(view, PANE_POLL_ACTIVE_DELAY_MS, { reset: true });
         }
@@ -1829,14 +1920,7 @@ async function flushPaneInput(view) {
           setStatus(`Terminal input error: ${msg}`, true);
         }
         const latency = performance.now() - started;
-        logPerf("input.flush", {
-          pane_id: view.paneId,
-          session_id: sessionId,
-          queued,
-          sent: 0,
-          dropped: queued,
-          in_flight_ms: Number(latency.toFixed(2))
-        });
+        recordPaneInputPerf(view, sessionId, queued, 0, queued, latency);
         paneDebug("[input] write failed", {
           pane: view.paneId?.slice(0, 8),
           session: sessionId.slice(0, 8),
@@ -1946,6 +2030,7 @@ function bindViewToSession(view, sessionId) {
   view.inputFlushScheduled = false;
   view.inputFlushInFlight = false;
   view.inputFlushToken = (view.inputFlushToken ?? 0) + 1;
+  clearPaneInputPerfSummary(view, { flush: true, reason: "bind" });
   cancelPaneOutputFlush(view);
   if (view.fitRaf) {
     cancelAnimationFrame(view.fitRaf);
@@ -2582,6 +2667,8 @@ function createPaneView(paneId, host) {
     inputFlushDelayMs: null,
     inputFlushScheduled: false,
     inputFlushToken: 0,
+    inputPerfSummary: null,
+    inputPerfTimer: null,
     inputFlushInFlight: false,
     outputFlushQueued: false,
     outputQueueChunks: [],
@@ -2873,6 +2960,7 @@ function renderPaneSurface(force = false) {
         view.inputFlushScheduled = false;
         view.inputFlushInFlight = false;
         view.inputFlushToken = (view.inputFlushToken ?? 0) + 1;
+        clearPaneInputPerfSummary(view, { flush: true, reason: "workspace-switch" });
         view.inputFlushDelayMs = null;
         view.pendingInput = "";
         view._boundToStream = false; // force rebind on restore

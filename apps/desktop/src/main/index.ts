@@ -86,6 +86,9 @@ let activeContext: {
 
 const STREAM_EVENT_IPC_BATCH_DELAY_MS = 2;
 const STREAM_EVENT_IPC_MAX_EVENTS = 64;
+let cachedLogDir: string | null = null;
+let cachedPerfLogPath: string | null = null;
+const cachedAppLogPaths = new Map<"main.log" | "core.log", string>();
 
 function consumeSocketLines(buffer: string, chunk: Buffer, onLine: (line: string) => false | void): string {
   const next = buffer + chunk.toString("utf8");
@@ -164,18 +167,31 @@ function queueRendererStreamEvent(webContents: WebContents, event: RendererStrea
   }
 }
 
-function perfLogPath(): string {
+function winCmuxLogDir(): string {
+  if (cachedLogDir) {
+    return cachedLogDir;
+  }
   const localAppData = process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local");
-  const dir = path.join(localAppData, "WinCMux", "logs");
-  fs.mkdirSync(dir, { recursive: true });
-  return path.join(dir, "perf.jsonl");
+  cachedLogDir = path.join(localAppData, "WinCMux", "logs");
+  fs.mkdirSync(cachedLogDir, { recursive: true });
+  return cachedLogDir;
+}
+
+function perfLogPath(): string {
+  if (!cachedPerfLogPath) {
+    cachedPerfLogPath = path.join(winCmuxLogDir(), "perf.jsonl");
+  }
+  return cachedPerfLogPath;
 }
 
 function appLogPath(name: "main.log" | "core.log"): string {
-  const localAppData = process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local");
-  const dir = path.join(localAppData, "WinCMux", "logs");
-  fs.mkdirSync(dir, { recursive: true });
-  return path.join(dir, name);
+  const cached = cachedAppLogPaths.get(name);
+  if (cached) {
+    return cached;
+  }
+  const next = path.join(winCmuxLogDir(), name);
+  cachedAppLogPaths.set(name, next);
+  return next;
 }
 
 function appendAppLog(name: "main.log" | "core.log", message: string): void {
