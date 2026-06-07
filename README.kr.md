@@ -223,6 +223,7 @@ npm run package:win
 - assistant prompt notification은 `press enter`가 포함된 Codex/npm 업데이트 로그를 억제해 CLI 업데이트 중 반복 native toast 오탐을 막았습니다.
 - pane binding refresh는 unread notification과 known session을 refresh당 한 번만 인덱싱해 pane마다 전체 목록을 다시 훑지 않게 했습니다.
 - core stream event는 emit당 한 번만 직렬화하고 socket당 한 번만 전송해 subscription이 겹칠 때 중복 output을 피합니다.
+- renderer terminal output flush는 공유 frame queue와 프레임당 pane budget을 사용해 많은 pane이 같은 프레임에 xterm write를 몰아넣지 않게 했습니다.
 - core drain/tail 출력 버퍼도 제한 크기의 chunk buffer로 바꿔 PTY 출력이 들어오는 동안 반복 문자열 concat/slice가 일어나지 않게 했습니다.
 - core stream batch는 flush 지연을 낮추고 큰 출력 burst는 즉시 flush해 interactive latency를 낮췄습니다.
 - core notification/resume detector는 stream batch 단위로 실행하고 일반 shell 출력은 fast-path로 건너뛰어 다중 터미널의 regex 작업량을 줄였습니다.

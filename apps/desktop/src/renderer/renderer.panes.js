@@ -20,6 +20,7 @@ const INPUT_RETRY_DELAY_MS = 120;
 const IME_COMMIT_WAIT_MS = 80;
 const IME_DUPLICATE_WINDOW_MS = 220;
 const OUTPUT_FLUSH_CHUNK_SIZE = 16_384;
+const OUTPUT_FLUSH_MAX_PANES_PER_FRAME = 3;
 const OUTPUT_QUEUE_LIMIT = 256_000;
 const OUTPUT_QUEUE_KEEP = 180_000;
 const PANE_DEBUG_LOGS = localStorage.getItem("wincmux.debug.panes") === "1";
@@ -28,6 +29,8 @@ const PANE_MIN_FIT_WIDTH = 24;
 const PANE_MIN_FIT_HEIGHT = 24;
 const STREAM_TAIL_OVERLAP_LIMIT = 16_384;
 let fitAllPanesRaf = null;
+let outputFlushRaf = null;
+const outputFlushPaneQueue = new Set();
 
 function paneDebug(...args) {
   if (PANE_DEBUG_LOGS) {
@@ -533,10 +536,54 @@ function enqueueStreamOutput(paneId, output, options = {}) {
 }
 
 function schedulePaneOutputFlush(view) {
-  if (!view || view.flushRaf || view.outputWriteInFlight) {
+  if (!view || view.outputFlushQueued || view.outputWriteInFlight) {
     return;
   }
-  view.flushRaf = window.requestAnimationFrame(() => flushPaneOutput(view.paneId));
+  view.outputFlushQueued = true;
+  outputFlushPaneQueue.add(view.paneId);
+  scheduleOutputFlushFrame();
+}
+
+function scheduleOutputFlushFrame() {
+  if (outputFlushRaf) {
+    return;
+  }
+  outputFlushRaf = window.requestAnimationFrame(flushQueuedPaneOutputs);
+}
+
+function flushQueuedPaneOutputs() {
+  outputFlushRaf = null;
+  let processed = 0;
+  for (const paneId of outputFlushPaneQueue) {
+    outputFlushPaneQueue.delete(paneId);
+    const view = state.paneViews.get(paneId);
+    if (view) {
+      view.outputFlushQueued = false;
+    }
+    if (!view || !view.outputQueueLength || view.outputWriteInFlight) {
+      continue;
+    }
+    flushPaneOutput(paneId);
+    processed += 1;
+    if (processed >= OUTPUT_FLUSH_MAX_PANES_PER_FRAME) {
+      break;
+    }
+  }
+  if (outputFlushPaneQueue.size > 0) {
+    scheduleOutputFlushFrame();
+  }
+}
+
+function cancelPaneOutputFlush(view) {
+  if (!view) {
+    return;
+  }
+  outputFlushPaneQueue.delete(view.paneId);
+  view.outputFlushQueued = false;
+  if (outputFlushPaneQueue.size === 0 && outputFlushRaf) {
+    cancelAnimationFrame(outputFlushRaf);
+    outputFlushRaf = null;
+  }
 }
 
 function flushPaneOutput(paneId) {
@@ -544,7 +591,6 @@ function flushPaneOutput(paneId) {
   if (!view) {
     return;
   }
-  view.flushRaf = null;
   if (!view.outputQueueLength || view.outputWriteInFlight) {
     return;
   }
@@ -822,12 +868,10 @@ function disposeView(view) {
     clearTimeout(view.resizeTimer);
   }
   clearPaneFitRetry(view);
-  if (view.flushRaf) {
-    cancelAnimationFrame(view.flushRaf);
-  }
   if (view.fitRaf) {
     cancelAnimationFrame(view.fitRaf);
   }
+  cancelPaneOutputFlush(view);
   if (view.observer) {
     view.observer.disconnect();
   }
@@ -1612,10 +1656,7 @@ function bindViewToSession(view, sessionId) {
   }
   view.inputFlushScheduled = false;
   view.inputFlushInFlight = false;
-  if (view.flushRaf) {
-    cancelAnimationFrame(view.flushRaf);
-    view.flushRaf = null;
-  }
+  cancelPaneOutputFlush(view);
   if (view.fitRaf) {
     cancelAnimationFrame(view.fitRaf);
     view.fitRaf = null;
@@ -2136,7 +2177,7 @@ function createPaneView(paneId, host) {
     inputFlushDelayMs: null,
     inputFlushScheduled: false,
     inputFlushInFlight: false,
-    flushRaf: null,
+    outputFlushQueued: false,
     outputQueueChunks: [],
     outputQueueHead: 0,
     outputQueueLength: 0,
@@ -2411,7 +2452,7 @@ function renderPaneSurface(force = false) {
       for (const view of state.paneViews.values()) {
         if (view.poller) { clearInterval(view.poller); view.poller = null; }
         if (view.flushTimer) { clearTimeout(view.flushTimer); view.flushTimer = null; }
-        if (view.flushRaf) { cancelAnimationFrame(view.flushRaf); view.flushRaf = null; }
+        cancelPaneOutputFlush(view);
         if (view.fitRaf) { cancelAnimationFrame(view.fitRaf); view.fitRaf = null; }
         view.readBusy = false;
         resetPaneOutputQueue(view);
