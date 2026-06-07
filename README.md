@@ -221,6 +221,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Renderer PTY resize sync now uses a shared queue with a per-frame pane budget, so split, equalize, and window resize changes do not send resize RPC bursts for every pane at once.
 - Core stream fan-out indexes subscriptions by topic plus workspace/session scope, so session output is routed to matching sockets without scanning every subscription on each batch.
 - Core AI resume detection now probes the current output batch before copying the recent tail buffer, avoiding tail joins for ordinary shell output while still catching split resume markers.
+- Core prompt/completion detection now inspects only the tail of large output batches before ANSI normalization, preserving end-of-output prompts while avoiding full-batch scans during huge terminal bursts.
 - Core drain/tail output buffers also use bounded chunk buffers, avoiding repeated string concat/slice while PTY output is still arriving.
 - Core stream batches use a shorter flush delay and flush immediately for large output bursts to lower interactive latency.
 - Core notification/resume detectors run on stream batches and skip generic shell output with a fast-path filter, reducing regex work across many terminals.

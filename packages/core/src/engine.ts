@@ -71,6 +71,7 @@ const GIT_STATUS_INACTIVE_INTERVAL_MS = 45_000;
 const GIT_STATUS_MAX_IN_FLIGHT = 1;
 const GIT_STATUS_TERMINAL_IDLE_MS = 1_500;
 const AI_RESUME_OUTPUT_PROBE = /\b(?:claude|codex|resume|session|conversation|found)\b|[0-9a-f]{8}-[0-9a-f-]{8,}/i;
+const PROMPT_OUTPUT_INSPECT_CHARS = 8_192;
 
 function consumeSocketLines(buffer: string, chunk: Buffer, onLine: (line: string) => false | void): string {
   const next = buffer + chunk.toString("utf8");
@@ -85,6 +86,12 @@ function consumeSocketLines(buffer: string, chunk: Buffer, onLine: (line: string
     index = next.indexOf("\n", start);
   }
   return start > 0 ? next.slice(start) : next;
+}
+
+function promptOutputSlice(outputChunk: string): string {
+  return outputChunk.length > PROMPT_OUTPUT_INSPECT_CHARS
+    ? outputChunk.slice(-PROMPT_OUTPUT_INSPECT_CHARS)
+    : outputChunk;
 }
 
 interface StreamSubscription {
@@ -851,11 +858,12 @@ export class CoreEngine {
     if (!detectorState) {
       return;
     }
-    if (!this.shouldInspectPromptOutput(detectorState, input.output_chunk)) {
+    const inspectedOutput = promptOutputSlice(input.output_chunk);
+    if (!this.shouldInspectPromptOutput(detectorState, inspectedOutput)) {
       return;
     }
 
-    const text = normalizePromptText(input.output_chunk);
+    const text = normalizePromptText(inspectedOutput);
     if (!text) {
       return;
     }

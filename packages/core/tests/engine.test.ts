@@ -655,6 +655,36 @@ describe("core engine", () => {
     engine.stop();
   });
 
+  test("assistant prompt detector inspects the tail of large output batches", () => {
+    const engine = new CoreEngine({ dbPath: tempDbPath(), pipeName: "\\\\.\\pipe\\wincmux-test-large-prompt-tail" });
+    const created = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "workspace.create",
+      params: { name: "notify-large-prompt", path: process.cwd(), backend: "claude" }
+    });
+    const workspaceId = (created.result as { workspace: { id: string } }).workspace.id;
+    const sessionId = randomUUID();
+    const internals = engine as unknown as {
+      promptDetector: Map<string, PromptDetectorStateForTest>;
+      maybeIngestPromptPattern: (input: { workspace_id: string; session_id: string; output_chunk: string }) => void;
+    };
+    internals.promptDetector.set(sessionId, promptDetectorFixture({ assistant_session: true }));
+
+    internals.maybeIngestPromptPattern({
+      workspace_id: workspaceId,
+      session_id: sessionId,
+      output_chunk: `${"ordinary log line\n".repeat(3000)}\nDo you want to proceed?`
+    });
+
+    const unread = engine.dispatch({ jsonrpc: "2.0", id: 2, method: "notify.unread", params: {} });
+    const items = (unread.result as { items: Array<{ kind: string; body: string }> }).items;
+    expect(items).toHaveLength(1);
+    expect(items[0]?.kind).toBe("assistant_prompt");
+    expect(items[0]?.body).toContain("proceed");
+    engine.stop();
+  });
+
   test("assistant completion detector falls back to output idle when final prompt is not visible", async () => {
     vi.useFakeTimers();
     const engine = new CoreEngine({ dbPath: tempDbPath(), pipeName: "\\\\.\\pipe\\wincmux-test-ready-idle" });
