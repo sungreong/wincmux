@@ -3,6 +3,37 @@ export interface PromptMarker {
   snippet: string;
 }
 
+const PROMPT_MARKER_CHECKS: Array<{ key: string; rx: RegExp }> = [
+  { key: "proceed?", rx: /\bdo\s+you\s+want\s+to\s+(?:proceed|continue)\s*\?/i },
+  { key: "should i?", rx: /\b(?:should\s+i|would\s+you\s+like\s+me\s+to|do\s+you\s+want\s+me\s+to)\b[^?\n]{0,120}\?/i },
+  { key: "waiting for input", rx: /\b(?:waiting|awaiting)\s+(?:for\s+)?(?:your\s+)?(?:input|response|confirmation|approval)\b/i },
+  { key: "need input", rx: /\bneed\s+(?:your\s+)?(?:input|response|confirmation|approval)\b/i },
+  { key: "run shell command", rx: /\brun\s+shell\s+command\b/i },
+  { key: "yes/no choice", rx: /(?:^|\n)\s*(?:[>]\s*)?[12][.)]\s*(?:yes|no)\b/im },
+  { key: "enter to confirm", rx: /\benter\s+to\s+confirm\b/i },
+  { key: "esc to cancel", rx: /\besc\s+to\s+cancel\b/i },
+  { key: "y/n", rx: /\b(?:\[?\s*y\s*\/\s*n\s*\]?|yes\s*\/\s*no)\b/i },
+  { key: "press enter", rx: /\b(?:press|hit)\s+enter\b/i },
+  { key: "select option", rx: /\b(?:select|choose)\b[^.\n]{0,80}\b(?:option|item|number|choice)\b/i },
+  { key: "select number", rx: /\b(?:enter|input|type)\b[^.\n]{0,48}\b(?:number|choice|option)\b/i },
+  { key: "ko proceed?", rx: /(?:진행|계속).{0,8}(?:하시겠|할까)\S*/i },
+  { key: "ko select", rx: /(?:선택|번호).{0,8}(?:입력|해\s*주세요|하세요)/i },
+  { key: "ko waiting input", rx: /(?:입력을?\s*기다리고|응답을?\s*기다리고)/i },
+  { key: "ko confirm", rx: /(?:실행|수정|변경|진행|계속|허용|승인).{0,16}(?:할까요|하시겠습니까|해도\s*될까요|할지)/i }
+];
+
+const ASSISTANT_READY_MARKER_CHECKS: Array<{ key: string; rx: RegExp }> = [
+  { key: "for_shortcuts", rx: /\?\s*for\s*shortcuts/i },
+  { key: "ready_to_help", rx: /\bready to help\b/i },
+  { key: "what_to_work_on", rx: /\bwhat would you like to work on\b/i },
+  { key: "how_can_help", rx: /\b(?:how can i help|what can i help|anything else)\b/i },
+  { key: "waiting_for_request", rx: /\b(?:waiting|ready)\b[^.\n]{0,80}\b(?:request|input|prompt|instructions)\b/i },
+  { key: "codex_prompt", rx: /(?:^|\n)\s*[›>]\s*(?:$|\n)/m },
+  { key: "ko_ready_waiting", rx: /대기\s*중입니다/i },
+  { key: "ko_help_ready", rx: /(?:무엇|뭔가|어떤|무엇을).{0,16}도와드릴까요\??/i },
+  { key: "ko_when_needed", rx: /필요하실\s*때\s*말씀/i }
+];
+
 export function normalizeTerminalOutput(output: string): string {
   if (!output) {
     return "";
@@ -44,26 +75,8 @@ function shouldSuppressPromptMarker(key: string, snippet: string, recent: string
 
 export function extractPromptMarker(bufferText: string): PromptMarker | null {
   const recent = bufferText.slice(-1200);
-  const checks: Array<{ key: string; rx: RegExp }> = [
-    { key: "proceed?", rx: /\bdo\s+you\s+want\s+to\s+(?:proceed|continue)\s*\?/i },
-    { key: "should i?", rx: /\b(?:should\s+i|would\s+you\s+like\s+me\s+to|do\s+you\s+want\s+me\s+to)\b[^?\n]{0,120}\?/i },
-    { key: "waiting for input", rx: /\b(?:waiting|awaiting)\s+(?:for\s+)?(?:your\s+)?(?:input|response|confirmation|approval)\b/i },
-    { key: "need input", rx: /\bneed\s+(?:your\s+)?(?:input|response|confirmation|approval)\b/i },
-    { key: "run shell command", rx: /\brun\s+shell\s+command\b/i },
-    { key: "yes/no choice", rx: /(?:^|\n)\s*(?:[>]\s*)?[12][.)]\s*(?:yes|no)\b/im },
-    { key: "enter to confirm", rx: /\benter\s+to\s+confirm\b/i },
-    { key: "esc to cancel", rx: /\besc\s+to\s+cancel\b/i },
-    { key: "y/n", rx: /\b(?:\[?\s*y\s*\/\s*n\s*\]?|yes\s*\/\s*no)\b/i },
-    { key: "press enter", rx: /\b(?:press|hit)\s+enter\b/i },
-    { key: "select option", rx: /\b(?:select|choose)\b[^.\n]{0,80}\b(?:option|item|number|choice)\b/i },
-    { key: "select number", rx: /\b(?:enter|input|type)\b[^.\n]{0,48}\b(?:number|choice|option)\b/i },
-    { key: "ko proceed?", rx: /(?:진행|계속).{0,8}(?:하시겠|할까)\S*/i },
-    { key: "ko select", rx: /(?:선택|번호).{0,8}(?:입력|해\s*주세요|하세요)/i },
-    { key: "ko waiting input", rx: /(?:입력을?\s*기다리고|응답을?\s*기다리고)/i },
-    { key: "ko confirm", rx: /(?:실행|수정|변경|진행|계속|허용|승인).{0,16}(?:할까요|하시겠습니까|해도\s*될까요|할지)/i }
-  ];
 
-  for (const check of checks) {
+  for (const check of PROMPT_MARKER_CHECKS) {
     const match = recent.match(check.rx);
     if (!match) {
       continue;
@@ -126,19 +139,8 @@ export function hasAssistantPromptContext(bufferText: string): boolean {
 
 export function extractAssistantReadyMarker(bufferText: string): string | null {
   const recent = bufferText.slice(-1400);
-  const checks: Array<{ key: string; rx: RegExp }> = [
-    { key: "for_shortcuts", rx: /\?\s*for\s*shortcuts/i },
-    { key: "ready_to_help", rx: /\bready to help\b/i },
-    { key: "what_to_work_on", rx: /\bwhat would you like to work on\b/i },
-    { key: "how_can_help", rx: /\b(?:how can i help|what can i help|anything else)\b/i },
-    { key: "waiting_for_request", rx: /\b(?:waiting|ready)\b[^.\n]{0,80}\b(?:request|input|prompt|instructions)\b/i },
-    { key: "codex_prompt", rx: /(?:^|\n)\s*[›>]\s*(?:$|\n)/m },
-    { key: "ko_ready_waiting", rx: /대기\s*중입니다/i },
-    { key: "ko_help_ready", rx: /(?:무엇|뭔가|어떤|무엇을).{0,16}도와드릴까요\??/i },
-    { key: "ko_when_needed", rx: /필요하실\s*때\s*말씀/i }
-  ];
 
-  for (const check of checks) {
+  for (const check of ASSISTANT_READY_MARKER_CHECKS) {
     if (check.rx.test(recent)) {
       return check.key;
     }

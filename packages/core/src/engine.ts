@@ -71,6 +71,8 @@ const GIT_STATUS_INACTIVE_INTERVAL_MS = 45_000;
 const GIT_STATUS_MAX_IN_FLIGHT = 1;
 const GIT_STATUS_TERMINAL_IDLE_MS = 1_500;
 const AI_RESUME_OUTPUT_PROBE = /\b(?:claude|codex|resume|session|conversation|found)\b|[0-9a-f]{8}-[0-9a-f-]{8,}/i;
+const PROMPT_OUTPUT_PROBE = /\b(?:claude|codex|gpt-\S+|sonnet|opus|run\s+shell\s+command|do\s+you\s+want|should\s+i|waiting|awaiting|need\s+(?:your\s+)?(?:input|response|confirmation|approval)|enter\s+to\s+confirm|esc\s+to\s+cancel|yes\s*\/\s*no|ready\s+to\s+help|how\s+can\s+i\s+help|what\s+would\s+you\s+like)\b|(?:대기\s*중입니다|도와드릴까요|입력을?\s*기다리고|응답을?\s*기다리고|실행|수정|변경|진행|계속|허용|승인)/i;
+const ASSISTANT_COMMAND_INPUT_PROBE = /\b(?:claude|codex)\b/i;
 const PROMPT_OUTPUT_INSPECT_CHARS = 8_192;
 
 function consumeSocketLines(buffer: string, chunk: Buffer, onLine: (line: string) => false | void): string {
@@ -118,6 +120,7 @@ interface PromptDetectorState {
   buffer: string;
   input_buffer: string;
   assistant_session: boolean;
+  assistant_context_seen: boolean;
   last_notified_at: number;
   last_signature: string;
   response_active: boolean;
@@ -555,10 +558,12 @@ export class CoreEngine {
     this.sessionWorkspace.set(sessionId, p.workspace_id);
     this.drainBuffers.set(sessionId, new SessionTextBuffer(SESSION_OUTPUT_BUFFER_KEEP_CHARS));
     this.tailBuffers.set(sessionId, new SessionTextBuffer(SESSION_OUTPUT_BUFFER_KEEP_CHARS));
+    const assistantSession = isAssistantCommand(p.cmd, p.args ?? []);
     this.promptDetector.set(sessionId, {
       buffer: "",
       input_buffer: "",
-      assistant_session: isAssistantCommand(p.cmd, p.args ?? []),
+      assistant_session: assistantSession,
+      assistant_context_seen: assistantSession,
       last_notified_at: 0,
       last_signature: "",
       response_active: false,
@@ -842,11 +847,11 @@ export class CoreEngine {
       || detectorState.response_active
       || detectorState.ready_visible
       || detectorState.user_turn_id > detectorState.notified_turn_id
-      || hasAssistantPromptContext(detectorState.buffer)
+      || detectorState.assistant_context_seen
     ) {
       return true;
     }
-    return /\b(?:claude|codex|gpt-\S+|sonnet|opus|run\s+shell\s+command|do\s+you\s+want|should\s+i|waiting|awaiting|need\s+(?:your\s+)?(?:input|response|confirmation|approval)|enter\s+to\s+confirm|esc\s+to\s+cancel|yes\s*\/\s*no|ready\s+to\s+help|how\s+can\s+i\s+help|what\s+would\s+you\s+like)\b|(?:대기\s*중입니다|도와드릴까요|입력을?\s*기다리고|응답을?\s*기다리고|실행|수정|변경|진행|계속|허용|승인)/i.test(outputChunk);
+    return PROMPT_OUTPUT_PROBE.test(outputChunk);
   }
 
   private maybeIngestPromptPattern(input: {
@@ -871,7 +876,10 @@ export class CoreEngine {
     const nowMs = Date.now();
     detectorState.buffer = `${detectorState.buffer} ${text}`.slice(-5000);
     detectorState.last_output_at = nowMs;
-    const hasAssistantContext = detectorState.assistant_session || hasAssistantPromptContext(detectorState.buffer);
+    if (!detectorState.assistant_context_seen && hasAssistantPromptContext(detectorState.buffer)) {
+      detectorState.assistant_context_seen = true;
+    }
+    const hasAssistantContext = detectorState.assistant_session || detectorState.assistant_context_seen;
     if (!hasAssistantContext) {
       return;
     }
@@ -964,10 +972,8 @@ export class CoreEngine {
     if (!detectorState.response_active || detectorState.last_output_at !== input.observed_at) {
       return;
     }
-    if (!hasAssistantPromptContext(detectorState.buffer)) {
-      if (!detectorState.assistant_session) {
-        return;
-      }
+    if (!detectorState.assistant_session && !detectorState.assistant_context_seen) {
+      return;
     }
     if (!detectorState.bootstrapped_ready
       && !extractAssistantReadyMarker(detectorState.buffer)
@@ -1036,8 +1042,9 @@ export class CoreEngine {
       .replace(/\r\n|\r|\n/g, "\n")
       .replace(/[^\S\n]+/g, " ");
     detectorState.input_buffer = `${detectorState.input_buffer}${normalizedInput}`.slice(-800);
-    if (/\b(?:claude|codex)\b/i.test(detectorState.input_buffer)) {
+    if (ASSISTANT_COMMAND_INPUT_PROBE.test(detectorState.input_buffer)) {
       detectorState.assistant_session = true;
+      detectorState.assistant_context_seen = true;
     }
     if (/\r|\n/.test(data)) {
       detectorState.user_turn_id += 1;
