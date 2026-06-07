@@ -23,6 +23,10 @@ const OUTPUT_FLUSH_CHUNK_SIZE = 16_384;
 const OUTPUT_FLUSH_MAX_PANES_PER_FRAME = 3;
 const OUTPUT_QUEUE_LIMIT = 256_000;
 const OUTPUT_QUEUE_KEEP = 180_000;
+const PANE_POLL_ACTIVE_DELAY_MS = 45;
+const PANE_POLL_IDLE_DELAY_MS = 90;
+const PANE_POLL_ERROR_DELAY_MS = 500;
+const PANE_POLL_JITTER_MS = 35;
 const PANE_DEBUG_LOGS = localStorage.getItem("wincmux.debug.panes") === "1";
 const PANE_FIT_RETRY_DELAY_MS = 80;
 const PANE_MIN_FIT_WIDTH = 24;
@@ -937,9 +941,7 @@ function disposeView(view) {
   if (!view) {
     return;
   }
-  if (view.poller) {
-    clearInterval(view.poller);
-  }
+  stopPanePolling(view);
   if (view.flushTimer) {
     clearTimeout(view.flushTimer);
   }
@@ -1607,6 +1609,9 @@ async function flushPaneInput(view) {
           dropped: 0,
           in_flight_ms: Number(latency.toFixed(2))
         });
+        if (!state.useStream) {
+          schedulePanePolling(view, PANE_POLL_ACTIVE_DELAY_MS, { reset: true });
+        }
         paneDebug("[input] write ok", {
           pane: view.paneId?.slice(0, 8),
           session: sessionId.slice(0, 8),
@@ -1735,10 +1740,7 @@ function bindViewToSession(view, sessionId) {
   }
 
   // Stop any existing polling/timers
-  if (view.poller) {
-    clearInterval(view.poller);
-    view.poller = null;
-  }
+  stopPanePolling(view);
   if (view.flushTimer) {
     clearTimeout(view.flushTimer);
     view.flushTimer = null;
@@ -1836,45 +1838,94 @@ function restoreSessionTail(view, sessionId) {
 }
 
 function startPanePolling(view) {
-  if (!view.sessionId) {
+  if (!view?.sessionId || state.useStream) {
     return;
   }
 
-  view.poller = setInterval(async () => {
-    if (!view.sessionId || view.readBusy) {
+  schedulePanePolling(view, PANE_POLL_IDLE_DELAY_MS);
+}
+
+function stopPanePolling(view) {
+  if (!view?.poller) {
+    return;
+  }
+  clearTimeout(view.poller);
+  view.poller = null;
+}
+
+function panePollJitter(view) {
+  if (typeof view?.pollJitterMs === "number") {
+    return view.pollJitterMs;
+  }
+  let hash = 0;
+  const id = String(view?.paneId ?? "");
+  for (let index = 0; index < id.length; index += 1) {
+    hash = (hash * 31 + id.charCodeAt(index)) % PANE_POLL_JITTER_MS;
+  }
+  view.pollJitterMs = hash;
+  return hash;
+}
+
+function schedulePanePolling(view, delayMs = PANE_POLL_IDLE_DELAY_MS, options = {}) {
+  if (!view?.sessionId || state.useStream) {
+    return;
+  }
+  if (view.poller && !options.reset) {
+    return;
+  }
+  if (view.poller) {
+    stopPanePolling(view);
+  }
+  const jitter = delayMs >= PANE_POLL_IDLE_DELAY_MS ? panePollJitter(view) : 0;
+  view.poller = window.setTimeout(() => {
+    view.poller = null;
+    void pollPaneOutput(view);
+  }, Math.max(0, delayMs + jitter));
+}
+
+async function pollPaneOutput(view) {
+  if (!view?.sessionId || state.useStream) {
+    return;
+  }
+  if (view.readBusy) {
+    schedulePanePolling(view, PANE_POLL_ACTIVE_DELAY_MS);
+    return;
+  }
+
+  view.readBusy = true;
+  let nextDelay = PANE_POLL_IDLE_DELAY_MS;
+  try {
+    const activeSessionId = view.sessionId;
+    if (!activeSessionId) {
       return;
     }
-
-    view.readBusy = true;
-    try {
-      const activeSessionId = view.sessionId;
-      if (!activeSessionId) {
-        return;
-      }
-      const res = await rpc("session.read", {
-        session_id: activeSessionId,
-        max_bytes: 16384
-      });
-      if (res?.output) {
-        void maybeNotifyPromptFromOutput(activeSessionId, res.output, selectedWorkspace()?.id ?? null);
-        enqueueStreamOutput(view.paneId, res.output, { sessionId: activeSessionId, source: "poll" });
-      }
-    } catch (err) {
-      const message = String(err?.message ?? err);
-      if (message.includes("session not found")) {
-        // Session ended: stop polling but keep terminal output visible (don't reset)
-        clearInterval(view.poller);
-        view.poller = null;
-        view.sessionId = null;
-        delete state.paneSessions[view.paneId];
-        refreshPaneBindings();
-      } else {
-        setStatus(`Terminal read error: ${message}`, true);
-      }
-    } finally {
-      view.readBusy = false;
+    const res = await rpc("session.read", {
+      session_id: activeSessionId,
+      max_bytes: 16384
+    });
+    if (res?.output) {
+      nextDelay = PANE_POLL_ACTIVE_DELAY_MS;
+      void maybeNotifyPromptFromOutput(activeSessionId, res.output, selectedWorkspace()?.id ?? null);
+      enqueueStreamOutput(view.paneId, res.output, { sessionId: activeSessionId, source: "poll" });
     }
-  }, 90);
+  } catch (err) {
+    const message = String(err?.message ?? err);
+    if (message.includes("session not found")) {
+      // Session ended: stop polling but keep terminal output visible (don't reset)
+      stopPanePolling(view);
+      view.sessionId = null;
+      delete state.paneSessions[view.paneId];
+      refreshPaneBindings();
+    } else {
+      nextDelay = PANE_POLL_ERROR_DELAY_MS;
+      setStatus(`Terminal read error: ${message}`, true);
+    }
+  } finally {
+    view.readBusy = false;
+    if (view.sessionId && !state.useStream) {
+      schedulePanePolling(view, nextDelay);
+    }
+  }
 }
 
 function rebindImeTextarea(view) {
@@ -2259,6 +2310,7 @@ function createPaneView(paneId, host) {
     renderedSessionId: null,  // tracks which session's output is actually in the xterm buffer
     hasOutput: false,
     poller: null,
+    pollJitterMs: null,
     observer: null,
     pendingInput: "",
     flushTimer: null,
@@ -2540,7 +2592,7 @@ function renderPaneSurface(force = false) {
     // Save outgoing workspace's live views and session mappings into cache (stop polling first)
     if (state._lastRenderedWorkspaceId) {
       for (const view of state.paneViews.values()) {
-        if (view.poller) { clearInterval(view.poller); view.poller = null; }
+        stopPanePolling(view);
         if (view.flushTimer) { clearTimeout(view.flushTimer); view.flushTimer = null; }
         cancelPaneOutputFlush(view);
         if (view.fitRaf) { cancelAnimationFrame(view.fitRaf); view.fitRaf = null; }

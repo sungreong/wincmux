@@ -216,6 +216,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Renderer session refresh builds reusable running-session indexes, avoiding repeated filter/find/map scans during pane binding, group badges, hidden panes, and prompt fallback checks.
 - Renderer prompt fallback detection now uses a cheap fast-path probe before ANSI stripping and prompt regex scans, so generic command output does not pay detector costs when the fallback is enabled.
 - Main/core socket line parsing now advances with a cursor and slices only the remaining tail once per chunk, reducing string copies while routing JSON-RPC and stream traffic.
+- Renderer fallback polling now schedules the next `session.read` only after the previous read settles, staggers panes with stable jitter, and accelerates after input so non-stream mode avoids synchronized read spikes without feeling sluggish.
 - Core drain/tail output buffers also use bounded chunk buffers, avoiding repeated string concat/slice while PTY output is still arriving.
 - Core stream batches use a shorter flush delay and flush immediately for large output bursts to lower interactive latency.
 - Core notification/resume detectors run on stream batches and skip generic shell output with a fast-path filter, reducing regex work across many terminals.
