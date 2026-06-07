@@ -8,6 +8,8 @@
   --border: #2a2f3b;
   --left-panel-width: 300px;
   --right-panel-width: 340px;
+  --z-popover: 50000;
+  --z-modal: 60000;
 }
 
 * {
@@ -422,7 +424,7 @@ button:disabled {
 .shortcut-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  z-index: var(--z-modal);
   display: grid;
   place-items: center;
   padding: 18px;
@@ -1205,7 +1207,7 @@ li.active .ws-delete-btn {
   position: fixed;
   right: auto;
   top: auto;
-  z-index: 50000;
+  z-index: var(--z-popover);
   min-width: 250px;
   max-width: min(360px, calc(100vw - 20px));
   max-height: calc(100vh - 20px);
@@ -1224,7 +1226,7 @@ li.active .ws-delete-btn {
 
 .pane-group-menu {
   position: fixed;
-  z-index: 10000;
+  z-index: var(--z-popover);
   min-width: 180px;
   max-width: min(260px, calc(100vw - 20px));
   padding: 7px;
@@ -1445,7 +1447,7 @@ li.active .ws-delete-btn {
   position: fixed;
   right: auto;
   top: auto;
-  z-index: 50000;
+  z-index: var(--z-popover);
   width: min(480px, calc(100vw - 20px));
   max-height: calc(100vh - 20px);
   overflow-y: auto;
@@ -1546,7 +1548,7 @@ li.active .ws-delete-btn {
   position: absolute;
   right: 0;
   top: 38px;
-  z-index: 30;
+  z-index: var(--z-popover);
   width: min(460px, calc(100% - 12px));
   max-height: 340px;
   overflow: auto;
@@ -1741,7 +1743,7 @@ li.active .ws-delete-btn {
 /* ── Session Picker Dropdown ─────────────────────────────────── */
 .session-picker-dropdown {
   position: fixed;
-  z-index: 9999;
+  z-index: var(--z-popover);
   background: #111821;
   border: 1px solid #31445d;
   border-radius: 8px;
@@ -2039,14 +2041,14 @@ li.active .ws-info-btn {
 .ws-info-overlay {
   position: fixed;
   inset: 0;
-  z-index: 900;
+  z-index: var(--z-modal);
   /* transparent, just catches pointer events */
 }
 
 /* The actual popup card */
 .ws-info-panel {
   position: fixed;
-  z-index: 901;
+  z-index: calc(var(--z-modal) + 1);
   width: 640px;
   max-height: min(720px, calc(100vh - 24px));
   display: flex;
@@ -2964,7 +2966,7 @@ li.active .ws-info-btn {
 .input-asset-prompt-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1800;
+  z-index: var(--z-modal);
   display: grid;
   place-items: center;
   background: rgba(0, 0, 0, 0.42);

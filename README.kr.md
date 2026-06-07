@@ -220,6 +220,7 @@ npm run package:win
 - notification list는 scroll 때마다 전체 DOM을 다시 만들지 않게 해 터미널이 바쁜 동안 불필요한 리렌더를 없앴습니다.
 - renderer webContents가 destroyed 되면 persistent stream socket도 닫아 window lifecycle 변경 뒤 stale stream send가 남지 않게 했습니다.
 - pane overflow와 quick command 메뉴는 high-priority body-level portal로 띄우고 소유 pane 경계 안으로 위치를 제한해 compact pane이나 split 경계에서 UI가 잘리거나 가려지지 않게 했습니다.
+- popover와 modal overlay는 공통 z-index layer를 사용해 session picker, workspace info, shortcut, input asset prompt가 terminal pane이나 이전 pane menu 뒤에 숨지 않게 했습니다.
 - assistant prompt notification은 `press enter`가 포함된 Codex/npm 업데이트 로그를 억제해 CLI 업데이트 중 반복 native toast 오탐을 막았습니다.
 - pane binding refresh는 unread notification과 known session을 refresh당 한 번만 인덱싱해 pane마다 전체 목록을 다시 훑지 않게 했습니다.
 - core stream event는 emit당 한 번만 직렬화하고 socket당 한 번만 전송해 subscription이 겹칠 때 중복 output을 피합니다.

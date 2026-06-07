@@ -203,6 +203,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - The notification list no longer re-renders on scroll, avoiding unnecessary DOM rebuilds while terminals are active.
 - Persistent stream sockets are closed when their renderer webContents is destroyed, avoiding stale stream sends after window lifecycle changes.
 - Pane overflow and quick command menus render through high-priority body-level portals and clamp to the owning pane bounds so compact panes and split boundaries do not clip or hide the UI.
+- Popovers and modal overlays now use shared z-index layers so session pickers, workspace info, shortcuts, and input asset prompts stay above terminal panes and do not sit behind stale pane menus.
 - Assistant prompt notifications suppress Codex/npm update logs that mention pressing enter, avoiding repeated false native toasts during CLI updates.
 - Pane binding refresh indexes unread notifications and known sessions once per refresh instead of rescanning them for every pane.
 - Core stream events are serialized once per emit and sent once per socket, avoiding duplicate output when subscriptions overlap.
