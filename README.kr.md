@@ -214,6 +214,7 @@ npm run package:win
 - xterm 출력은 이전 write가 끝난 뒤 다음 chunk를 쓰도록 순차 flush해 큰 출력에서 write queue가 겹치지 않게 했습니다.
 - renderer 출력 버퍼는 문자열 concat/slice 대신 chunk queue를 사용해 대량 터미널 출력 중 copy와 GC 부담을 줄였습니다.
 - core stream batch는 flush 지연을 낮추고 큰 출력 burst는 즉시 flush해 interactive latency를 낮췄습니다.
+- 터미널 입력 flush는 adaptive 방식으로 바꿔 Enter, escape/control sequence, 작은 키 입력은 즉시 보내고 큰 paste는 짧게 batch합니다.
 - pane fit과 resize 작업은 `requestAnimationFrame`으로 묶어 pane/사이드바 크기 조절 중 반복 layout 측정을 줄였습니다.
 - 워크스페이스/그룹 전환 시 stream 출력은 해당 세션이 실제로 붙어 있는 visible pane에만 전달하고, tail 복원 중 들어온 live 출력은 중복 prefix를 제거합니다.
 - 터미널 fit/resize는 DOM에서 떨어졌거나 아직 0px인 pane host를 건너뛰고, cols/rows가 바뀌지 않은 PTY resize RPC는 중복 전송하지 않습니다.

@@ -14,6 +14,8 @@ const paneHandlers = {
   openSessionInSplit: async () => {}
 };
 const INPUT_FLUSH_DELAY_MS = 12;
+const INPUT_INTERACTIVE_FLUSH_DELAY_MS = 0;
+const INPUT_BULK_THRESHOLD = 256;
 const INPUT_RETRY_DELAY_MS = 120;
 const IME_COMMIT_WAIT_MS = 80;
 const IME_DUPLICATE_WINDOW_MS = 220;
@@ -1288,6 +1290,44 @@ async function syncPaneSize(paneId) {
   }
 }
 
+function inputFlushDelayForData(data) {
+  if (!data) {
+    return INPUT_FLUSH_DELAY_MS;
+  }
+  if (data.length > INPUT_BULK_THRESHOLD) {
+    return INPUT_FLUSH_DELAY_MS;
+  }
+  if (/[\r\n\x1b\x7f\b]/.test(data) || data.length <= 8) {
+    return INPUT_INTERACTIVE_FLUSH_DELAY_MS;
+  }
+  return Math.min(4, INPUT_FLUSH_DELAY_MS);
+}
+
+function schedulePaneInputFlush(view, delayMs = INPUT_FLUSH_DELAY_MS) {
+  if (!view || view.inputFlushInFlight) {
+    return;
+  }
+  const normalizedDelay = Math.max(0, Number(delayMs) || 0);
+  if (view.inputFlushScheduled) {
+    if (view.inputFlushDelayMs !== null && view.inputFlushDelayMs <= normalizedDelay) {
+      return;
+    }
+    if (view.flushTimer) {
+      clearTimeout(view.flushTimer);
+      view.flushTimer = null;
+    }
+  }
+
+  view.inputFlushDelayMs = normalizedDelay;
+  view.inputFlushScheduled = true;
+  view.flushTimer = setTimeout(() => {
+    view.flushTimer = null;
+    view.inputFlushDelayMs = null;
+    view.inputFlushScheduled = false;
+    void flushPaneInput(view);
+  }, normalizedDelay);
+}
+
 function queuePaneInput(view, data) {
   if (!view.sessionId || !data) {
     return;
@@ -1300,16 +1340,11 @@ function queuePaneInput(view, data) {
     bytes: data.length,
     pending: view.pendingInput.length
   });
-  if (view.inputFlushScheduled || view.inputFlushInFlight) {
+  if (view.inputFlushInFlight) {
     return;
   }
 
-  view.inputFlushScheduled = true;
-  view.flushTimer = setTimeout(() => {
-    view.flushTimer = null;
-    view.inputFlushScheduled = false;
-    void flushPaneInput(view);
-  }, INPUT_FLUSH_DELAY_MS);
+  schedulePaneInputFlush(view, inputFlushDelayForData(data));
 }
 
 function isReconnectableInputError(err) {
@@ -1411,12 +1446,7 @@ async function flushPaneInput(view) {
   } finally {
     view.inputFlushInFlight = false;
     if (view.sessionId && view.pendingInput && !view.inputFlushScheduled) {
-      view.inputFlushScheduled = true;
-      view.flushTimer = setTimeout(() => {
-        view.flushTimer = null;
-        view.inputFlushScheduled = false;
-        void flushPaneInput(view);
-      }, INPUT_FLUSH_DELAY_MS);
+      schedulePaneInputFlush(view, inputFlushDelayForData(view.pendingInput));
     }
   }
 }
@@ -1528,6 +1558,7 @@ function bindViewToSession(view, sessionId) {
   view.pendingInput = "";
   resetPaneOutputQueue(view);
   view.outputWriteInFlight = false;
+  view.inputFlushDelayMs = null;
   view.tailRestoreSessionId = null;
   view.deferredStreamOutput = "";
   view.lastSyncedCols = 0;
@@ -2033,6 +2064,7 @@ function createPaneView(paneId, host) {
     observer: null,
     pendingInput: "",
     flushTimer: null,
+    inputFlushDelayMs: null,
     inputFlushScheduled: false,
     inputFlushInFlight: false,
     flushRaf: null,
@@ -2313,6 +2345,7 @@ function renderPaneSurface(force = false) {
         view.outputWriteInFlight = false;
         view.inputFlushScheduled = false;
         view.inputFlushInFlight = false;
+        view.inputFlushDelayMs = null;
         view.pendingInput = "";
         view._boundToStream = false; // force rebind on restore
       }
