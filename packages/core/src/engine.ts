@@ -62,6 +62,9 @@ export interface CoreOptions {
 }
 
 const DEFAULT_PIPE = "\\\\.\\pipe\\wincmux-rpc";
+const SESSION_OUTPUT_BATCH_DELAY_MS = 8;
+const SESSION_OUTPUT_BATCH_MAX_CHARS = 32_768;
+const SESSION_OUTPUT_BUFFER_KEEP_CHARS = 200_000;
 
 interface StreamSubscription {
   id: string;
@@ -74,6 +77,7 @@ interface StreamSubscription {
 interface SessionOutputBatch {
   workspace_id: string;
   chunks: string[];
+  length: number;
   timer: NodeJS.Timeout;
 }
 
@@ -1059,22 +1063,30 @@ export class CoreEngine {
   private appendSessionOutput(sessionId: string, chunk: string): void {
     const drain = `${this.drainBuffers.get(sessionId) ?? ""}${chunk}`;
     const tail = `${this.tailBuffers.get(sessionId) ?? ""}${chunk}`;
-    this.drainBuffers.set(sessionId, drain.slice(-200_000));
-    this.tailBuffers.set(sessionId, tail.slice(-200_000));
+    this.drainBuffers.set(sessionId, drain.slice(-SESSION_OUTPUT_BUFFER_KEEP_CHARS));
+    this.tailBuffers.set(sessionId, tail.slice(-SESSION_OUTPUT_BUFFER_KEEP_CHARS));
   }
 
   private queueSessionOutput(sessionId: string, workspaceId: string, chunk: string): void {
     const existing = this.sessionOutputBatches.get(sessionId);
     if (existing) {
       existing.chunks.push(chunk);
+      existing.length += chunk.length;
+      if (existing.length >= SESSION_OUTPUT_BATCH_MAX_CHARS) {
+        this.flushSessionOutputBatch(sessionId);
+      }
       return;
     }
-    const timer = setTimeout(() => this.flushSessionOutputBatch(sessionId), 20);
+    const timer = setTimeout(() => this.flushSessionOutputBatch(sessionId), SESSION_OUTPUT_BATCH_DELAY_MS);
     this.sessionOutputBatches.set(sessionId, {
       workspace_id: workspaceId,
       chunks: [chunk],
+      length: chunk.length,
       timer
     });
+    if (chunk.length >= SESSION_OUTPUT_BATCH_MAX_CHARS) {
+      this.flushSessionOutputBatch(sessionId);
+    }
   }
 
   private flushSessionOutputBatch(sessionId: string): void {

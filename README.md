@@ -195,6 +195,8 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 ## Recent Runtime Improvements
 
 - Terminal output is flushed through xterm sequentially so large command output does not pile up overlapping writes.
+- Renderer output buffering uses chunk queues instead of repeated string concat/slice, reducing copy and GC pressure during high-volume terminal output.
+- Core stream batches use a shorter flush delay and flush immediately for large output bursts to lower interactive latency.
 - Pane fitting and resize work is coalesced with `requestAnimationFrame` to reduce repeated layout measurement while resizing panes or sidebars.
 - Workspace/group switches now route stream output only to the visible pane bound to that session, and tail restore deduplicates live output that arrives during the restore window.
 - Terminal fit/resize now skips detached or zero-size pane hosts, avoids duplicate PTY resize RPCs for unchanged cols/rows, and retries only after layout is measurable.
