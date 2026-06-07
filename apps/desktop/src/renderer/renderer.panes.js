@@ -1074,7 +1074,10 @@ function disposeView(view) {
   stopPanePolling(view);
   if (view.flushTimer) {
     clearTimeout(view.flushTimer);
+    view.flushTimer = null;
   }
+  view.inputFlushToken = (view.inputFlushToken ?? 0) + 1;
+  view.inputFlushScheduled = false;
   if (view.compositionFlushTimer) {
     clearTimeout(view.compositionFlushTimer);
   }
@@ -1685,6 +1688,16 @@ function inputFlushDelayForData(data) {
   return Math.min(4, INPUT_FLUSH_DELAY_MS);
 }
 
+function runScheduledPaneInputFlush(view, token) {
+  if (!view || view.inputFlushToken !== token) {
+    return;
+  }
+  view.flushTimer = null;
+  view.inputFlushDelayMs = null;
+  view.inputFlushScheduled = false;
+  void flushPaneInput(view);
+}
+
 function schedulePaneInputFlush(view, delayMs = INPUT_FLUSH_DELAY_MS) {
   if (!view || view.inputFlushInFlight) {
     return;
@@ -1702,12 +1715,17 @@ function schedulePaneInputFlush(view, delayMs = INPUT_FLUSH_DELAY_MS) {
 
   view.inputFlushDelayMs = normalizedDelay;
   view.inputFlushScheduled = true;
-  view.flushTimer = setTimeout(() => {
-    view.flushTimer = null;
-    view.inputFlushDelayMs = null;
-    view.inputFlushScheduled = false;
-    void flushPaneInput(view);
-  }, normalizedDelay);
+  const token = (view.inputFlushToken ?? 0) + 1;
+  view.inputFlushToken = token;
+  if (normalizedDelay === 0) {
+    if (typeof queueMicrotask === "function") {
+      queueMicrotask(() => runScheduledPaneInputFlush(view, token));
+    } else {
+      Promise.resolve().then(() => runScheduledPaneInputFlush(view, token));
+    }
+    return;
+  }
+  view.flushTimer = setTimeout(() => runScheduledPaneInputFlush(view, token), normalizedDelay);
 }
 
 function queuePaneInput(view, data) {
@@ -1927,6 +1945,7 @@ function bindViewToSession(view, sessionId) {
   }
   view.inputFlushScheduled = false;
   view.inputFlushInFlight = false;
+  view.inputFlushToken = (view.inputFlushToken ?? 0) + 1;
   cancelPaneOutputFlush(view);
   if (view.fitRaf) {
     cancelAnimationFrame(view.fitRaf);
@@ -2562,6 +2581,7 @@ function createPaneView(paneId, host) {
     flushTimer: null,
     inputFlushDelayMs: null,
     inputFlushScheduled: false,
+    inputFlushToken: 0,
     inputFlushInFlight: false,
     outputFlushQueued: false,
     outputQueueChunks: [],
@@ -2852,6 +2872,7 @@ function renderPaneSurface(force = false) {
         view.outputWriteInFlight = false;
         view.inputFlushScheduled = false;
         view.inputFlushInFlight = false;
+        view.inputFlushToken = (view.inputFlushToken ?? 0) + 1;
         view.inputFlushDelayMs = null;
         view.pendingInput = "";
         view._boundToStream = false; // force rebind on restore

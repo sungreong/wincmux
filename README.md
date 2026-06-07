@@ -218,6 +218,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Pane move hover and selection styling now update only changed cards when possible, avoiding full pane-card class churn on high-frequency pointer moves.
 - Renderer performance logs are batched before IPC/file append so high-frequency input flush metrics do not add per-keystroke IPC overhead.
 - Deferred live stream output collected during tail restore now uses a bounded chunk queue, avoiding repeated string concat/slice while panes reconnect or screens switch.
+- Interactive terminal input now uses a token-guarded microtask flush for zero-delay key/Enter writes, reducing per-keystroke IPC start latency while preserving timer batching for paste-sized input.
 - Main-to-renderer stream events are batched over a short IPC window, and adjacent output for the same session is merged before delivery to reduce Electron IPC wake-ups under multi-terminal load.
 - Renderer stream output routing now uses cached session-to-pane lookup maps, avoiding a pane scan for every output event while keeping stale cache validation.
 - Cached stream output routing now uses a fast session/view check on hits and reserves DOM attached validation for lookup rebuilds, reducing per-output event DOM work.
