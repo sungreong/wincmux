@@ -573,10 +573,10 @@ function focusPaneView(view) {
   if (!view) {
     return;
   }
-  rebindImeTextarea(view);
+  ensureImeTextareaBinding(view);
   view.term.focus();
   window.requestAnimationFrame(() => {
-    rebindImeTextarea(view);
+    ensureImeTextareaBinding(view);
   });
 }
 
@@ -962,10 +962,7 @@ function disposeView(view) {
   const meta = state.paneMeta.get(view.paneId);
   meta?.actionsOverflowMenu?.remove();
   meta?.quickPanel?.remove();
-  if (view.imeBindTimer) {
-    clearInterval(view.imeBindTimer);
-    view.imeBindTimer = null;
-  }
+  stopImeTextareaBinding(view);
   if (view.imeTextarea) {
     if (view.onCompositionStart) {
       view.imeTextarea.removeEventListener("compositionstart", view.onCompositionStart);
@@ -1928,9 +1925,74 @@ async function pollPaneOutput(view) {
   }
 }
 
+function scheduleImeTextareaRebind(view) {
+  if (!view || view.imeRebindRaf) {
+    return;
+  }
+  view.imeRebindRaf = window.requestAnimationFrame(() => {
+    view.imeRebindRaf = null;
+    rebindImeTextarea(view);
+  });
+}
+
+function observeImeTextareaParent(view) {
+  const target = view?.imeTextarea?.parentElement ?? null;
+  if (!target || view.imeObserverTarget === target) {
+    return;
+  }
+  if (view.imeObserver) {
+    view.imeObserver.disconnect();
+    view.imeObserver = null;
+    view.imeObserverTarget = null;
+  }
+  if (typeof MutationObserver !== "function") {
+    return;
+  }
+  view.imeObserver = new MutationObserver(() => scheduleImeTextareaRebind(view));
+  view.imeObserver.observe(target, { childList: true });
+  view.imeObserverTarget = target;
+}
+
+function bindImeHostEvents(view) {
+  if (!view?.host || view.imeHost === view.host) {
+    return;
+  }
+  if (view.imeHost && view.imeFocusHandler) {
+    view.imeHost.removeEventListener("focusin", view.imeFocusHandler, true);
+  }
+  view.imeFocusHandler ??= () => scheduleImeTextareaRebind(view);
+  view.host.addEventListener("focusin", view.imeFocusHandler, true);
+  view.imeHost = view.host;
+}
+
+function ensureImeTextareaBinding(view) {
+  bindImeHostEvents(view);
+  rebindImeTextarea(view);
+}
+
+function stopImeTextareaBinding(view) {
+  if (!view) {
+    return;
+  }
+  if (view.imeRebindRaf) {
+    cancelAnimationFrame(view.imeRebindRaf);
+    view.imeRebindRaf = null;
+  }
+  if (view.imeHost && view.imeFocusHandler) {
+    view.imeHost.removeEventListener("focusin", view.imeFocusHandler, true);
+    view.imeHost = null;
+  }
+  if (view.imeObserver) {
+    view.imeObserver.disconnect();
+    view.imeObserver = null;
+    view.imeObserverTarget = null;
+  }
+}
+
 function rebindImeTextarea(view) {
   const textarea = view.host.querySelector("textarea");
   if (!textarea || textarea === view.imeTextarea) {
+    observeImeTextareaParent(view);
     return;
   }
 
@@ -1976,6 +2038,7 @@ function rebindImeTextarea(view) {
   textarea.addEventListener("compositionupdate", view.onCompositionUpdate);
   textarea.addEventListener("compositionend", view.onCompositionEnd);
   view.imeTextarea = textarea;
+  observeImeTextareaParent(view);
 }
 
 function createPaneLeaf(node, hosts) {
@@ -2345,7 +2408,11 @@ function createPaneView(paneId, host) {
     compositionLastFlushData: "",
     compositionLastFlushAt: 0,
     imeTextarea: null,
-    imeBindTimer: null,
+    imeHost: null,
+    imeFocusHandler: null,
+    imeObserver: null,
+    imeObserverTarget: null,
+    imeRebindRaf: null,
     onCompositionStart: null,
     onCompositionUpdate: null,
     onCompositionEnd: null,
@@ -2529,8 +2596,7 @@ function createPaneView(paneId, host) {
     void window.wincmux.showContextMenu(term.hasSelection());
   });
 
-  rebindImeTextarea(view);
-  view.imeBindTimer = setInterval(() => rebindImeTextarea(view), 800);
+  ensureImeTextareaBinding(view);
 
   const observer = new ResizeObserver(() => {
     schedulePaneFit(view);
@@ -2672,7 +2738,7 @@ function renderPaneSurface(force = false) {
       existing.lastFitWidth = 0;
       existing.lastFitHeight = 0;
       ensurePaneOverlay(existing);
-      rebindImeTextarea(existing);
+      ensureImeTextareaBinding(existing);
       existing.observer?.disconnect();
       const observer = new ResizeObserver(() => {
         schedulePaneFit(existing);
