@@ -27,6 +27,8 @@ const PANE_POLL_ACTIVE_DELAY_MS = 45;
 const PANE_POLL_IDLE_DELAY_MS = 90;
 const PANE_POLL_ERROR_DELAY_MS = 500;
 const PANE_POLL_JITTER_MS = 35;
+const PANE_RESIZE_SYNC_DELAY_MS = 60;
+const PANE_RESIZE_SYNC_MAX_PANES_PER_FRAME = 4;
 const PANE_DEBUG_LOGS = localStorage.getItem("wincmux.debug.panes") === "1";
 const PANE_FIT_RETRY_DELAY_MS = 80;
 const PANE_MIN_FIT_WIDTH = 24;
@@ -34,7 +36,10 @@ const PANE_MIN_FIT_HEIGHT = 24;
 const STREAM_TAIL_OVERLAP_LIMIT = 16_384;
 let fitAllPanesRaf = null;
 let outputFlushRaf = null;
+let paneResizeSyncTimer = null;
+let paneResizeSyncRaf = null;
 const outputFlushPaneQueue = new Set();
+const paneResizeSyncQueue = new Set();
 
 function paneDebug(...args) {
   if (PANE_DEBUG_LOGS) {
@@ -948,9 +953,7 @@ function disposeView(view) {
   if (view.compositionFlushTimer) {
     clearTimeout(view.compositionFlushTimer);
   }
-  if (view.resizeTimer) {
-    clearTimeout(view.resizeTimer);
-  }
+  cancelPaneResizeSync(view);
   clearPaneFitRetry(view);
   if (view.fitRaf) {
     cancelAnimationFrame(view.fitRaf);
@@ -1166,12 +1169,62 @@ function equalizePaneSizes() {
 }
 
 function schedulePaneResize(view) {
-  if (view.resizeTimer) {
-    clearTimeout(view.resizeTimer);
+  if (!view?.paneId || state.paneAutoResize === false) {
+    return;
   }
-  view.resizeTimer = setTimeout(() => {
-    syncPaneSize(view.paneId).catch(() => {});
-  }, 60);
+  paneResizeSyncQueue.add(view.paneId);
+  if (paneResizeSyncTimer || paneResizeSyncRaf) {
+    return;
+  }
+  paneResizeSyncTimer = setTimeout(() => {
+    paneResizeSyncTimer = null;
+    schedulePaneResizeSyncFrame();
+  }, PANE_RESIZE_SYNC_DELAY_MS);
+}
+
+function schedulePaneResizeSyncFrame() {
+  if (paneResizeSyncRaf) {
+    return;
+  }
+  paneResizeSyncRaf = window.requestAnimationFrame(flushQueuedPaneResizes);
+}
+
+function flushQueuedPaneResizes() {
+  paneResizeSyncRaf = null;
+  let processed = 0;
+  for (const paneId of paneResizeSyncQueue) {
+    paneResizeSyncQueue.delete(paneId);
+    const view = state.paneViews.get(paneId);
+    if (!view) {
+      continue;
+    }
+    void syncPaneSize(paneId).catch(() => {});
+    processed += 1;
+    if (processed >= PANE_RESIZE_SYNC_MAX_PANES_PER_FRAME) {
+      break;
+    }
+  }
+  if (paneResizeSyncQueue.size > 0) {
+    schedulePaneResizeSyncFrame();
+  }
+}
+
+function cancelPaneResizeSync(view) {
+  if (!view?.paneId) {
+    return;
+  }
+  paneResizeSyncQueue.delete(view.paneId);
+  if (paneResizeSyncQueue.size > 0) {
+    return;
+  }
+  if (paneResizeSyncTimer) {
+    clearTimeout(paneResizeSyncTimer);
+    paneResizeSyncTimer = null;
+  }
+  if (paneResizeSyncRaf) {
+    cancelAnimationFrame(paneResizeSyncRaf);
+    paneResizeSyncRaf = null;
+  }
 }
 
 function applyPaneFontToView(paneId, size) {
@@ -1788,7 +1841,7 @@ function bindViewToSession(view, sessionId) {
       startPanePolling(view);
     }
     view._boundToStream = state.useStream;
-    syncPaneSize(view.paneId).catch(() => {});
+    schedulePaneResize(view);
   } else {
     view._boundToStream = false;
     const dormant = state.dormantPaneSessions[view.paneId] ?? null;
@@ -2398,7 +2451,6 @@ function createPaneView(paneId, host) {
     lastSyncedRows: 0,
     resizeInFlight: false,
     pendingResizeSync: false,
-    resizeTimer: null,
     readBusy: false,
     detached: false,
     isComposing: false,

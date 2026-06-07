@@ -218,6 +218,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Main/core socket line parsing now advances with a cursor and slices only the remaining tail once per chunk, reducing string copies while routing JSON-RPC and stream traffic.
 - Renderer fallback polling now schedules the next `session.read` only after the previous read settles, staggers panes with stable jitter, and accelerates after input so non-stream mode avoids synchronized read spikes without feeling sluggish.
 - Renderer IME textarea binding now uses focus and a targeted mutation observer instead of a per-pane 800ms timer, preserving Korean composition handling while removing idle DOM polling across many terminals.
+- Renderer PTY resize sync now uses a shared queue with a per-frame pane budget, so split, equalize, and window resize changes do not send resize RPC bursts for every pane at once.
 - Core drain/tail output buffers also use bounded chunk buffers, avoiding repeated string concat/slice while PTY output is still arriving.
 - Core stream batches use a shorter flush delay and flush immediately for large output bursts to lower interactive latency.
 - Core notification/resume detectors run on stream batches and skip generic shell output with a fast-path filter, reducing regex work across many terminals.
