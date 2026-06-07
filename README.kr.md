@@ -213,6 +213,7 @@ npm run package:win
 
 - xterm 출력은 이전 write가 끝난 뒤 다음 chunk를 쓰도록 순차 flush해 큰 출력에서 write queue가 겹치지 않게 했습니다.
 - renderer 출력 버퍼는 문자열 concat/slice 대신 chunk queue를 사용해 대량 터미널 출력 중 copy와 GC 부담을 줄였습니다.
+- core drain/tail 출력 버퍼도 제한 크기의 chunk buffer로 바꿔 PTY 출력이 들어오는 동안 반복 문자열 concat/slice가 일어나지 않게 했습니다.
 - core stream batch는 flush 지연을 낮추고 큰 출력 burst는 즉시 flush해 interactive latency를 낮췄습니다.
 - core notification/resume detector는 stream batch 단위로 실행하고 일반 shell 출력은 fast-path로 건너뛰어 다중 터미널의 regex 작업량을 줄였습니다.
 - 터미널 입력 flush는 adaptive 방식으로 바꿔 Enter, escape/control sequence, 작은 키 입력은 즉시 보내고 큰 paste는 짧게 batch합니다.

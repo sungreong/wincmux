@@ -109,12 +109,139 @@ interface PromptDetectorState {
   completion_timer: NodeJS.Timeout | null;
 }
 
+class SessionTextBuffer {
+  private chunks: string[] = [];
+  private headIndex = 0;
+  private lengthValue = 0;
+
+  constructor(private readonly keepChars: number) {}
+
+  get length(): number {
+    return this.lengthValue;
+  }
+
+  append(chunk: string): void {
+    if (!chunk) {
+      return;
+    }
+    this.chunks.push(chunk);
+    this.lengthValue += chunk.length;
+    if (this.lengthValue > this.keepChars) {
+      this.dropStart(this.lengthValue - this.keepChars);
+    }
+  }
+
+  clear(): void {
+    this.chunks = [];
+    this.headIndex = 0;
+    this.lengthValue = 0;
+  }
+
+  drain(maxChars?: number): string {
+    if (this.lengthValue === 0) {
+      return "";
+    }
+    if (!maxChars || this.lengthValue <= maxChars) {
+      const output = this.snapshot();
+      this.clear();
+      return output;
+    }
+    return this.takeStart(maxChars);
+  }
+
+  tail(maxChars?: number): string {
+    if (this.lengthValue === 0) {
+      return "";
+    }
+    if (!maxChars || this.lengthValue <= maxChars) {
+      return this.snapshot();
+    }
+    const parts: string[] = [];
+    let remaining = maxChars;
+    for (let index = this.chunks.length - 1; index >= this.headIndex && remaining > 0; index -= 1) {
+      const chunk = this.chunks[index] ?? "";
+      if (chunk.length <= remaining) {
+        parts.push(chunk);
+        remaining -= chunk.length;
+      } else {
+        parts.push(chunk.slice(-remaining));
+        remaining = 0;
+      }
+    }
+    return parts.reverse().join("");
+  }
+
+  snapshot(): string {
+    const chunkCount = this.chunks.length - this.headIndex;
+    if (chunkCount <= 0) {
+      return "";
+    }
+    if (chunkCount === 1) {
+      return this.chunks[this.headIndex] ?? "";
+    }
+    return this.chunks.slice(this.headIndex).join("");
+  }
+
+  private takeStart(maxChars: number): string {
+    const parts: string[] = [];
+    let remaining = maxChars;
+    while (remaining > 0 && this.headIndex < this.chunks.length) {
+      const first = this.chunks[this.headIndex] ?? "";
+      if (first.length <= remaining) {
+        parts.push(first);
+        this.headIndex += 1;
+        this.lengthValue -= first.length;
+        remaining -= first.length;
+        continue;
+      }
+      parts.push(first.slice(0, remaining));
+      this.chunks[this.headIndex] = first.slice(remaining);
+      this.lengthValue -= remaining;
+      remaining = 0;
+    }
+    this.compactConsumed();
+    return parts.join("");
+  }
+
+  private dropStart(charsToDrop: number): void {
+    let remaining = charsToDrop;
+    while (remaining > 0 && this.headIndex < this.chunks.length) {
+      const first = this.chunks[this.headIndex] ?? "";
+      if (first.length <= remaining) {
+        this.headIndex += 1;
+        this.lengthValue -= first.length;
+        remaining -= first.length;
+        continue;
+      }
+      this.chunks[this.headIndex] = first.slice(remaining);
+      this.lengthValue -= remaining;
+      remaining = 0;
+    }
+    this.compactConsumed();
+  }
+
+  private compactConsumed(): void {
+    if (this.headIndex === 0) {
+      return;
+    }
+    if (this.headIndex >= this.chunks.length) {
+      this.chunks = [];
+      this.headIndex = 0;
+      return;
+    }
+    if (this.headIndex >= 64 && this.headIndex * 2 >= this.chunks.length) {
+      this.chunks = this.chunks.slice(this.headIndex);
+      this.headIndex = 0;
+    }
+  }
+}
+
 export class CoreEngine {
   private readonly db: DbStore;
   private readonly layout = new LayoutStore();
   private readonly pty = new PtyManager();
-  private readonly drainBuffers = new Map<string, string>();
-  private readonly tailBuffers = new Map<string, string>();
+  private readonly drainBuffers = new Map<string, SessionTextBuffer>();
+  private readonly tailBuffers = new Map<string, SessionTextBuffer>();
   private readonly sessionWorkspace = new Map<string, string>();
   private readonly streamSubscriptions = new Map<string, StreamSubscription>();
   private readonly socketSubscriptions = new Map<net.Socket, Set<string>>();
@@ -397,8 +524,8 @@ export class CoreEngine {
     this.db.insertSession(row);
     this.db.pruneRedundantSessionHistory(p.workspace_id);
     this.sessionWorkspace.set(sessionId, p.workspace_id);
-    this.drainBuffers.set(sessionId, "");
-    this.tailBuffers.set(sessionId, "");
+    this.drainBuffers.set(sessionId, new SessionTextBuffer(SESSION_OUTPUT_BUFFER_KEEP_CHARS));
+    this.tailBuffers.set(sessionId, new SessionTextBuffer(SESSION_OUTPUT_BUFFER_KEEP_CHARS));
     this.promptDetector.set(sessionId, {
       buffer: "",
       input_buffer: "",
@@ -431,12 +558,12 @@ export class CoreEngine {
       this.db.updateSessionResult(sessionId, exitCode === 0 ? "exited" : "failed", new Date().toISOString(), exitCode);
       this.db.pruneRedundantSessionHistory(p.workspace_id);
       // Scan the full output buffer before deleting — catches resume markers split across chunks
-      const finalBuffer = this.tailBuffers.get(sessionId) ?? "";
+      const finalBuffer = this.tailBuffers.get(sessionId)?.tail(3_000) ?? "";
       if (finalBuffer.length >= 20) {
         this.maybeRecordAiResume({
           workspace_id: p.workspace_id,
           session_id: sessionId,
-          output_chunk: finalBuffer.slice(-3000)
+          output_chunk: finalBuffer
         });
       }
       this.flushSessionOutputBatch(sessionId);
@@ -530,28 +657,17 @@ export class CoreEngine {
 
   private sessionRead(params: unknown): { output: string } {
     const p = sessionReadSchema.parse(params ?? {});
-    const existing = this.drainBuffers.get(p.session_id) ?? "";
-    if (existing.length === 0) {
+    const buffer = this.drainBuffers.get(p.session_id);
+    if (!buffer || buffer.length === 0) {
       return { output: "" };
     }
 
-    if (!p.max_bytes || existing.length <= p.max_bytes) {
-      this.drainBuffers.set(p.session_id, "");
-      return { output: existing };
-    }
-
-    const chunk = existing.slice(0, p.max_bytes);
-    this.drainBuffers.set(p.session_id, existing.slice(p.max_bytes));
-    return { output: chunk };
+    return { output: buffer.drain(p.max_bytes) };
   }
 
   private sessionTail(params: unknown): { output: string } {
     const p = sessionTailSchema.parse(params ?? {});
-    const existing = this.tailBuffers.get(p.session_id) ?? "";
-    if (!p.max_bytes || existing.length <= p.max_bytes) {
-      return { output: existing };
-    }
-    return { output: existing.slice(-p.max_bytes) };
+    return { output: this.tailBuffers.get(p.session_id)?.tail(p.max_bytes) ?? "" };
   }
 
   private sessionStreamSubscribe(params: unknown, socket?: net.Socket): { subscription_id: string } {
@@ -1081,10 +1197,18 @@ export class CoreEngine {
   }
 
   private appendSessionOutput(sessionId: string, chunk: string): void {
-    const drain = `${this.drainBuffers.get(sessionId) ?? ""}${chunk}`;
-    const tail = `${this.tailBuffers.get(sessionId) ?? ""}${chunk}`;
-    this.drainBuffers.set(sessionId, drain.slice(-SESSION_OUTPUT_BUFFER_KEEP_CHARS));
-    this.tailBuffers.set(sessionId, tail.slice(-SESSION_OUTPUT_BUFFER_KEEP_CHARS));
+    let drain = this.drainBuffers.get(sessionId);
+    if (!drain) {
+      drain = new SessionTextBuffer(SESSION_OUTPUT_BUFFER_KEEP_CHARS);
+      this.drainBuffers.set(sessionId, drain);
+    }
+    let tail = this.tailBuffers.get(sessionId);
+    if (!tail) {
+      tail = new SessionTextBuffer(SESSION_OUTPUT_BUFFER_KEEP_CHARS);
+      this.tailBuffers.set(sessionId, tail);
+    }
+    drain.append(chunk);
+    tail.append(chunk);
   }
 
   private queueSessionOutput(sessionId: string, workspaceId: string, chunk: string): void {
@@ -1124,7 +1248,7 @@ export class CoreEngine {
     });
     // Scan recent tail, not only this batch, so resume markers split across
     // multiple PTY chunks are still detected.
-    const recentBuffer = this.tailBuffers.get(sessionId)?.slice(-2000) ?? output;
+    const recentBuffer = this.tailBuffers.get(sessionId)?.tail(2_000) ?? output;
     this.maybeRecordAiResume({
       workspace_id: workspaceId,
       session_id: sessionId,

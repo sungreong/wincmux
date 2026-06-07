@@ -196,6 +196,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 
 - Terminal output is flushed through xterm sequentially so large command output does not pile up overlapping writes.
 - Renderer output buffering uses chunk queues instead of repeated string concat/slice, reducing copy and GC pressure during high-volume terminal output.
+- Core drain/tail output buffers also use bounded chunk buffers, avoiding repeated string concat/slice while PTY output is still arriving.
 - Core stream batches use a shorter flush delay and flush immediately for large output bursts to lower interactive latency.
 - Core notification/resume detectors run on stream batches and skip generic shell output with a fast-path filter, reducing regex work across many terminals.
 - Terminal input flushing is adaptive: Enter, escape/control sequences, and small interactive keystrokes flush immediately while large paste payloads still batch briefly.
