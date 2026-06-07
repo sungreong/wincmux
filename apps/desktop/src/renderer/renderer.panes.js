@@ -2660,7 +2660,6 @@ function renderPaneEmptyState(title, description) {
 function refreshPaneBindings() {
   const runningRows = runningSessions();
   const runningMap = new Map(runningRows.map((s) => [s.id, s]));
-  const knownSessionIds = new Set(state.sessions.map((s) => s.id));
   const leaves = leafPanes();
   const leafCount = leaves.length;
   const unreadCounts = unreadCountsForWorkspacePanes(selectedWorkspace()?.id ?? null);
@@ -2675,7 +2674,7 @@ function refreshPaneBindings() {
       // not merely absent from runningSessions yet (could be newly starting).
       // runningSessions() reflects state.sessions which may lag behind session.run.
       // We rely on normalizePaneSessions (which also checks leafIds) for thorough cleanup.
-      const knownToState = knownSessionIds.has(sessionId);
+      const knownToState = state.sessionsById.has(sessionId);
       if (!knownToState) {
         delete state.paneSessions[paneId];
         sessionId = null;

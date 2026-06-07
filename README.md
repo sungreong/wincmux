@@ -212,6 +212,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Deferred live stream output collected during tail restore now uses a bounded chunk queue, avoiding repeated string concat/slice while panes reconnect or screens switch.
 - Main-to-renderer stream events are batched over a short IPC window, and adjacent output for the same session is merged before delivery to reduce Electron IPC wake-ups under multi-terminal load.
 - Renderer stream output routing now uses cached session-to-pane lookup maps, avoiding a pane scan for every output event while keeping stale cache validation.
+- Renderer session refresh builds reusable running-session indexes, avoiding repeated filter/find/map scans during pane binding, group badges, hidden panes, and prompt fallback checks.
 - Core drain/tail output buffers also use bounded chunk buffers, avoiding repeated string concat/slice while PTY output is still arriving.
 - Core stream batches use a shorter flush delay and flush immediately for large output bursts to lower interactive latency.
 - Core notification/resume detectors run on stream batches and skip generic shell output with a fast-path filter, reducing regex work across many terminals.

@@ -214,6 +214,10 @@ function loadQuickHistory() {
 const state = {
   workspaces: [],
   sessions: [],
+  runningSessionsCache: [],
+  runningSessionIds: new Set(),
+  runningSessionsByWorkspace: new Map(),
+  sessionsById: new Map(),
   notifications: [],
   panes: [],
   selectedWorkspaceId: localStorage.getItem(STORAGE_KEYS.selectedWorkspaceId) ?? null,
@@ -376,8 +380,21 @@ function leafPanes(panes = state.panes) {
   return panes.filter((p) => !p.split);
 }
 
+function rebuildSessionIndexes() {
+  state.runningSessionsCache = state.sessions.filter((s) => s.status === "running");
+  state.runningSessionIds = new Set(state.runningSessionsCache.map((s) => s.id));
+  state.runningSessionsByWorkspace = new Map();
+  for (const session of state.runningSessionsCache) {
+    const workspaceId = session.workspace_id ?? "";
+    const rows = state.runningSessionsByWorkspace.get(workspaceId) ?? [];
+    rows.push(session);
+    state.runningSessionsByWorkspace.set(workspaceId, rows);
+  }
+  state.sessionsById = new Map(state.sessions.map((s) => [s.id, s]));
+}
+
 function runningSessions() {
-  return state.sessions.filter((s) => s.status === "running");
+  return state.runningSessionsCache;
 }
 
 function defaultPaneGroup() {
@@ -475,7 +492,7 @@ function renderGroupBar() {
     const current = counts.get(groupId) ?? { panes: 0, running: 0 };
     current.panes += 1;
     const sessionId = state.paneSessions[pane.pane_id] ?? null;
-    const session = sessionId ? state.sessions.find((row) => row.id === sessionId) : null;
+    const session = sessionId ? state.sessionsById.get(sessionId) : null;
     if (session?.workspace_id === ws.id && session.status === "running") {
       current.running += 1;
     }
@@ -744,7 +761,7 @@ function resolveWorkspaceIdForSession(sessionId, workspaceIdHint) {
     return workspaceIdHint;
   }
   if (sessionId) {
-    const row = state.sessions.find((s) => s.id === sessionId);
+    const row = state.sessionsById.get(sessionId);
     if (row?.workspace_id) {
       return row.workspace_id;
     }

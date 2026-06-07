@@ -242,7 +242,10 @@ function workspaceRowById(workspaceId) {
 }
 
 function runningSessionsForWorkspace(workspaceId) {
-  return state.sessions.filter((session) => session.workspace_id === workspaceId && session.status === "running");
+  if (!workspaceId) {
+    return [];
+  }
+  return state.runningSessionsByWorkspace.get(workspaceId) ?? [];
 }
 
 function missingRendererContracts() {
@@ -502,6 +505,7 @@ async function loadWorkspaces() {
 async function loadSessions(workspaceId = state.selectedWorkspaceId, transitionSeq = null) {
   if (!workspaceId) {
     state.sessions = [];
+    rebuildSessionIndexes();
     cleanupPromptDetectorSessions([]);
     return;
   }
@@ -513,9 +517,8 @@ async function loadSessions(workspaceId = state.selectedWorkspaceId, transitionS
     return;
   }
   state.sessions = res.sessions ?? [];
-  cleanupPromptDetectorSessions(
-    state.sessions.filter((s) => s.status === "running").map((s) => s.id),
-  );
+  rebuildSessionIndexes();
+  cleanupPromptDetectorSessions([...state.runningSessionIds]);
   renderGroupBar();
 }
 
@@ -1094,6 +1097,7 @@ async function deleteWorkspaceById(workspaceId) {
     state.paneGroupHints = {};
     state.panes = [];
     state.sessions = [];
+    rebuildSessionIndexes();
     clearPromptDetectorAll();
     state.selectedPaneId = null;
     localStorage.removeItem(STORAGE_KEYS.selectedWorkspaceId);
@@ -1265,7 +1269,7 @@ async function onHidePane(paneId) {
   const sessionId = state.paneSessions[paneId] ?? null;
   const groupId = groupForPane(paneId)?.id ?? null;
   if (sessionId) {
-    const session = state.sessions.find((row) => row.id === sessionId);
+    const session = state.sessionsById.get(sessionId);
     const label = session
       ? `pane ${paneId.slice(0, 8)} - pid ${session.pid}`
       : `pane ${paneId.slice(0, 8)}`;
