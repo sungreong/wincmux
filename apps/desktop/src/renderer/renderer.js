@@ -602,12 +602,15 @@ async function loadPanes(workspaceId = state.selectedWorkspaceId, transitionSeq 
   }
   state.panes = res.panes ?? [];
 }
-async function loadUnread() {
+async function loadUnread(options = {}) {
+  const { render = true } = options;
   const res = await rpc("notify.unread", {});
   state.notifications = res.items ?? [];
-  renderNotifications();
-  renderWorkspaces();
-  paneApi.refreshPaneBindings();
+  if (render) {
+    renderNotifications();
+    renderWorkspaces();
+    paneApi.refreshPaneBindings();
+  }
   await updateUnreadBadge(state.notifications.length);
 }
 async function runShellSession(workspaceId, cwd) {
@@ -922,7 +925,10 @@ async function refreshWorkspaceState(workspaceId, options = {}, transitionSeq = 
     return;
   }
   const { forceLayout = false, autoSession = true } = options;
-  const unreadRefresh = loadUnread().catch((err) => {
+  let unreadLoaded = false;
+  const unreadRefresh = loadUnread({ render: false }).then(() => {
+    unreadLoaded = true;
+  }).catch((err) => {
     if (!isTransitionStale(transitionSeq, workspaceId)) {
       setStatus(`Unread refresh failed: ${String(err?.message ?? err)}`, true);
     }
@@ -947,9 +953,23 @@ async function refreshWorkspaceState(workspaceId, options = {}, transitionSeq = 
   if (isTransitionStale(transitionSeq, workspaceId)) {
     return;
   }
+  if (unreadLoaded) {
+    renderNotifications();
+    renderWorkspaces();
+  }
   paneApi.renderPaneSurface(forceLayout);
   paneApi.refreshPaneBindings();
   hiddenRefreshPanesUi();
+  if (!unreadLoaded) {
+    void unreadRefresh.then(() => {
+      if (!unreadLoaded || isTransitionStale(transitionSeq, workspaceId)) {
+        return;
+      }
+      renderNotifications();
+      renderWorkspaces();
+      paneApi.refreshPaneBindings();
+    });
+  }
   if (isTransitionStale(transitionSeq, workspaceId)) {
     return;
   }
