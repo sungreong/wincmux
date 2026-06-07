@@ -140,6 +140,28 @@ migrateQuickPresetsToLatestSeedVersion();
 let quickCommandGlobalCloseBound = false;
 let quickCommandPositionBound = false;
 
+function ensureQuickCommandPortal(panel) {
+  if (typeof globalThis.ensurePanePortalElement === "function") {
+    globalThis.ensurePanePortalElement(panel);
+    return;
+  }
+  if (panel && document.body && panel.parentElement !== document.body) {
+    document.body.appendChild(panel);
+  }
+}
+
+function clampQuickCommandPosition(left, top, width, height, margin) {
+  if (typeof globalThis.clampPanePortalPosition === "function") {
+    return globalThis.clampPanePortalPosition(left, top, width, height, margin);
+  }
+  const maxLeft = Math.max(margin, window.innerWidth - margin - Math.max(0, Number(width) || 0));
+  const maxTop = Math.max(margin, window.innerHeight - margin - Math.max(0, Number(height) || 0));
+  return {
+    left: Math.max(margin, Math.min(Number(left) || margin, maxLeft)),
+    top: Math.max(margin, Math.min(Number(top) || margin, maxTop))
+  };
+}
+
 function positionQuickCommandPanel(paneId) {
   const meta = state.paneMeta.get(paneId);
   if (!meta?.quickPanel || !meta?.quickBtn) {
@@ -148,15 +170,17 @@ function positionQuickCommandPanel(paneId) {
   const panel = meta.quickPanel;
   const anchor = meta.quickBtn;
   const margin = 10;
+  ensureQuickCommandPortal(panel);
 
   panel.style.width = "";
-  panel.style.maxHeight = `${Math.max(220, window.innerHeight - margin * 2)}px`;
+  panel.style.maxWidth = `${Math.max(1, window.innerWidth - margin * 2)}px`;
+  panel.style.maxHeight = `${Math.max(1, window.innerHeight - margin * 2)}px`;
   panel.style.visibility = "hidden";
   panel.classList.add("open");
 
   const anchorRect = anchor.getBoundingClientRect();
   const panelRect = panel.getBoundingClientRect();
-  const viewportWidth = Math.max(180, window.innerWidth - margin * 2);
+  const viewportWidth = Math.max(1, window.innerWidth - margin * 2);
   const panelWidth = Math.min(panelRect.width || 480, viewportWidth);
   panel.style.width = `${Math.round(panelWidth)}px`;
   const nextPanelRect = panel.getBoundingClientRect();
@@ -168,9 +192,10 @@ function positionQuickCommandPanel(paneId) {
   if (top + nextPanelRect.height > window.innerHeight - margin) {
     top = Math.max(margin, anchorRect.top - nextPanelRect.height - 6);
   }
+  const position = clampQuickCommandPosition(left, top, panelWidth, nextPanelRect.height, margin);
 
-  panel.style.left = `${Math.round(left)}px`;
-  panel.style.top = `${Math.round(top)}px`;
+  panel.style.left = `${Math.round(position.left)}px`;
+  panel.style.top = `${Math.round(position.top)}px`;
   panel.style.visibility = "";
 }
 
@@ -218,7 +243,15 @@ function setQuickCommandPanelVisibility(paneId, isOpen) {
   meta.quickPanel.classList.toggle("open", isOpen);
   meta.quickBtn.classList.toggle("active", isOpen);
   if (isOpen) {
+    ensureQuickCommandPortal(meta.quickPanel);
     window.requestAnimationFrame(() => positionQuickCommandPanel(paneId));
+  } else {
+    meta.quickPanel.style.left = "";
+    meta.quickPanel.style.top = "";
+    meta.quickPanel.style.width = "";
+    meta.quickPanel.style.maxWidth = "";
+    meta.quickPanel.style.maxHeight = "";
+    meta.quickPanel.style.visibility = "";
   }
 }
 
@@ -554,6 +587,12 @@ function bindQuickCommandPanel(paneId, quickPanel, quickBtn) {
     ev.preventDefault();
     ev.stopPropagation();
     const opening = !quickPanel.classList.contains("open");
+    if (opening) {
+      if (typeof globalThis.closePaneOverflowMenus === "function") {
+        globalThis.closePaneOverflowMenus(null);
+      }
+      document.querySelectorAll(".session-picker-dropdown").forEach((el) => el.remove());
+    }
     closeQuickCommandPanels(opening ? paneId : null);
     setQuickCommandPanelVisibility(paneId, opening);
     state.quickCommandOpenPaneId = opening ? paneId : null;

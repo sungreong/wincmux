@@ -34,6 +34,7 @@ const PANE_FIT_RETRY_DELAY_MS = 80;
 const PANE_MIN_FIT_WIDTH = 24;
 const PANE_MIN_FIT_HEIGHT = 24;
 const STREAM_TAIL_OVERLAP_LIMIT = 16_384;
+const PANE_PORTAL_MARGIN = 10;
 let fitAllPanesRaf = null;
 let outputFlushRaf = null;
 let paneResizeSyncTimer = null;
@@ -63,6 +64,26 @@ function paneWarn(...args) {
   if (PANE_DEBUG_LOGS) {
     console.warn(...args);
   }
+}
+
+function ensurePanePortalElement(el) {
+  if (!el || !document.body) {
+    return;
+  }
+  if (el.parentElement !== document.body || document.body.lastElementChild !== el) {
+    document.body.appendChild(el);
+  }
+}
+
+function clampPanePortalPosition(left, top, width, height, margin = PANE_PORTAL_MARGIN) {
+  const safeWidth = Math.max(0, Number(width) || 0);
+  const safeHeight = Math.max(0, Number(height) || 0);
+  const maxLeft = Math.max(margin, window.innerWidth - margin - safeWidth);
+  const maxTop = Math.max(margin, window.innerHeight - margin - safeHeight);
+  return {
+    left: Math.max(margin, Math.min(Number(left) || margin, maxLeft)),
+    top: Math.max(margin, Math.min(Number(top) || margin, maxTop))
+  };
 }
 
 function isPaneViewAttached(view) {
@@ -1362,14 +1383,15 @@ function positionPaneOverflowMenu(paneId) {
   const anchor = meta.actionsOverflowBtn.getBoundingClientRect();
   const menu = meta.actionsOverflowMenu;
   const margin = 10;
+  ensurePanePortalElement(menu);
 
   menu.style.width = "";
   menu.style.minWidth = "";
-  menu.style.maxHeight = `${Math.max(180, window.innerHeight - margin * 2)}px`;
+  menu.style.maxHeight = `${Math.max(1, window.innerHeight - margin * 2)}px`;
   menu.style.visibility = "hidden";
 
   const rect = menu.getBoundingClientRect();
-  const viewportWidth = Math.max(160, window.innerWidth - margin * 2);
+  const viewportWidth = Math.max(1, window.innerWidth - margin * 2);
   const width = Math.min(Math.max(rect.width || 250, 250), Math.min(360, viewportWidth));
   menu.style.width = `${Math.round(width)}px`;
   const nextRect = menu.getBoundingClientRect();
@@ -1379,11 +1401,12 @@ function positionPaneOverflowMenu(paneId) {
 
   let top = anchor.bottom + 6;
   if (top + nextRect.height > window.innerHeight - margin) {
-    top = Math.max(margin, anchor.top - nextRect.height - 6);
+    top = anchor.top - nextRect.height - 6;
   }
+  const position = clampPanePortalPosition(left, top, width, nextRect.height, margin);
 
-  menu.style.left = `${Math.round(left)}px`;
-  menu.style.top = `${Math.round(top)}px`;
+  menu.style.left = `${Math.round(position.left)}px`;
+  menu.style.top = `${Math.round(position.top)}px`;
   menu.style.visibility = "";
 }
 
@@ -1422,6 +1445,11 @@ function togglePaneOverflowMenu(paneId, forceOpen = null) {
   }
 
   closePaneOverflowMenus(paneId);
+  if (typeof globalThis.closeQuickCommandPanels === "function") {
+    globalThis.closeQuickCommandPanels(null);
+  }
+  document.querySelectorAll(".session-picker-dropdown").forEach((el) => el.remove());
+  ensurePanePortalElement(meta.actionsOverflowMenu);
   meta.actionsOverflowMenu.classList.add("open");
   meta.actionsOverflowBtn.setAttribute("aria-expanded", "true");
   paneOverflowOpenPaneId = paneId;
@@ -3015,6 +3043,11 @@ async function openSessionPicker(paneId, anchorBtn) {
 
   const ws = selectedWorkspace();
   if (!ws) return;
+  const anchorRect = anchorBtn?.getBoundingClientRect?.() ?? null;
+  closePaneOverflowMenus(null);
+  if (typeof globalThis.closeQuickCommandPanels === "function") {
+    globalThis.closeQuickCommandPanels(null);
+  }
 
   const workspaceRows = [ws];
   const sessionResults = await Promise.all(workspaceRows.map((row) =>
@@ -3498,8 +3531,10 @@ async function openSessionPicker(paneId, anchorBtn) {
   filterSelect.addEventListener("change", applySessionFilter);
 
   // Position: prefer below anchor, flip up if too low
-  document.body.appendChild(dropdown);
-  const rect = anchorBtn.getBoundingClientRect();
+  ensurePanePortalElement(dropdown);
+  dropdown.style.width = `${Math.round(Math.min(470, Math.max(1, window.innerWidth - PANE_PORTAL_MARGIN * 2)))}px`;
+  dropdown.style.maxHeight = `${Math.round(Math.min(560, Math.max(1, window.innerHeight - PANE_PORTAL_MARGIN * 2)))}px`;
+  const rect = anchorRect ?? anchorBtn.getBoundingClientRect();
   const dropH = dropdown.offsetHeight || 300;
   const dropW = dropdown.offsetWidth || 340;
   let top = rect.bottom + 4;
@@ -3507,11 +3542,9 @@ async function openSessionPicker(paneId, anchorBtn) {
   if (top + dropH > window.innerHeight - 10) {
     top = rect.top - dropH - 4;
   }
-  if (left + dropW > window.innerWidth - 10) {
-    left = window.innerWidth - dropW - 10;
-  }
-  dropdown.style.top = `${top}px`;
-  dropdown.style.left = `${left}px`;
+  const position = clampPanePortalPosition(left, top, dropW, dropH, PANE_PORTAL_MARGIN);
+  dropdown.style.top = `${Math.round(position.top)}px`;
+  dropdown.style.left = `${Math.round(position.left)}px`;
 
   // Close on outside click
   const closeHandler = (ev) => {
@@ -3535,6 +3568,9 @@ globalThis.selectPane = selectPane;
 globalThis.selectAdjacentPane = selectAdjacentPane;
 globalThis.selectPaneByDirection = selectPaneByDirection;
 globalThis.togglePaneOverflowMenu = togglePaneOverflowMenu;
+globalThis.closePaneOverflowMenus = closePaneOverflowMenus;
+globalThis.ensurePanePortalElement = ensurePanePortalElement;
+globalThis.clampPanePortalPosition = clampPanePortalPosition;
 globalThis.focusPaneTerm = focusPaneTerm;
 globalThis.fitAllPanes = fitAllPanes;
 globalThis.equalizePaneSizes = equalizePaneSizes;
