@@ -87,6 +87,21 @@ let activeContext: {
 const STREAM_EVENT_IPC_BATCH_DELAY_MS = 2;
 const STREAM_EVENT_IPC_MAX_EVENTS = 64;
 
+function consumeSocketLines(buffer: string, chunk: Buffer, onLine: (line: string) => false | void): string {
+  const next = buffer + chunk.toString("utf8");
+  let start = 0;
+  let index = next.indexOf("\n", start);
+  while (index >= 0) {
+    const line = next.slice(start, index).trim();
+    start = index + 1;
+    if (line.length > 0 && onLine(line) === false) {
+      return "";
+    }
+    index = next.indexOf("\n", start);
+  }
+  return start > 0 ? next.slice(start) : next;
+}
+
 function mergeRendererStreamEvent(events: RendererStreamEvent[], event: RendererStreamEvent): void {
   const last = events[events.length - 1];
   if (last?.method !== "session.output" || event.method !== "session.output") {
@@ -585,16 +600,9 @@ class PipeRpcClient {
   }
 
   private handleData(chunk: Buffer): void {
-    this.buffer += chunk.toString("utf8");
-    let index = this.buffer.indexOf("\n");
-    while (index >= 0) {
-      const line = this.buffer.slice(0, index).trim();
-      this.buffer = this.buffer.slice(index + 1);
-      if (line.length > 0) {
-        this.handleLine(line);
-      }
-      index = this.buffer.indexOf("\n");
-    }
+    this.buffer = consumeSocketLines(this.buffer, chunk, (line) => {
+      this.handleLine(line);
+    });
   }
 
   private handleLine(line: string): void {
@@ -666,51 +674,43 @@ function createPersistentStream(webContents: WebContents, filter: StreamFilter):
     });
 
     socket.on("data", (chunk: Buffer) => {
-      buffer += chunk.toString("utf8");
-      let index = buffer.indexOf("\n");
-      while (index >= 0) {
-        const line = buffer.slice(0, index).trim();
-        buffer = buffer.slice(index + 1);
-        if (line.length > 0) {
-          let parsed: StreamEvent;
-          try {
-            parsed = JSON.parse(line) as StreamEvent;
-          } catch {
-            index = buffer.indexOf("\n");
-            continue;
-          }
-          if (parsed.id === requestId) {
-            if (parsed.error) {
-              reject(new Error(parsed.error.message ?? "stream subscribe failed"));
-              socket.destroy();
-              return;
-            }
-            const subscriptionId = (parsed.result as { subscription_id?: string } | undefined)?.subscription_id;
-            if (!subscriptionId) {
-              reject(new Error("missing subscription_id"));
-              socket.destroy();
-              return;
-            }
-
-            resolved = true;
-            streamConnections.set(subscriptionId, { socket, subscriptionId, webContents });
-            resolve(subscriptionId);
-            continue;
-          }
-
-          if (parsed.method && !parsed.id) {
-            if (webContents.isDestroyed()) {
-              socket.destroy();
-              return;
-            }
-            queueRendererStreamEvent(webContents, {
-              method: parsed.method,
-              params: parsed.params ?? {}
-            });
-          }
+      buffer = consumeSocketLines(buffer, chunk, (line) => {
+        let parsed: StreamEvent;
+        try {
+          parsed = JSON.parse(line) as StreamEvent;
+        } catch {
+          return;
         }
-        index = buffer.indexOf("\n");
-      }
+        if (parsed.id === requestId) {
+          if (parsed.error) {
+            reject(new Error(parsed.error.message ?? "stream subscribe failed"));
+            socket.destroy();
+            return false;
+          }
+          const subscriptionId = (parsed.result as { subscription_id?: string } | undefined)?.subscription_id;
+          if (!subscriptionId) {
+            reject(new Error("missing subscription_id"));
+            socket.destroy();
+            return false;
+          }
+
+          resolved = true;
+          streamConnections.set(subscriptionId, { socket, subscriptionId, webContents });
+          resolve(subscriptionId);
+          return;
+        }
+
+        if (parsed.method && !parsed.id) {
+          if (webContents.isDestroyed()) {
+            socket.destroy();
+            return false;
+          }
+          queueRendererStreamEvent(webContents, {
+            method: parsed.method,
+            params: parsed.params ?? {}
+          });
+        }
+      });
     });
 
     socket.on("close", () => {
@@ -893,37 +893,29 @@ async function startNotifyStream(): Promise<void> {
   });
 
   socket.on("data", (chunk: Buffer) => {
-    buffer += chunk.toString("utf8");
-    let index = buffer.indexOf("\n");
-    while (index >= 0) {
-      const line = buffer.slice(0, index).trim();
-      buffer = buffer.slice(index + 1);
-      if (line.length > 0) {
-        let parsed: StreamEvent;
-        try {
-          parsed = JSON.parse(line) as StreamEvent;
-        } catch {
-          index = buffer.indexOf("\n");
-          continue;
+    buffer = consumeSocketLines(buffer, chunk, (line) => {
+      let parsed: StreamEvent;
+      try {
+        parsed = JSON.parse(line) as StreamEvent;
+      } catch {
+        return;
+      }
+      if (parsed.id === requestId) {
+        if (parsed.error) {
+          socket.destroy();
+          return false;
         }
-        if (parsed.id === requestId) {
-          if (parsed.error) {
-            socket.destroy();
-            return;
-          }
-          const subscriptionId = (parsed.result as { subscription_id?: string } | undefined)?.subscription_id;
-          notifyStreamSubscriptionId = subscriptionId ?? null;
-          continue;
-        }
-        if (parsed.method === "notify.created" && !parsed.id) {
-          const notification = (parsed.params as { notification?: NotificationRecord } | undefined)?.notification;
-          if (notification) {
-            void handleNotifyCreated(notification);
-          }
+        const subscriptionId = (parsed.result as { subscription_id?: string } | undefined)?.subscription_id;
+        notifyStreamSubscriptionId = subscriptionId ?? null;
+        return;
+      }
+      if (parsed.method === "notify.created" && !parsed.id) {
+        const notification = (parsed.params as { notification?: NotificationRecord } | undefined)?.notification;
+        if (notification) {
+          void handleNotifyCreated(notification);
         }
       }
-      index = buffer.indexOf("\n");
-    }
+    });
   });
 
   socket.on("connect", () => {

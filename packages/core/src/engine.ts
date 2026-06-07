@@ -71,6 +71,21 @@ const GIT_STATUS_INACTIVE_INTERVAL_MS = 45_000;
 const GIT_STATUS_MAX_IN_FLIGHT = 1;
 const GIT_STATUS_TERMINAL_IDLE_MS = 1_500;
 
+function consumeSocketLines(buffer: string, chunk: Buffer, onLine: (line: string) => false | void): string {
+  const next = buffer + chunk.toString("utf8");
+  let start = 0;
+  let index = next.indexOf("\n", start);
+  while (index >= 0) {
+    const line = next.slice(start, index).trim();
+    start = index + 1;
+    if (line.length > 0 && onLine(line) === false) {
+      return "";
+    }
+    index = next.indexOf("\n", start);
+  }
+  return start > 0 ? next.slice(start) : next;
+}
+
 interface StreamSubscription {
   id: string;
   socket: net.Socket;
@@ -1306,18 +1321,11 @@ export class CoreEngine {
     });
 
     socket.on("data", (chunk: Buffer) => {
-      buffer += chunk.toString("utf8");
-      let index = buffer.indexOf("\n");
-      while (index >= 0) {
-        const line = buffer.slice(0, index).trim();
-        buffer = buffer.slice(index + 1);
-        if (line.length > 0) {
-          const raw = tryParse(line);
-          const response = this.dispatch(raw, socket);
-          socket.write(`${JSON.stringify(response)}\n`);
-        }
-        index = buffer.indexOf("\n");
-      }
+      buffer = consumeSocketLines(buffer, chunk, (line) => {
+        const raw = tryParse(line);
+        const response = this.dispatch(raw, socket);
+        socket.write(`${JSON.stringify(response)}\n`);
+      });
     });
   }
 
