@@ -64,6 +64,8 @@ export interface CoreOptions {
 const DEFAULT_PIPE = "\\\\.\\pipe\\wincmux-rpc";
 const SESSION_OUTPUT_BATCH_DELAY_MS = 8;
 const SESSION_OUTPUT_BATCH_MAX_CHARS = 32_768;
+const SESSION_OUTPUT_FAST_INPUT_WINDOW_MS = 220;
+const SESSION_OUTPUT_FAST_FLUSH_MAX_CHARS = 4096;
 const SESSION_OUTPUT_BUFFER_KEEP_CHARS = 200_000;
 const GIT_STATUS_TIMER_INTERVAL_MS = 3_000;
 const GIT_STATUS_ACTIVE_INTERVAL_MS = 8_000;
@@ -108,7 +110,8 @@ interface SessionOutputBatch {
   workspace_id: string;
   chunks: string[];
   length: number;
-  timer: NodeJS.Timeout;
+  timer: NodeJS.Timeout | null;
+  immediate: NodeJS.Immediate | null;
 }
 
 interface GitStatusResult {
@@ -275,6 +278,7 @@ export class CoreEngine {
   private readonly streamWorkspaceSubscriptions = new Map<StreamTopic, Map<string, Set<string>>>();
   private readonly streamSessionSubscriptions = new Map<StreamTopic, Map<string, Set<string>>>();
   private readonly sessionOutputBatches = new Map<string, SessionOutputBatch>();
+  private readonly sessionLastInputAt = new Map<string, number>();
   private readonly gitNextDue = new Map<string, number>();
   // Tracks resume_cmd strings already recorded per PTY session to avoid per-chunk re-upserts
   private readonly seenAiResumeCmds = new Map<string, Set<string>>();
@@ -308,7 +312,12 @@ export class CoreEngine {
     this.stopped = true;
     this.gitTimer && clearInterval(this.gitTimer);
     for (const batch of this.sessionOutputBatches.values()) {
-      clearTimeout(batch.timer);
+      if (batch.timer) {
+        clearTimeout(batch.timer);
+      }
+      if (batch.immediate) {
+        clearImmediate(batch.immediate);
+      }
     }
     for (const detectorState of this.promptDetector.values()) {
       if (detectorState.completion_timer) {
@@ -319,6 +328,7 @@ export class CoreEngine {
     this.drainBuffers.clear();
     this.tailBuffers.clear();
     this.sessionWorkspace.clear();
+    this.sessionLastInputAt.clear();
     this.promptDetector.clear();
     this.streamSubscriptions.clear();
     this.socketSubscriptions.clear();
@@ -482,6 +492,7 @@ export class CoreEngine {
       this.pty.close(s.id);
       this.drainBuffers.delete(s.id);
       this.tailBuffers.delete(s.id);
+      this.sessionLastInputAt.delete(s.id);
       this.clearPromptDetector(s.id);
       this.clearSessionOutputBatch(s.id);
     }
@@ -604,6 +615,7 @@ export class CoreEngine {
       // Process has already exited — remove from map without re-killing
       this.pty.remove(sessionId);
       this.drainBuffers.delete(sessionId);
+      this.sessionLastInputAt.delete(sessionId);
       this.clearPromptDetector(sessionId);
       this.seenAiResumeCmds.delete(sessionId);
       this.emitStreamEvent("session.exit", {
@@ -635,6 +647,7 @@ export class CoreEngine {
     this.pty.close(p.session_id);
     this.drainBuffers.delete(p.session_id);
     this.tailBuffers.delete(p.session_id);
+    this.sessionLastInputAt.delete(p.session_id);
     this.clearPromptDetector(p.session_id);
     this.seenAiResumeCmds.delete(p.session_id);
     this.db.updateSessionResult(p.session_id, "exited", new Date().toISOString(), 0);
@@ -659,6 +672,8 @@ export class CoreEngine {
 
   private sessionDelete(params: unknown): { ok: true } {
     const p = sessionDeleteSchema.parse(params ?? {});
+    this.sessionLastInputAt.delete(p.session_id);
+    this.clearSessionOutputBatch(p.session_id);
     this.db.deleteSession(p.session_id);
     return { ok: true };
   }
@@ -684,8 +699,14 @@ export class CoreEngine {
   private sessionWrite(params: unknown): { ok: true } {
     const p = sessionWriteSchema.parse(params ?? {});
     this.noteTerminalActivity();
+    this.noteSessionInputActivity(p.session_id);
     this.noteSessionInput(p.session_id, p.data);
-    this.pty.write(p.session_id, p.data);
+    try {
+      this.pty.write(p.session_id, p.data);
+    } catch (err) {
+      this.sessionLastInputAt.delete(p.session_id);
+      throw err;
+    }
     return { ok: true };
   }
 
@@ -1188,6 +1209,18 @@ export class CoreEngine {
     this.lastTerminalActivityAt = Date.now();
   }
 
+  private noteSessionInputActivity(sessionId: string): void {
+    this.sessionLastInputAt.set(sessionId, Date.now());
+  }
+
+  private shouldFastFlushSessionOutput(sessionId: string, outputLength: number): boolean {
+    if (outputLength <= 0 || outputLength > SESSION_OUTPUT_FAST_FLUSH_MAX_CHARS) {
+      return false;
+    }
+    const lastInputAt = this.sessionLastInputAt.get(sessionId) ?? 0;
+    return lastInputAt > 0 && Date.now() - lastInputAt <= SESSION_OUTPUT_FAST_INPUT_WINDOW_MS;
+  }
+
   private hasRecentTerminalActivity(now = Date.now()): boolean {
     return now - this.lastTerminalActivityAt < GIT_STATUS_TERMINAL_IDLE_MS;
   }
@@ -1256,16 +1289,31 @@ export class CoreEngine {
       existing.length += chunk.length;
       if (existing.length >= SESSION_OUTPUT_BATCH_MAX_CHARS) {
         this.flushSessionOutputBatch(sessionId);
+        return;
+      }
+      if (this.shouldFastFlushSessionOutput(sessionId, existing.length) && !existing.immediate) {
+        if (existing.timer) {
+          clearTimeout(existing.timer);
+          existing.timer = null;
+        }
+        existing.immediate = setImmediate(() => this.flushSessionOutputBatch(sessionId));
       }
       return;
     }
-    const timer = setTimeout(() => this.flushSessionOutputBatch(sessionId), SESSION_OUTPUT_BATCH_DELAY_MS);
-    this.sessionOutputBatches.set(sessionId, {
+    const fastFlush = this.shouldFastFlushSessionOutput(sessionId, chunk.length);
+    const batch: SessionOutputBatch = {
       workspace_id: workspaceId,
       chunks: [chunk],
       length: chunk.length,
-      timer
-    });
+      timer: null,
+      immediate: null
+    };
+    if (fastFlush) {
+      batch.immediate = setImmediate(() => this.flushSessionOutputBatch(sessionId));
+    } else {
+      batch.timer = setTimeout(() => this.flushSessionOutputBatch(sessionId), SESSION_OUTPUT_BATCH_DELAY_MS);
+    }
+    this.sessionOutputBatches.set(sessionId, batch);
     if (chunk.length >= SESSION_OUTPUT_BATCH_MAX_CHARS) {
       this.flushSessionOutputBatch(sessionId);
     }
@@ -1301,7 +1349,12 @@ export class CoreEngine {
     if (!batch) {
       return;
     }
-    clearTimeout(batch.timer);
+    if (batch.timer) {
+      clearTimeout(batch.timer);
+    }
+    if (batch.immediate) {
+      clearImmediate(batch.immediate);
+    }
     this.sessionOutputBatches.delete(sessionId);
     const output = batch.chunks.join("");
     if (!output) {
@@ -1320,7 +1373,12 @@ export class CoreEngine {
     if (!batch) {
       return;
     }
-    clearTimeout(batch.timer);
+    if (batch.timer) {
+      clearTimeout(batch.timer);
+    }
+    if (batch.immediate) {
+      clearImmediate(batch.immediate);
+    }
     this.sessionOutputBatches.delete(sessionId);
   }
 

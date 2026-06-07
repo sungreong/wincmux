@@ -961,6 +961,34 @@ describe("core engine", () => {
     engine.stop();
   });
 
+  test("session output fast flushes shortly after input", async () => {
+    const engine = new CoreEngine({ dbPath: tempDbPath(), pipeName: "\\\\.\\pipe\\wincmux-test-fast-output" });
+    const workspaceId = randomUUID();
+    const sessionId = randomUUID();
+    const socket = fakeWritableSocket();
+    const subscribed = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "session.stream.subscribe",
+      params: { workspace_id: workspaceId, topics: ["session"] }
+    }, socket);
+    expect(subscribed.error).toBeUndefined();
+
+    const internals = engine as unknown as {
+      noteSessionInputActivity: (id: string) => void;
+      queueSessionOutput: (id: string, workspaceId: string, chunk: string) => void;
+    };
+    internals.noteSessionInputActivity(sessionId);
+    internals.queueSessionOutput(sessionId, workspaceId, "echo");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(socket.writes).toHaveLength(1);
+    const parsed = JSON.parse(socket.writes[0] ?? "") as { method?: string; params?: { output?: string } };
+    expect(parsed.method).toBe("session.output");
+    expect(parsed.params?.output).toBe("echo");
+    engine.stop();
+  });
+
   test("workspace.activate accepts active workspace for git scheduler", () => {
     const engine = new CoreEngine({ dbPath: tempDbPath(), pipeName: "\\\\.\\pipe\\wincmux-test-active" });
     const created = engine.dispatch({
