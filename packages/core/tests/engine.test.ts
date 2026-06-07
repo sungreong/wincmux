@@ -543,6 +543,33 @@ describe("core engine", () => {
     engine.stop();
   });
 
+  test("stream fan-out writes once per socket with overlapping subscriptions", () => {
+    const engine = new CoreEngine({ dbPath: tempDbPath(), pipeName: "\\\\.\\pipe\\wincmux-test-stream-dedupe" });
+    const workspaceId = randomUUID();
+    const sessionId = randomUUID();
+    const socket = fakeWritableSocket();
+
+    for (const [id, params] of [
+      [1, { workspace_id: workspaceId, topics: ["session"] }],
+      [2, { session_id: sessionId, topics: ["session"] }]
+    ] as const) {
+      const res = engine.dispatch({ jsonrpc: "2.0", id, method: "session.stream.subscribe", params }, socket);
+      expect(res.error).toBeUndefined();
+    }
+
+    const internals = engine as unknown as {
+      emitStreamEvent: (method: string, params: Record<string, unknown>) => void;
+    };
+    internals.emitStreamEvent("session.output", {
+      workspace_id: workspaceId,
+      session_id: sessionId,
+      output: "hello"
+    });
+
+    expect(socket.writes).toHaveLength(1);
+    engine.stop();
+  });
+
   test("notify.push dedups and delivery ack updates", () => {
     const engine = new CoreEngine({ dbPath: tempDbPath(), pipeName: "\\\\.\\pipe\\wincmux-test-d" });
     const created = engine.dispatch({

@@ -1415,22 +1415,18 @@ export class CoreEngine {
     const topic = this.eventTopic(method);
     const sentSockets = new Set<net.Socket>();
     let line: string | null = null;
-    for (const subscriptionId of this.collectStreamSubscriptionIds(topic, params)) {
+    const sendSubscription = (subscriptionId: string): void => {
       const subscription = this.streamSubscriptions.get(subscriptionId);
       if (!subscription) {
-        continue;
+        return;
       }
-      if (!this.matchesStreamSubscription(subscription, params)) {
-        continue;
-      }
-
       const socket = subscription.socket;
       if (socket.destroyed || !socket.writable || socket.writableEnded) {
         this.removeSubscription(subscription.id);
-        continue;
+        return;
       }
       if (sentSockets.has(socket)) {
-        continue;
+        return;
       }
 
       try {
@@ -1440,6 +1436,25 @@ export class CoreEngine {
       } catch {
         this.removeSubscription(subscription.id);
       }
+    };
+    const sendSubscriptionSet = (ids?: Set<string>): void => {
+      if (!ids) {
+        return;
+      }
+      for (const subscriptionId of ids) {
+        sendSubscription(subscriptionId);
+      }
+    };
+    const sessionId = typeof params.session_id === "string" ? params.session_id : undefined;
+    const workspaceId = typeof params.workspace_id === "string" ? params.workspace_id : undefined;
+    const effectiveWorkspaceId = workspaceId ?? (sessionId ? this.sessionWorkspace.get(sessionId) : undefined);
+
+    sendSubscriptionSet(this.streamGlobalSubscriptions.get(topic));
+    if (effectiveWorkspaceId) {
+      sendSubscriptionSet(this.streamWorkspaceSubscriptions.get(topic)?.get(effectiveWorkspaceId));
+    }
+    if (sessionId) {
+      sendSubscriptionSet(this.streamSessionSubscriptions.get(topic)?.get(sessionId));
     }
   }
 
@@ -1448,44 +1463,6 @@ export class CoreEngine {
       return "notify";
     }
     return "session";
-  }
-
-  private collectStreamSubscriptionIds(topic: StreamTopic, params: Record<string, unknown>): Set<string> {
-    const ids = new Set<string>();
-    const addIds = (set?: Set<string>): void => {
-      if (!set) {
-        return;
-      }
-      for (const id of set) {
-        ids.add(id);
-      }
-    };
-    const sessionId = typeof params.session_id === "string" ? params.session_id : undefined;
-    const workspaceId = typeof params.workspace_id === "string" ? params.workspace_id : undefined;
-    const effectiveWorkspaceId = workspaceId ?? (sessionId ? this.sessionWorkspace.get(sessionId) : undefined);
-
-    addIds(this.streamGlobalSubscriptions.get(topic));
-    if (effectiveWorkspaceId) {
-      addIds(this.streamWorkspaceSubscriptions.get(topic)?.get(effectiveWorkspaceId));
-    }
-    if (sessionId) {
-      addIds(this.streamSessionSubscriptions.get(topic)?.get(sessionId));
-    }
-
-    return ids;
-  }
-
-  private matchesStreamSubscription(subscription: StreamSubscription, params: Record<string, unknown>): boolean {
-    const sessionId = typeof params.session_id === "string" ? params.session_id : undefined;
-    const workspaceId = typeof params.workspace_id === "string" ? params.workspace_id : undefined;
-
-    if (subscription.session_id) {
-      return sessionId === subscription.session_id;
-    }
-    if (subscription.workspace_id) {
-      return workspaceId === subscription.workspace_id || (sessionId ? this.sessionWorkspace.get(sessionId) === subscription.workspace_id : false);
-    }
-    return true;
   }
 
   private removeSubscription(subscriptionId: string): void {
