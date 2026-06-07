@@ -237,6 +237,7 @@ npm run package:win
 - tail 복원 중 모아 두는 live stream output도 제한 크기의 chunk queue로 바꿔 pane 재연결이나 화면 전환 중 반복 문자열 concat/slice가 생기지 않게 했습니다.
 - main에서 renderer로 보내는 stream event는 짧은 IPC window로 batch하고, 같은 session의 인접 output은 전달 전에 합쳐 다중 터미널 부하에서 Electron IPC wake-up을 줄였습니다.
 - renderer stream output routing은 session-to-pane lookup map을 캐시해 output event마다 pane 목록을 훑지 않게 했고, stale cache 검증은 유지했습니다.
+- cached stream output routing은 hit 경로에서 session/view만 빠르게 확인하고 DOM attached 검증은 lookup rebuild 때 수행해 output event당 DOM 작업을 줄였습니다.
 - renderer session refresh는 running-session index를 한 번 만들어 pane binding, group badge, hidden pane, prompt fallback 경로에서 반복 filter/find/map 스캔을 줄였습니다.
 - renderer prompt fallback detector는 ANSI 제거와 prompt regex scan 전에 가벼운 fast-path probe를 사용해 fallback을 켠 상태에서도 일반 command output은 detector 비용을 건너뜁니다.
 - main/core socket line parsing은 cursor로 진행하고 chunk당 남은 tail만 한 번 slice해 JSON-RPC와 stream traffic 처리 중 문자열 복사를 줄였습니다.

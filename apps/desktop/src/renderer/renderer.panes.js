@@ -367,7 +367,7 @@ function paneForSession(sessionId, options = {}) {
   const cached = visibleOnly
     ? state.visibleSessionPaneLookup.get(sessionId)
     : state.sessionPaneLookup.get(sessionId);
-  if (cached && isPaneSessionLookupValid(cached, sessionId, visibleOnly)) {
+  if (cached && isPaneSessionLookupValid(cached, sessionId, visibleOnly, { fast: true })) {
     return cached;
   }
 
@@ -378,7 +378,7 @@ function paneForSession(sessionId, options = {}) {
   return rebuilt && isPaneSessionLookupValid(rebuilt, sessionId, visibleOnly) ? rebuilt : null;
 }
 
-function isPaneSessionLookupValid(paneId, sessionId, visibleOnly = false) {
+function isPaneSessionLookupValid(paneId, sessionId, visibleOnly = false, options = {}) {
   if (!paneId || state.paneSessions[paneId] !== sessionId) {
     return false;
   }
@@ -386,6 +386,9 @@ function isPaneSessionLookupValid(paneId, sessionId, visibleOnly = false) {
     return true;
   }
   const view = state.paneViews.get(paneId);
+  if (options?.fast) {
+    return view?.sessionId === sessionId;
+  }
   return Boolean(view?.sessionId === sessionId && isPaneViewAttached(view));
 }
 

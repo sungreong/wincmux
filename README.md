@@ -220,6 +220,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Deferred live stream output collected during tail restore now uses a bounded chunk queue, avoiding repeated string concat/slice while panes reconnect or screens switch.
 - Main-to-renderer stream events are batched over a short IPC window, and adjacent output for the same session is merged before delivery to reduce Electron IPC wake-ups under multi-terminal load.
 - Renderer stream output routing now uses cached session-to-pane lookup maps, avoiding a pane scan for every output event while keeping stale cache validation.
+- Cached stream output routing now uses a fast session/view check on hits and reserves DOM attached validation for lookup rebuilds, reducing per-output event DOM work.
 - Renderer session refresh builds reusable running-session indexes, avoiding repeated filter/find/map scans during pane binding, group badges, hidden panes, and prompt fallback checks.
 - Renderer prompt fallback detection now uses a cheap fast-path probe before ANSI stripping and prompt regex scans, so generic command output does not pay detector costs when the fallback is enabled.
 - Main/core socket line parsing now advances with a cursor and slices only the remaining tail once per chunk, reducing string copies while routing JSON-RPC and stream traffic.
