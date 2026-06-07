@@ -119,6 +119,59 @@ function resetPaneOutputQueue(view) {
   view.outputQueueLength = 0;
 }
 
+function compactDeferredStreamOutput(view) {
+  if (!view?.deferredStreamHead) {
+    return;
+  }
+  if (view.deferredStreamHead >= view.deferredStreamChunks.length) {
+    resetDeferredStreamOutput(view);
+    return;
+  }
+  if (view.deferredStreamHead >= 64 && view.deferredStreamHead * 2 >= view.deferredStreamChunks.length) {
+    view.deferredStreamChunks = view.deferredStreamChunks.slice(view.deferredStreamHead);
+    view.deferredStreamHead = 0;
+  }
+}
+
+function resetDeferredStreamOutput(view) {
+  if (!view) {
+    return;
+  }
+  view.deferredStreamChunks = [];
+  view.deferredStreamHead = 0;
+  view.deferredStreamLength = 0;
+}
+
+function trimDeferredStreamOutput(view, keepLength = OUTPUT_QUEUE_KEEP) {
+  if (!view || view.deferredStreamLength <= keepLength) {
+    return;
+  }
+  let dropLength = view.deferredStreamLength - keepLength;
+  while (dropLength > 0 && view.deferredStreamHead < view.deferredStreamChunks.length) {
+    const first = view.deferredStreamChunks[view.deferredStreamHead];
+    if (first.length <= dropLength) {
+      view.deferredStreamHead += 1;
+      view.deferredStreamLength -= first.length;
+      dropLength -= first.length;
+      continue;
+    }
+    view.deferredStreamChunks[view.deferredStreamHead] = first.slice(dropLength);
+    view.deferredStreamLength -= dropLength;
+    dropLength = 0;
+  }
+  compactDeferredStreamOutput(view);
+}
+
+function takeDeferredStreamOutput(view) {
+  if (!view?.deferredStreamLength) {
+    return "";
+  }
+  const chunks = view.deferredStreamChunks.slice(view.deferredStreamHead);
+  const output = chunks.length === 1 ? chunks[0] : chunks.join("");
+  resetDeferredStreamOutput(view);
+  return output;
+}
+
 function trimPaneOutputQueue(view, keepLength = OUTPUT_QUEUE_KEEP) {
   if (!view || view.outputQueueLength <= keepLength) {
     return;
@@ -180,9 +233,10 @@ function appendDeferredStreamOutput(view, output) {
   if (!view || !output) {
     return;
   }
-  view.deferredStreamOutput += output;
-  if (view.deferredStreamOutput.length > OUTPUT_QUEUE_LIMIT) {
-    view.deferredStreamOutput = view.deferredStreamOutput.slice(-OUTPUT_QUEUE_KEEP);
+  view.deferredStreamChunks.push(output);
+  view.deferredStreamLength += output.length;
+  if (view.deferredStreamLength > OUTPUT_QUEUE_LIMIT) {
+    trimDeferredStreamOutput(view);
   }
 }
 
@@ -1675,7 +1729,7 @@ function bindViewToSession(view, sessionId) {
   view.outputWriteInFlight = false;
   view.inputFlushDelayMs = null;
   view.tailRestoreSessionId = null;
-  view.deferredStreamOutput = "";
+  resetDeferredStreamOutput(view);
   view.lastSyncedCols = 0;
   view.lastSyncedRows = 0;
   view.resizeInFlight = false;
@@ -1722,7 +1776,7 @@ function bindViewToSession(view, sessionId) {
 function restoreSessionTail(view, sessionId) {
   const restoreId = sessionId;
   view.tailRestoreSessionId = restoreId;
-  view.deferredStreamOutput = "";
+  resetDeferredStreamOutput(view);
   rpc("session.tail", { session_id: restoreId, max_bytes: 65536 })
     .then((res) => {
       if (view.sessionId !== restoreId || view.renderedSessionId !== restoreId) {
@@ -1732,25 +1786,23 @@ function restoreSessionTail(view, sessionId) {
       if (tailOutput) {
         enqueueStreamOutput(view.paneId, tailOutput, { sessionId: restoreId, source: "tail" });
       }
-      const liveOutput = trimRestoredOutputPrefix(tailOutput, view.deferredStreamOutput);
+      const liveOutput = trimRestoredOutputPrefix(tailOutput, takeDeferredStreamOutput(view));
       view.tailRestoreSessionId = null;
-      view.deferredStreamOutput = "";
       if (liveOutput) {
         enqueueStreamOutput(view.paneId, liveOutput, { sessionId: restoreId, source: "stream" });
       }
     })
     .catch(() => {
-      if (view.sessionId === restoreId && view.deferredStreamOutput) {
-        const liveOutput = view.deferredStreamOutput;
+      if (view.sessionId === restoreId && view.deferredStreamLength) {
+        const liveOutput = takeDeferredStreamOutput(view);
         view.tailRestoreSessionId = null;
-        view.deferredStreamOutput = "";
         enqueueStreamOutput(view.paneId, liveOutput, { sessionId: restoreId, source: "stream" });
       }
     })
     .finally(() => {
       if (view.tailRestoreSessionId === restoreId) {
         view.tailRestoreSessionId = null;
-        view.deferredStreamOutput = "";
+        resetDeferredStreamOutput(view);
       }
     });
 }
@@ -2191,7 +2243,9 @@ function createPaneView(paneId, host) {
     outputQueueLength: 0,
     outputWriteInFlight: false,
     tailRestoreSessionId: null,
-    deferredStreamOutput: "",
+    deferredStreamChunks: [],
+    deferredStreamHead: 0,
+    deferredStreamLength: 0,
     fitRaf: null,
     fitRetryTimer: null,
     forceNextFit: false,
