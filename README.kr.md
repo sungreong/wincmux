@@ -237,6 +237,7 @@ npm run package:win
 - renderer IME textarea binding은 pane별 800ms timer 대신 focus와 제한된 mutation observer를 사용해 한글 조합 처리는 유지하면서 많은 터미널의 idle DOM polling을 없앴습니다.
 - renderer PTY resize sync는 shared queue와 프레임당 pane budget을 사용해 split, equalize, window resize 직후 모든 pane이 동시에 resize RPC를 보내는 burst를 줄였습니다.
 - core stream fan-out은 subscription을 topic과 workspace/session scope로 인덱싱해 session output batch마다 모든 subscription을 훑지 않고 matching socket으로 라우팅합니다.
+- core AI resume detector는 current output batch에 resume 단서가 있을 때만 recent tail buffer를 복사해 일반 shell 출력에서 tail join 비용을 피하면서 split resume marker 감지는 유지합니다.
 - core drain/tail 출력 버퍼도 제한 크기의 chunk buffer로 바꿔 PTY 출력이 들어오는 동안 반복 문자열 concat/slice가 일어나지 않게 했습니다.
 - core stream batch는 flush 지연을 낮추고 큰 출력 burst는 즉시 flush해 interactive latency를 낮췄습니다.
 - core notification/resume detector는 stream batch 단위로 실행하고 일반 shell 출력은 fast-path로 건너뛰어 다중 터미널의 regex 작업량을 줄였습니다.

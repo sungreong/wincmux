@@ -419,6 +419,43 @@ describe("core engine", () => {
     engine.stop();
   });
 
+  test("AI resume detector scans recent tail only when output has resume clues", () => {
+    const engine = new CoreEngine({ dbPath: tempDbPath(), pipeName: "\\\\.\\pipe\\wincmux-test-ai-resume-tail" });
+    const created = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "workspace.create",
+      params: { name: "ai-resume-tail", path: process.cwd(), backend: "claude" }
+    });
+    const workspaceId = (created.result as { workspace: { id: string } }).workspace.id;
+    const sessionId = randomUUID();
+    const resumeToken = "30ae6541-c5a7-47ab-bc93-354686339f5b";
+    const internals = engine as unknown as {
+      appendSessionOutput: (sessionId: string, chunk: string) => void;
+      processSessionOutputPatterns: (sessionId: string, workspaceId: string, output: string) => void;
+    };
+
+    internals.appendSessionOutput(sessionId, "plain build output without AI markers\n");
+    internals.processSessionOutputPatterns(sessionId, workspaceId, "plain build output without AI markers\n");
+    expect((engine.dispatch({ jsonrpc: "2.0", id: 2, method: "ai.sessions", params: { workspace_id: workspaceId } }).result as { sessions: unknown[] }).sessions).toHaveLength(0);
+
+    internals.appendSessionOutput(sessionId, "claude --resu");
+    internals.processSessionOutputPatterns(sessionId, workspaceId, "claude --resu");
+    internals.appendSessionOutput(sessionId, `me ${resumeToken}\n`);
+    internals.processSessionOutputPatterns(sessionId, workspaceId, `me ${resumeToken}\n`);
+
+    const listed = engine.dispatch({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "ai.sessions",
+      params: { workspace_id: workspaceId }
+    });
+    const sessions = (listed.result as { sessions: Array<{ resume_cmd: string }> }).sessions;
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.resume_cmd).toBe(`claude --resume ${resumeToken}`);
+    engine.stop();
+  });
+
   test("named pipe rpc responds", async () => {
     const pipe = "\\\\.\\pipe\\wincmux-test-c";
     const engine = new CoreEngine({ dbPath: tempDbPath(), pipeName: pipe });

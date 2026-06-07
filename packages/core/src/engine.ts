@@ -70,6 +70,7 @@ const GIT_STATUS_ACTIVE_INTERVAL_MS = 8_000;
 const GIT_STATUS_INACTIVE_INTERVAL_MS = 45_000;
 const GIT_STATUS_MAX_IN_FLIGHT = 1;
 const GIT_STATUS_TERMINAL_IDLE_MS = 1_500;
+const AI_RESUME_OUTPUT_PROBE = /\b(?:claude|codex|resume|session|conversation|found)\b|[0-9a-f]{8}-[0-9a-f-]{8,}/i;
 
 function consumeSocketLines(buffer: string, chunk: Buffer, onLine: (line: string) => false | void): string {
   const next = buffer + chunk.toString("utf8");
@@ -799,7 +800,7 @@ export class CoreEngine {
   }): void {
     // Skip short chunks — resume patterns are always >50 chars
     if (input.output_chunk.length < 20) return;
-    if (!/\b(?:claude|codex)\b|--(?:resume|session)|\bsession\s+ID\b/i.test(input.output_chunk)) return;
+    if (!AI_RESUME_OUTPUT_PROBE.test(input.output_chunk)) return;
     const marker = extractAiResumeMarker(input.output_chunk);
     if (!marker) return;
     // Dedup: same resume_cmd already recorded for this session
@@ -1090,7 +1091,7 @@ export class CoreEngine {
 
   private maybeDeleteFailedAiResume(input: { workspace_id: string; output_chunk: string }): void {
     const text = input.output_chunk;
-    if (!/conversation\s+found|conversation\s+.*not\s+found|no\s+conversation/i.test(text)) {
+    if (!AI_RESUME_OUTPUT_PROBE.test(text) || !/conversation\s+found|conversation\s+.*not\s+found|no\s+conversation/i.test(text)) {
       return;
     }
     const match = text.match(/session\s+ID:\s*([0-9a-f][0-9a-f-]{7,})/i)
@@ -1264,18 +1265,20 @@ export class CoreEngine {
       session_id: sessionId,
       output_chunk: output
     });
-    this.maybeDeleteFailedAiResume({
-      workspace_id: workspaceId,
-      output_chunk: output
-    });
-    // Scan recent tail, not only this batch, so resume markers split across
-    // multiple PTY chunks are still detected.
-    const recentBuffer = this.tailBuffers.get(sessionId)?.tail(2_000) ?? output;
-    this.maybeRecordAiResume({
-      workspace_id: workspaceId,
-      session_id: sessionId,
-      output_chunk: recentBuffer
-    });
+    if (AI_RESUME_OUTPUT_PROBE.test(output)) {
+      this.maybeDeleteFailedAiResume({
+        workspace_id: workspaceId,
+        output_chunk: output
+      });
+      // Scan recent tail, not only this batch, so resume markers split across
+      // multiple PTY chunks are still detected when the current batch has a resume clue.
+      const recentBuffer = this.tailBuffers.get(sessionId)?.tail(2_000) ?? output;
+      this.maybeRecordAiResume({
+        workspace_id: workspaceId,
+        session_id: sessionId,
+        output_chunk: recentBuffer
+      });
+    }
   }
 
   private flushSessionOutputBatch(sessionId: string): void {
