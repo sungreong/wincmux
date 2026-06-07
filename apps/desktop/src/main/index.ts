@@ -38,6 +38,17 @@ type StreamEvent = {
   error?: { code?: number; message?: string };
 };
 
+type RendererStreamEvent = {
+  method: string;
+  params: unknown;
+};
+
+type RendererStreamBatch = {
+  webContents: WebContents;
+  events: RendererStreamEvent[];
+  timer: NodeJS.Timeout | null;
+};
+
 type IpcEnvelope<T> =
   | { ok: true; result: T }
   | { ok: false; error: string };
@@ -49,6 +60,7 @@ let coreExitReason: string | null = null;
 let coreStderrTail = "";
 let coreRuntimeHint = "";
 const streamConnections = new Map<string, { socket: net.Socket; subscriptionId: string; webContents: WebContents }>();
+const rendererStreamBatches = new Map<number, RendererStreamBatch>();
 let streamRequestSeq = 1;
 let rpcRequestSeq = 1;
 let unreadBadgeCount = 0;
@@ -71,6 +83,71 @@ let activeContext: {
   session_id: null,
   app_focused: false
 };
+
+const STREAM_EVENT_IPC_BATCH_DELAY_MS = 2;
+const STREAM_EVENT_IPC_MAX_EVENTS = 64;
+
+function mergeRendererStreamEvent(events: RendererStreamEvent[], event: RendererStreamEvent): void {
+  const last = events[events.length - 1];
+  if (last?.method !== "session.output" || event.method !== "session.output") {
+    events.push(event);
+    return;
+  }
+
+  const lastParams = last.params as Record<string, unknown> | undefined;
+  const nextParams = event.params as Record<string, unknown> | undefined;
+  if (
+    lastParams?.session_id !== nextParams?.session_id
+    || lastParams?.workspace_id !== nextParams?.workspace_id
+  ) {
+    events.push(event);
+    return;
+  }
+
+  last.params = {
+    ...lastParams,
+    output: `${String(lastParams?.output ?? "")}${String(nextParams?.output ?? "")}`
+  };
+}
+
+function flushRendererStreamBatch(webContentsId: number): void {
+  const batch = rendererStreamBatches.get(webContentsId);
+  if (!batch) {
+    return;
+  }
+  if (batch.timer) {
+    clearTimeout(batch.timer);
+  }
+  rendererStreamBatches.delete(webContentsId);
+  if (batch.webContents.isDestroyed() || batch.events.length === 0) {
+    return;
+  }
+  if (batch.events.length === 1) {
+    batch.webContents.send("wincmux:stream-event", batch.events[0]);
+    return;
+  }
+  batch.webContents.send("wincmux:stream-events", batch.events);
+}
+
+function queueRendererStreamEvent(webContents: WebContents, event: RendererStreamEvent): void {
+  if (webContents.isDestroyed()) {
+    return;
+  }
+  const webContentsId = webContents.id;
+  let batch = rendererStreamBatches.get(webContentsId);
+  if (!batch) {
+    batch = { webContents, events: [], timer: null };
+    rendererStreamBatches.set(webContentsId, batch);
+  }
+  mergeRendererStreamEvent(batch.events, event);
+  if (batch.events.length >= STREAM_EVENT_IPC_MAX_EVENTS) {
+    flushRendererStreamBatch(webContentsId);
+    return;
+  }
+  if (!batch.timer) {
+    batch.timer = setTimeout(() => flushRendererStreamBatch(webContentsId), STREAM_EVENT_IPC_BATCH_DELAY_MS);
+  }
+}
 
 function perfLogPath(): string {
   const localAppData = process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local");
@@ -595,7 +672,13 @@ function createPersistentStream(webContents: WebContents, filter: StreamFilter):
         const line = buffer.slice(0, index).trim();
         buffer = buffer.slice(index + 1);
         if (line.length > 0) {
-          const parsed = JSON.parse(line) as StreamEvent;
+          let parsed: StreamEvent;
+          try {
+            parsed = JSON.parse(line) as StreamEvent;
+          } catch {
+            index = buffer.indexOf("\n");
+            continue;
+          }
           if (parsed.id === requestId) {
             if (parsed.error) {
               reject(new Error(parsed.error.message ?? "stream subscribe failed"));
@@ -620,7 +703,7 @@ function createPersistentStream(webContents: WebContents, filter: StreamFilter):
               socket.destroy();
               return;
             }
-            webContents.send("wincmux:stream-event", {
+            queueRendererStreamEvent(webContents, {
               method: parsed.method,
               params: parsed.params ?? {}
             });
@@ -779,7 +862,7 @@ async function handleNotifyCreated(notification: NotificationRecord): Promise<vo
     if (win.isDestroyed()) {
       continue;
     }
-    win.webContents.send("wincmux:stream-event", {
+    queueRendererStreamEvent(win.webContents, {
       method: "notify.created",
       params: { notification }
     });

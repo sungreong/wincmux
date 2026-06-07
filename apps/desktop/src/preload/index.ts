@@ -21,14 +21,28 @@ function unwrapEnvelope<T>(value: IpcEnvelope<T>): T {
   return value.result;
 }
 
+function dispatchStreamPayload(handler: (payload: StreamEventPayload) => void, payload: StreamEventPayload | StreamEventPayload[]): void {
+  const events = Array.isArray(payload) ? payload : [payload];
+  for (const event of events) {
+    if (event?.method) {
+      handler(event);
+    }
+  }
+}
+
 contextBridge.exposeInMainWorld("wincmux", {
   rpc: async (payload: RpcParams) => unwrapEnvelope(await ipcRenderer.invoke("wincmux:rpc", payload)),
   streamSubscribe: async (payload: StreamFilter) => unwrapEnvelope(await ipcRenderer.invoke("wincmux:stream-subscribe", payload)),
   streamUnsubscribe: (subscriptionId: string) => ipcRenderer.invoke("wincmux:stream-unsubscribe", { subscription_id: subscriptionId }),
   onStreamEvent: (handler: (payload: StreamEventPayload) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, payload: StreamEventPayload) => handler(payload);
+    const listener = (_event: Electron.IpcRendererEvent, payload: StreamEventPayload | StreamEventPayload[]) =>
+      dispatchStreamPayload(handler, payload);
     ipcRenderer.on("wincmux:stream-event", listener);
-    return () => ipcRenderer.removeListener("wincmux:stream-event", listener);
+    ipcRenderer.on("wincmux:stream-events", listener);
+    return () => {
+      ipcRenderer.removeListener("wincmux:stream-event", listener);
+      ipcRenderer.removeListener("wincmux:stream-events", listener);
+    };
   },
   onContextAction: (handler: (payload: ContextActionPayload) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: ContextActionPayload) => handler(payload);
