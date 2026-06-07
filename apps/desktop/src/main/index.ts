@@ -48,6 +48,7 @@ type RendererStreamBatch = {
   webContents: WebContents;
   events: RendererStreamEvent[];
   timer: NodeJS.Timeout | null;
+  immediate: NodeJS.Immediate | null;
 };
 
 type IpcEnvelope<T> =
@@ -87,6 +88,7 @@ let activeContext: {
 
 const STREAM_EVENT_IPC_BATCH_DELAY_MS = 2;
 const STREAM_EVENT_IPC_MAX_EVENTS = 64;
+const STREAM_EVENT_IPC_FAST_OUTPUT_MAX_CHARS = 4096;
 let cachedLogDir: string | null = null;
 let cachedPerfLogPath: string | null = null;
 const cachedAppLogPaths = new Map<"main.log" | "core.log", string>();
@@ -153,6 +155,31 @@ function materializeRendererStreamEvent(event: RendererStreamEvent): RendererStr
   };
 }
 
+function rendererStreamEventOutputLength(event: RendererStreamEvent): number {
+  if (event.method !== "session.output") {
+    return 0;
+  }
+  const params = event.params as Record<string, unknown> | undefined;
+  return String(params?.output ?? "").length;
+}
+
+function shouldFastFlushRendererStreamEvent(event: RendererStreamEvent): boolean {
+  if (!activeContext.app_focused || event.method !== "session.output") {
+    return false;
+  }
+  const params = event.params as Record<string, unknown> | undefined;
+  const sessionId = typeof params?.session_id === "string" ? params.session_id : null;
+  if (!sessionId || sessionId !== activeContext.session_id) {
+    return false;
+  }
+  const workspaceId = typeof params?.workspace_id === "string" ? params.workspace_id : null;
+  if (activeContext.workspace_id && workspaceId && workspaceId !== activeContext.workspace_id) {
+    return false;
+  }
+  const outputLength = rendererStreamEventOutputLength(event);
+  return outputLength > 0 && outputLength <= STREAM_EVENT_IPC_FAST_OUTPUT_MAX_CHARS;
+}
+
 function flushRendererStreamBatch(webContentsId: number): void {
   const batch = rendererStreamBatches.get(webContentsId);
   if (!batch) {
@@ -160,6 +187,9 @@ function flushRendererStreamBatch(webContentsId: number): void {
   }
   if (batch.timer) {
     clearTimeout(batch.timer);
+  }
+  if (batch.immediate) {
+    clearImmediate(batch.immediate);
   }
   rendererStreamBatches.delete(webContentsId);
   if (batch.webContents.isDestroyed() || batch.events.length === 0) {
@@ -182,12 +212,18 @@ function queueRendererStreamEvent(webContents: WebContents, event: RendererStrea
   const webContentsId = webContents.id;
   let batch = rendererStreamBatches.get(webContentsId);
   if (!batch) {
-    batch = { webContents, events: [], timer: null };
+    batch = { webContents, events: [], timer: null, immediate: null };
     rendererStreamBatches.set(webContentsId, batch);
   }
   mergeRendererStreamEvent(batch.events, event);
   if (batch.events.length >= STREAM_EVENT_IPC_MAX_EVENTS) {
     flushRendererStreamBatch(webContentsId);
+    return;
+  }
+  if (shouldFastFlushRendererStreamEvent(event)) {
+    if (!batch.immediate) {
+      batch.immediate = setImmediate(() => flushRendererStreamBatch(webContentsId));
+    }
     return;
   }
   if (!batch.timer) {

@@ -222,6 +222,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Interactive terminal input now uses a token-guarded microtask flush for zero-delay key/Enter writes, reducing per-keystroke IPC start latency while preserving timer batching for paste-sized input.
 - Fast interactive input perf logs are summarized per pane/session while slow, failed, or paste-sized writes still emit detailed rows, reducing hot-path log churn without losing spike visibility.
 - Desktop log paths are cached after the first lookup so perf/main/core log appends avoid repeated directory resolution during active terminal use.
+- Main-to-renderer stream IPC now fast-flushes small output for the focused active session with `setImmediate`, shaving the normal batch timer from interactive echo/prompt updates while keeping large/background output batched.
 - Core assistant prompt detection now caches confirmed assistant context per session and reuses module-level marker checks, avoiding repeated buffer-wide context regex work on every output batch.
 - Renderer `session.output` handling now routes through a direct visible-session output fast path, avoiding per-event option objects and duplicate pane lookup work on high-volume terminal streams.
 - Electron main stream batching now stores merged `session.output` payloads as chunks and joins once before IPC send, avoiding repeated large-string copies during bursty terminal output.
