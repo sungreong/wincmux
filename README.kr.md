@@ -213,6 +213,9 @@ npm run package:win
 
 - xterm 출력은 이전 write가 끝난 뒤 다음 chunk를 쓰도록 순차 flush해 큰 출력에서 write queue가 겹치지 않게 했습니다.
 - pane fit과 resize 작업은 `requestAnimationFrame`으로 묶어 pane/사이드바 크기 조절 중 반복 layout 측정을 줄였습니다.
+- 워크스페이스/그룹 전환 시 stream 출력은 해당 세션이 실제로 붙어 있는 visible pane에만 전달하고, tail 복원 중 들어온 live 출력은 중복 prefix를 제거합니다.
+- 터미널 fit/resize는 DOM에서 떨어졌거나 아직 0px인 pane host를 건너뛰고, cols/rows가 바뀌지 않은 PTY resize RPC는 중복 전송하지 않습니다.
+- Browse로 작업 폴더를 선택하면 비어 있는 workspace name을 선택한 폴더명으로 자동 채웁니다. 사용자가 직접 입력한 이름은 덮어쓰지 않습니다.
 - 패키징 시 오래된 `dist/win-unpacked` 산출물이 `app.asar` 안에 들어가지 않도록 구성했습니다.
 - NSIS setup은 일반 설치 마법사 방식(`oneClick=false`)으로 만들고, packaged core runtime resources를 포함합니다.
 

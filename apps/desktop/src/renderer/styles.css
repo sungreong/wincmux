@@ -863,13 +863,16 @@ li.active .ws-delete-btn {
   border-radius: 0;
   padding: 0;
   background: transparent;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
   display: flex;
+  contain: layout;
 }
 
 .pane-surface > .pane-split,
 .pane-surface > .pane-leaf {
+  min-width: 0;
   min-height: 0;
   height: 100%;
   width: 100%;
@@ -899,6 +902,7 @@ li.active .ws-delete-btn {
 .pane-split {
   display: flex;
   width: 100%;
+  min-width: 0;
   min-height: 0;
   height: 100%;
 }
@@ -923,6 +927,7 @@ li.active .ws-delete-btn {
   flex: 1 1 0;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 .pane-divider {
@@ -958,6 +963,7 @@ li.active .ws-delete-btn {
   gap: 4px;
   padding: 6px;
   overflow: hidden;
+  contain: layout paint;
 }
 
 .pane-leaf.active {
@@ -1624,16 +1630,21 @@ li.active .ws-delete-btn {
 }
 
 .pane-terminal-host {
+  min-width: 0;
   min-height: 0;
   position: relative;
   border: none;
   border-radius: 6px;
   background: #060b11;
   overflow: hidden;
+  contain: layout paint style;
 }
 
 .pane-terminal-host .xterm {
+  width: 100%;
   height: 100%;
+  min-width: 0;
+  min-height: 0;
   padding: 4px;
   font-family: "Cascadia Mono", "D2Coding", "Noto Sans Mono CJK KR", "Consolas", monospace;
   font-size: 14px;

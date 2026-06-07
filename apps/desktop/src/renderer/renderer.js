@@ -339,6 +339,13 @@ function handleStreamEvent(event) {
     return;
   }
   if (event.method === "session.output") {
+    if (
+      params.workspace_id
+      && state.selectedWorkspaceId
+      && params.workspace_id !== state.selectedWorkspaceId
+    ) {
+      return;
+    }
     if (isRendererPromptFallbackEnabled()) {
       void maybeNotifyPromptFromOutput(
         params.session_id,
@@ -346,9 +353,12 @@ function handleStreamEvent(event) {
         params.workspace_id ?? null,
       );
     }
-    const paneId = paneApi.paneForSession(params.session_id);
+    const paneId = paneApi.paneForSession(params.session_id, { visibleOnly: true });
     if (paneId) {
-      paneApi.enqueueStreamOutput(paneId, params.output ?? "");
+      paneApi.enqueueStreamOutput(paneId, params.output ?? "", {
+        sessionId: params.session_id,
+        source: "stream"
+      });
     }
     return;
   }
@@ -964,12 +974,37 @@ async function markPaneNotificationsRead(paneId) {
   await loadUnread();
   return rows.length;
 }
+let lastAutoWorkspaceName = "";
+
+function workspaceNameFromPath(pathValue) {
+  const normalized = String(pathValue ?? "").trim().replace(/[\\/]+$/, "");
+  if (!normalized) {
+    return "";
+  }
+  return normalized.split(/[\\/]/).pop()?.trim() ?? "";
+}
+
+function autoFillWorkspaceNameFromPath(pathValue) {
+  const folderName = workspaceNameFromPath(pathValue);
+  if (!folderName) {
+    return;
+  }
+  const currentName = wsNameInput.value.trim();
+  if (currentName && currentName !== lastAutoWorkspaceName) {
+    return;
+  }
+  wsNameInput.value = folderName;
+  lastAutoWorkspaceName = folderName;
+}
+
 async function onCreateWorkspace() {
   const defaultPath =
     localStorage.getItem(STORAGE_KEYS.lastWorkspacePath) ?? "C:\\";
-  const name =
-    wsNameInput.value.trim() || `workspace-${Date.now().toString().slice(-6)}`;
   const pathValue = wsPathInput.value.trim() || defaultPath;
+  const name =
+    wsNameInput.value.trim()
+    || workspaceNameFromPath(pathValue)
+    || `workspace-${Date.now().toString().slice(-6)}`;
   const created = await rpc("workspace.create", {
     name,
     path: pathValue,
@@ -982,6 +1017,7 @@ async function onCreateWorkspace() {
     await switchWorkspace(state.selectedWorkspaceId);
   }
   wsNameInput.value = "";
+  lastAutoWorkspaceName = "";
   wsPathInput.value = pathValue;
   setStatus(`Workspace created: ${name}`);
 }
@@ -1044,6 +1080,7 @@ async function onPickFolder() {
     return;
   }
   wsPathInput.value = selected;
+  autoFillWorkspaceNameFromPath(selected);
   rememberWorkspacePath(selected);
 }
 async function onOpenInVscode() {

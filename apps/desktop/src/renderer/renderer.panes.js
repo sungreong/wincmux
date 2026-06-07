@@ -21,6 +21,10 @@ const OUTPUT_FLUSH_CHUNK_SIZE = 16_384;
 const OUTPUT_QUEUE_LIMIT = 256_000;
 const OUTPUT_QUEUE_KEEP = 180_000;
 const PANE_DEBUG_LOGS = localStorage.getItem("wincmux.debug.panes") === "1";
+const PANE_FIT_RETRY_DELAY_MS = 80;
+const PANE_MIN_FIT_WIDTH = 24;
+const PANE_MIN_FIT_HEIGHT = 24;
+const STREAM_TAIL_OVERLAP_LIMIT = 16_384;
 let fitAllPanesRaf = null;
 
 function paneDebug(...args) {
@@ -33,6 +37,38 @@ function paneWarn(...args) {
   if (PANE_DEBUG_LOGS) {
     console.warn(...args);
   }
+}
+
+function isPaneViewAttached(view) {
+  return Boolean(
+    view?.host?.isConnected
+    && view?.term?.element?.isConnected
+    && (!paneSurface || paneSurface.contains(view.host))
+  );
+}
+
+function paneViewSize(view) {
+  const rect = view?.host?.getBoundingClientRect?.();
+  return {
+    width: Math.floor(rect?.width ?? 0),
+    height: Math.floor(rect?.height ?? 0)
+  };
+}
+
+function trimRestoredOutputPrefix(tailOutput, liveOutput) {
+  if (!tailOutput || !liveOutput) {
+    return liveOutput ?? "";
+  }
+  if (tailOutput.endsWith(liveOutput)) {
+    return "";
+  }
+  const maxOverlap = Math.min(tailOutput.length, liveOutput.length, STREAM_TAIL_OVERLAP_LIMIT);
+  for (let size = maxOverlap; size > 0; size -= 1) {
+    if (tailOutput.endsWith(liveOutput.slice(0, size))) {
+      return liveOutput.slice(size);
+    }
+  }
+  return liveOutput;
 }
 
 function bindQuickCommandPanelSafe(paneId, quickPanel, quickBtn) {
@@ -133,13 +169,24 @@ function setPaneHandlers(handlers = {}) {
   }
 }
 
-function paneForSession(sessionId) {
-  for (const paneId of Object.keys(state.paneSessions)) {
-    if (state.paneSessions[paneId] === sessionId) {
-      return paneId;
-    }
+function paneForSession(sessionId, options = {}) {
+  if (!sessionId) {
+    return null;
   }
-  return null;
+  const visibleOnly = Boolean(options?.visibleOnly);
+  const matches = Object.keys(state.paneSessions).filter((paneId) => state.paneSessions[paneId] === sessionId);
+  const attached = matches.find((paneId) => {
+    const view = state.paneViews.get(paneId);
+    return view?.sessionId === sessionId && isPaneViewAttached(view);
+  });
+  if (attached) {
+    return attached;
+  }
+  if (visibleOnly) {
+    return null;
+  }
+  const bound = matches.find((paneId) => state.paneViews.get(paneId)?.sessionId === sessionId);
+  return bound ?? matches[0] ?? null;
 }
 
 function openPaneGroupMenu(paneId, anchorBtn) {
@@ -330,9 +377,27 @@ function focusPaneTerm(paneId) {
   focusPaneView(state.paneViews.get(paneId));
 }
 
-function enqueueStreamOutput(paneId, output) {
+function enqueueStreamOutput(paneId, output, options = {}) {
   const view = state.paneViews.get(paneId);
   if (!view || !output) {
+    return;
+  }
+  const expectedSessionId = typeof options === "string" ? options : (options?.sessionId ?? null);
+  const source = typeof options === "object" && options?.source ? options.source : "stream";
+  if (expectedSessionId && view.sessionId !== expectedSessionId) {
+    paneWarn("[output] skipped stale output", {
+      pane: paneId?.slice(0, 8),
+      expected: expectedSessionId?.slice(0, 8),
+      actual: view.sessionId?.slice(0, 8)
+    });
+    return;
+  }
+  if (
+    source === "stream"
+    && expectedSessionId
+    && view.tailRestoreSessionId === expectedSessionId
+  ) {
+    view.deferredStreamOutput += output;
     return;
   }
 
@@ -631,6 +696,7 @@ function disposeView(view) {
   if (view.resizeTimer) {
     clearTimeout(view.resizeTimer);
   }
+  clearPaneFitRetry(view);
   if (view.flushRaf) {
     cancelAnimationFrame(view.flushRaf);
   }
@@ -681,41 +747,79 @@ function disposeAllViews() {
   state._lastRenderedWorkspaceId = null;
 }
 
-function fitPaneView(view) {
-  if (!view?.term || !view.fitAddon) {
+function clearPaneFitRetry(view) {
+  if (view?.fitRetryTimer) {
+    clearTimeout(view.fitRetryTimer);
+    view.fitRetryTimer = null;
+  }
+}
+
+function schedulePaneFitRetry(view, options = {}) {
+  if (!view || view.fitRetryTimer) {
     return;
+  }
+  view.fitRetryTimer = setTimeout(() => {
+    view.fitRetryTimer = null;
+    schedulePaneFit(view, options);
+  }, PANE_FIT_RETRY_DELAY_MS);
+}
+
+function fitPaneView(view, options = {}) {
+  if (!view?.term || !view.fitAddon) {
+    return false;
   }
   if (view.fitRaf) {
     cancelAnimationFrame(view.fitRaf);
     view.fitRaf = null;
   }
+  if (!isPaneViewAttached(view)) {
+    clearPaneFitRetry(view);
+    return false;
+  }
+  const size = paneViewSize(view);
+  if (size.width < PANE_MIN_FIT_WIDTH || size.height < PANE_MIN_FIT_HEIGHT) {
+    schedulePaneFitRetry(view, options);
+    return false;
+  }
+  clearPaneFitRetry(view);
+  if (!options?.force && view.lastFitWidth === size.width && view.lastFitHeight === size.height) {
+    return false;
+  }
   const beforeCols = view.term.cols;
   const beforeRows = view.term.rows;
   updatePaneActionLayout(view.paneId);
   view.fitAddon.fit();
+  view.lastFitWidth = size.width;
+  view.lastFitHeight = size.height;
   if (view.term.cols !== beforeCols || view.term.rows !== beforeRows) {
     schedulePaneResize(view);
   }
+  return true;
 }
 
-function schedulePaneFit(view) {
+function schedulePaneFit(view, options = {}) {
   if (!view || view.fitRaf) {
     return;
+  }
+  if (options?.force) {
+    view.forceNextFit = true;
   }
   view.fitRaf = window.requestAnimationFrame(() => {
     view.fitRaf = null;
     try {
-      fitPaneView(view);
+      const force = view.forceNextFit || options?.force;
+      view.forceNextFit = false;
+      fitPaneView(view, { force });
     } catch {
       // ignore fit errors during layout teardown
     }
   });
 }
 
-function performFitAllPanes() {
+function performFitAllPanes(options = {}) {
   for (const view of state.paneViews.values()) {
     try {
-      fitPaneView(view);
+      fitPaneView(view, options);
     } catch {
       // ignore fit errors during layout teardown
     }
@@ -728,7 +832,7 @@ function fitAllPanes(options = {}) {
       cancelAnimationFrame(fitAllPanesRaf);
       fitAllPanesRaf = null;
     }
-    performFitAllPanes();
+    performFitAllPanes(options);
     return;
   }
   if (fitAllPanesRaf) {
@@ -736,7 +840,7 @@ function fitAllPanes(options = {}) {
   }
   fitAllPanesRaf = window.requestAnimationFrame(() => {
     fitAllPanesRaf = null;
-    performFitAllPanes();
+    performFitAllPanes(options);
   });
 }
 
@@ -819,7 +923,7 @@ function applyPaneFontToView(paneId, size) {
     return;
   }
   view.term.options.fontSize = nextSize;
-  fitPaneView(view);
+  fitPaneView(view, { force: true });
 }
 
 const PANE_ACTION_COMPACT_BREAKPOINT = 1080;
@@ -1041,7 +1145,7 @@ function setPaneAutoResizeEnabled(enabled) {
   for (const paneId of state.paneCards.keys()) {
     updatePaneActionLayout(paneId);
   }
-  fitAllPanes();
+  fitAllPanes({ force: true });
 }
 
 function setGlobalFontScale(scale, { resetPerPane = false } = {}) {
@@ -1063,7 +1167,7 @@ function setGlobalFontScale(scale, { resetPerPane = false } = {}) {
     }
     if (Number(view.term.options.fontSize) !== targetSize) {
       view.term.options.fontSize = targetSize;
-      fitPaneView(view);
+      fitPaneView(view, { force: true });
     }
   }
 
@@ -1075,20 +1179,45 @@ function setGlobalFontScale(scale, { resetPerPane = false } = {}) {
 }
 
 async function syncPaneSize(paneId) {
+  if (state.paneAutoResize === false) {
+    return;
+  }
   const view = state.paneViews.get(paneId);
   if (!view || !view.sessionId) {
     return;
   }
+  if (!isPaneViewAttached(view)) {
+    return;
+  }
   const cols = Math.max(2, view.term.cols || 120);
   const rows = Math.max(1, view.term.rows || 24);
+  if (view.lastSyncedCols === cols && view.lastSyncedRows === rows) {
+    return;
+  }
+  if (view.resizeInFlight) {
+    view.pendingResizeSync = true;
+    return;
+  }
+  const sessionId = view.sessionId;
+  view.resizeInFlight = true;
   try {
-    await rpc("session.resize", { session_id: view.sessionId, cols, rows });
+    await rpc("session.resize", { session_id: sessionId, cols, rows });
+    if (view.sessionId === sessionId) {
+      view.lastSyncedCols = cols;
+      view.lastSyncedRows = rows;
+    }
   } catch (err) {
     if (isDetachedInputError(err)) {
       markPaneDetached(view, "Restart this pane to attach a new terminal");
       return;
     }
     throw err;
+  } finally {
+    view.resizeInFlight = false;
+    if (view.pendingResizeSync) {
+      view.pendingResizeSync = false;
+      schedulePaneResize(view);
+    }
   }
 }
 
@@ -1327,10 +1456,17 @@ function bindViewToSession(view, sessionId) {
     cancelAnimationFrame(view.fitRaf);
     view.fitRaf = null;
   }
+  clearPaneFitRetry(view);
 
   view.pendingInput = "";
   view.outputQueue = "";
   view.outputWriteInFlight = false;
+  view.tailRestoreSessionId = null;
+  view.deferredStreamOutput = "";
+  view.lastSyncedCols = 0;
+  view.lastSyncedRows = 0;
+  view.resizeInFlight = false;
+  view.pendingResizeSync = false;
   view.readBusy = false;
   view.sessionId = nextSession;
 
@@ -1372,13 +1508,38 @@ function bindViewToSession(view, sessionId) {
 
 function restoreSessionTail(view, sessionId) {
   const restoreId = sessionId;
+  view.tailRestoreSessionId = restoreId;
+  view.deferredStreamOutput = "";
   rpc("session.tail", { session_id: restoreId, max_bytes: 65536 })
     .then((res) => {
-      if (res?.output && view.sessionId === restoreId && view.renderedSessionId === restoreId) {
-        enqueueStreamOutput(view.paneId, res.output);
+      if (view.sessionId !== restoreId || view.renderedSessionId !== restoreId) {
+        return;
+      }
+      const tailOutput = res?.output ?? "";
+      if (tailOutput) {
+        enqueueStreamOutput(view.paneId, tailOutput, { sessionId: restoreId, source: "tail" });
+      }
+      const liveOutput = trimRestoredOutputPrefix(tailOutput, view.deferredStreamOutput);
+      view.tailRestoreSessionId = null;
+      view.deferredStreamOutput = "";
+      if (liveOutput) {
+        enqueueStreamOutput(view.paneId, liveOutput, { sessionId: restoreId, source: "stream" });
       }
     })
-    .catch(() => {});
+    .catch(() => {
+      if (view.sessionId === restoreId && view.deferredStreamOutput) {
+        const liveOutput = view.deferredStreamOutput;
+        view.tailRestoreSessionId = null;
+        view.deferredStreamOutput = "";
+        enqueueStreamOutput(view.paneId, liveOutput, { sessionId: restoreId, source: "stream" });
+      }
+    })
+    .finally(() => {
+      if (view.tailRestoreSessionId === restoreId) {
+        view.tailRestoreSessionId = null;
+        view.deferredStreamOutput = "";
+      }
+    });
 }
 
 function startPanePolling(view) {
@@ -1403,7 +1564,7 @@ function startPanePolling(view) {
       });
       if (res?.output) {
         void maybeNotifyPromptFromOutput(activeSessionId, res.output, selectedWorkspace()?.id ?? null);
-        enqueueStreamOutput(view.paneId, res.output);
+        enqueueStreamOutput(view.paneId, res.output, { sessionId: activeSessionId, source: "poll" });
       }
     } catch (err) {
       const message = String(err?.message ?? err);
@@ -1792,7 +1953,6 @@ function createPaneView(paneId, host) {
     }
   }
   term.open(host);
-  fitAddon.fit();
 
   const view = {
     paneId,
@@ -1811,7 +1971,17 @@ function createPaneView(paneId, host) {
     flushRaf: null,
     outputQueue: "",
     outputWriteInFlight: false,
+    tailRestoreSessionId: null,
+    deferredStreamOutput: "",
     fitRaf: null,
+    fitRetryTimer: null,
+    forceNextFit: false,
+    lastFitWidth: 0,
+    lastFitHeight: 0,
+    lastSyncedCols: 0,
+    lastSyncedRows: 0,
+    resizeInFlight: false,
+    pendingResizeSync: false,
     resizeTimer: null,
     readBusy: false,
     detached: false,
@@ -2016,6 +2186,7 @@ function createPaneView(paneId, host) {
   view.observer = observer;
 
   state.paneViews.set(paneId, view);
+  schedulePaneFit(view, { force: true });
 }
 
 function renderPaneSurface(force = false) {
@@ -2140,6 +2311,8 @@ function renderPaneSurface(force = false) {
         item.host.appendChild(existing.term.element);
       }
       existing.host = item.host;
+      existing.lastFitWidth = 0;
+      existing.lastFitHeight = 0;
       ensurePaneOverlay(existing);
       rebindImeTextarea(existing);
       existing.observer?.disconnect();
@@ -2148,6 +2321,7 @@ function renderPaneSurface(force = false) {
       });
       observer.observe(item.host);
       existing.observer = observer;
+      schedulePaneFit(existing, { force: true });
     } else {
       createPaneView(item.paneId, item.host);
     }
@@ -2157,7 +2331,7 @@ function renderPaneSurface(force = false) {
   applyPaneSelectionStyles();
   // Defer fit until after browser has applied layout, so xterm gets correct dimensions
   requestAnimationFrame(() => {
-    fitAllPanes({ immediate: true });
+    fitAllPanes({ immediate: true, force: true });
   });
 }
 

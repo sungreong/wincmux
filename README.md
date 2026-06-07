@@ -196,6 +196,9 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 
 - Terminal output is flushed through xterm sequentially so large command output does not pile up overlapping writes.
 - Pane fitting and resize work is coalesced with `requestAnimationFrame` to reduce repeated layout measurement while resizing panes or sidebars.
+- Workspace/group switches now route stream output only to the visible pane bound to that session, and tail restore deduplicates live output that arrives during the restore window.
+- Terminal fit/resize now skips detached or zero-size pane hosts, avoids duplicate PTY resize RPCs for unchanged cols/rows, and retries only after layout is measurable.
+- The workspace folder picker fills an empty workspace name from the selected folder name while preserving manually typed names.
 - Packaged builds now avoid bundling stale `dist/win-unpacked` output into `app.asar`.
 - NSIS setup builds use the standard installer wizard (`oneClick=false`) and include the packaged core runtime resources.
 
