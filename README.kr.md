@@ -228,6 +228,7 @@ npm run package:win
 - renderer performance log는 IPC/file append 전에 batch로 묶어 input flush metric처럼 자주 찍히는 로그가 키 입력마다 IPC 부담을 만들지 않게 했습니다.
 - tail 복원 중 모아 두는 live stream output도 제한 크기의 chunk queue로 바꿔 pane 재연결이나 화면 전환 중 반복 문자열 concat/slice가 생기지 않게 했습니다.
 - main에서 renderer로 보내는 stream event는 짧은 IPC window로 batch하고, 같은 session의 인접 output은 전달 전에 합쳐 다중 터미널 부하에서 Electron IPC wake-up을 줄였습니다.
+- renderer stream output routing은 session-to-pane lookup map을 캐시해 output event마다 pane 목록을 훑지 않게 했고, stale cache 검증은 유지했습니다.
 - core drain/tail 출력 버퍼도 제한 크기의 chunk buffer로 바꿔 PTY 출력이 들어오는 동안 반복 문자열 concat/slice가 일어나지 않게 했습니다.
 - core stream batch는 flush 지연을 낮추고 큰 출력 burst는 즉시 flush해 interactive latency를 낮췄습니다.
 - core notification/resume detector는 stream batch 단위로 실행하고 일반 shell 출력은 fast-path로 건너뛰어 다중 터미널의 regex 작업량을 줄였습니다.

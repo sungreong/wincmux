@@ -343,26 +343,53 @@ function paneForSession(sessionId, options = {}) {
     return null;
   }
   const visibleOnly = Boolean(options?.visibleOnly);
-  let firstMatch = null;
-  let boundMatch = null;
+  const cached = visibleOnly
+    ? state.visibleSessionPaneLookup.get(sessionId)
+    : state.sessionPaneLookup.get(sessionId);
+  if (cached && isPaneSessionLookupValid(cached, sessionId, visibleOnly)) {
+    return cached;
+  }
+
+  rebuildPaneSessionLookup();
+  const rebuilt = visibleOnly
+    ? state.visibleSessionPaneLookup.get(sessionId)
+    : state.sessionPaneLookup.get(sessionId);
+  return rebuilt && isPaneSessionLookupValid(rebuilt, sessionId, visibleOnly) ? rebuilt : null;
+}
+
+function isPaneSessionLookupValid(paneId, sessionId, visibleOnly = false) {
+  if (!paneId || state.paneSessions[paneId] !== sessionId) {
+    return false;
+  }
+  if (!visibleOnly) {
+    return true;
+  }
+  const view = state.paneViews.get(paneId);
+  return Boolean(view?.sessionId === sessionId && isPaneViewAttached(view));
+}
+
+function rebuildPaneSessionLookup() {
+  const best = new Map();
+  const visible = new Map();
   for (const paneId in state.paneSessions) {
-    if (state.paneSessions[paneId] !== sessionId) {
+    const sessionId = state.paneSessions[paneId];
+    if (!sessionId) {
       continue;
     }
-    firstMatch ??= paneId;
     const view = state.paneViews.get(paneId);
-    if (view?.sessionId !== sessionId) {
-      continue;
+    const rank = view?.sessionId === sessionId
+      ? (isPaneViewAttached(view) ? 2 : 1)
+      : 0;
+    const current = best.get(sessionId);
+    if (!current || rank > current.rank) {
+      best.set(sessionId, { paneId, rank });
     }
-    boundMatch ??= paneId;
-    if (isPaneViewAttached(view)) {
-      return paneId;
+    if (rank === 2 && !visible.has(sessionId)) {
+      visible.set(sessionId, paneId);
     }
   }
-  if (visibleOnly) {
-    return null;
-  }
-  return boundMatch ?? firstMatch;
+  state.sessionPaneLookup = new Map([...best.entries()].map(([sessionId, item]) => [sessionId, item.paneId]));
+  state.visibleSessionPaneLookup = visible;
 }
 
 function openPaneGroupMenu(paneId, anchorBtn) {
@@ -730,6 +757,7 @@ function normalizePaneSessions() {
   }
 
   ensureSelectedPane();
+  rebuildPaneSessionLookup();
 }
 
 function applyPaneSelectionStyles() {
@@ -2705,6 +2733,7 @@ function refreshPaneBindings() {
     }
   }
 
+  rebuildPaneSessionLookup();
   applyPaneSelectionStyles();
 }
 

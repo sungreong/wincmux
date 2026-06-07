@@ -219,6 +219,8 @@ const state = {
   selectedWorkspaceId: localStorage.getItem(STORAGE_KEYS.selectedWorkspaceId) ?? null,
   selectedPaneId: null,
   paneSessions: {},
+  sessionPaneLookup: new Map(),
+  visibleSessionPaneLookup: new Map(),
   paneGroups: [],
   sessionGroupBindings: {},
   selectedGroupId: null,
