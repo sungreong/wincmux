@@ -41,6 +41,7 @@ type StreamEvent = {
 type RendererStreamEvent = {
   method: string;
   params: unknown;
+  outputChunks?: string[];
 };
 
 type RendererStreamBatch = {
@@ -122,9 +123,33 @@ function mergeRendererStreamEvent(events: RendererStreamEvent[], event: Renderer
     return;
   }
 
-  last.params = {
-    ...lastParams,
-    output: `${String(lastParams?.output ?? "")}${String(nextParams?.output ?? "")}`
+  const nextOutput = String(nextParams?.output ?? "");
+  if (!nextOutput) {
+    return;
+  }
+  if (!last.outputChunks) {
+    last.outputChunks = [String(lastParams?.output ?? "")];
+    last.params = {
+      ...lastParams,
+      output: ""
+    };
+  }
+  last.outputChunks.push(nextOutput);
+}
+
+function materializeRendererStreamEvent(event: RendererStreamEvent): RendererStreamEvent {
+  if (event.method !== "session.output" || !event.outputChunks) {
+    return event;
+  }
+  const params = event.params as Record<string, unknown> | undefined;
+  return {
+    method: event.method,
+    params: {
+      ...params,
+      output: event.outputChunks.length === 1
+        ? event.outputChunks[0]
+        : event.outputChunks.join("")
+    }
   };
 }
 
@@ -141,10 +166,13 @@ function flushRendererStreamBatch(webContentsId: number): void {
     return;
   }
   if (batch.events.length === 1) {
-    batch.webContents.send("wincmux:stream-event", batch.events[0]);
+    const singleEvent = batch.events[0];
+    if (singleEvent) {
+      batch.webContents.send("wincmux:stream-event", materializeRendererStreamEvent(singleEvent));
+    }
     return;
   }
-  batch.webContents.send("wincmux:stream-events", batch.events);
+  batch.webContents.send("wincmux:stream-events", batch.events.map(materializeRendererStreamEvent));
 }
 
 function queueRendererStreamEvent(webContents: WebContents, event: RendererStreamEvent): void {
