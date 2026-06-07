@@ -205,6 +205,7 @@ If the status bar shows `Error: connect ENOENT \\.\pipe\wincmux-rpc`, the deskto
 - Pane overflow and quick command menus render through body-level portals so compact panes and split boundaries do not clip the UI.
 - Assistant prompt notifications suppress Codex/npm update logs that mention pressing enter, avoiding repeated false native toasts during CLI updates.
 - Pane binding refresh indexes unread notifications and known sessions once per refresh instead of rescanning them for every pane.
+- Core stream events are serialized once per emit and sent once per socket, avoiding duplicate output when subscriptions overlap.
 - Core drain/tail output buffers also use bounded chunk buffers, avoiding repeated string concat/slice while PTY output is still arriving.
 - Core stream batches use a shorter flush delay and flush immediately for large output bursts to lower interactive latency.
 - Core notification/resume detectors run on stream batches and skip generic shell output with a fast-path filter, reducing regex work across many terminals.

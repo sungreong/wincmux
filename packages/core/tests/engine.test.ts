@@ -745,10 +745,16 @@ describe("core engine", () => {
     const workspaceId = (created.result as { workspace: { id: string } }).workspace.id;
     const sessionId = randomUUID();
 
-    const output = await new Promise<string>((resolve, reject) => {
+    const outputs = await new Promise<string[]>((resolve, reject) => {
       const client = net.createConnection(pipe);
       let buffer = "";
+      let subscribed = 0;
+      const seenOutputs: string[] = [];
+      let finishTimer: NodeJS.Timeout | null = null;
       const timer = setTimeout(() => {
+        if (finishTimer) {
+          clearTimeout(finishTimer);
+        }
         client.destroy();
         reject(new Error("timed out waiting for stream output"));
       }, 1000);
@@ -761,7 +767,11 @@ describe("core engine", () => {
           buffer = buffer.slice(index + 1);
           if (line) {
             const parsed = JSON.parse(line) as { id?: number; method?: string; result?: unknown; params?: { output?: string } };
-            if (parsed.id === 99) {
+            if (parsed.id === 99 || parsed.id === 100) {
+              subscribed += 1;
+            }
+            if (subscribed === 2) {
+              subscribed += 1;
               (engine as unknown as {
                 queueSessionOutput: (id: string, workspaceId: string, chunk: string) => void;
               }).queueSessionOutput(sessionId, workspaceId, "one ");
@@ -770,9 +780,14 @@ describe("core engine", () => {
               }).queueSessionOutput(sessionId, workspaceId, "two");
             }
             if (parsed.method === "session.output") {
-              clearTimeout(timer);
-              client.destroy();
-              resolve(parsed.params?.output ?? "");
+              seenOutputs.push(parsed.params?.output ?? "");
+              if (!finishTimer) {
+                finishTimer = setTimeout(() => {
+                  clearTimeout(timer);
+                  client.destroy();
+                  resolve(seenOutputs);
+                }, 80);
+              }
             }
           }
           index = buffer.indexOf("\n");
@@ -785,10 +800,16 @@ describe("core engine", () => {
           method: "session.stream.subscribe",
           params: { workspace_id: workspaceId, topics: ["session"] }
         }) + "\n");
+        client.write(JSON.stringify({
+          jsonrpc: "2.0",
+          id: 100,
+          method: "session.stream.subscribe",
+          params: { workspace_id: workspaceId, topics: ["session"] }
+        }) + "\n");
       });
     });
 
-    expect(output).toBe("one two");
+    expect(outputs).toEqual(["one two"]);
     engine.stop();
   });
 

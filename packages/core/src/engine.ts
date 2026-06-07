@@ -1323,6 +1323,8 @@ export class CoreEngine {
 
   private emitStreamEvent(method: string, params: Record<string, unknown>): void {
     const topic = this.eventTopic(method);
+    const sentSockets = new Set<net.Socket>();
+    let line: string | null = null;
     for (const subscription of this.streamSubscriptions.values()) {
       if (!subscription.topics.includes(topic)) {
         continue;
@@ -1331,13 +1333,19 @@ export class CoreEngine {
         continue;
       }
 
-      if (subscription.socket.destroyed) {
+      const socket = subscription.socket;
+      if (socket.destroyed || !socket.writable || socket.writableEnded) {
         this.removeSubscription(subscription.id);
+        continue;
+      }
+      if (sentSockets.has(socket)) {
         continue;
       }
 
       try {
-        subscription.socket.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
+        line ??= `${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`;
+        socket.write(line);
+        sentSockets.add(socket);
       } catch {
         this.removeSubscription(subscription.id);
       }
