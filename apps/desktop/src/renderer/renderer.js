@@ -774,7 +774,9 @@ async function startSessionForPane(paneId, options = {}) {
   } catch (err) {
     const message = String(err?.message ?? err);
     if (message.includes("File not found")) {
-      throw new Error(`Shell start failed. Check workspace path: ${ws.path}`);
+      const attemptedCmd = effectiveCmd ? String(effectiveCmd) : (state.terminal.default_shell || "default shell");
+      const attemptedCwd = effectiveCwd ?? ws.path;
+      throw new Error(`Shell start failed. Command: ${attemptedCmd}; cwd: ${attemptedCwd}. Check shell command and workspace path.`);
     }
     throw err;
   }
@@ -797,6 +799,17 @@ async function startSessionForPane(paneId, options = {}) {
     pane_id: paneId,
     session_id: sid,
   }).catch(() => {});
+  if (typeof globalThis.recordOverlayPaneSession === "function") {
+    globalThis.recordOverlayPaneSession({
+      workspaceId,
+      paneId,
+      sessionId: sid,
+      command: effectiveCmd ?? state.terminal.default_shell ?? "pwsh.exe",
+      args: effectiveArgs ?? [],
+      cwd: effectiveCwd ?? ws.path,
+      time: new Date().toISOString()
+    });
+  }
   await loadSessions(workspaceId, transitionSeq);
   await loadPaneGroups(workspaceId, transitionSeq);
   if (isTransitionStale(transitionSeq, workspaceId)) {

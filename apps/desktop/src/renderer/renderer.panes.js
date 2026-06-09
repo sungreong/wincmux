@@ -38,8 +38,11 @@ const PANE_DEBUG_LOGS = localStorage.getItem("wincmux.debug.panes") === "1";
 const PANE_FIT_RETRY_DELAY_MS = 80;
 const PANE_MIN_FIT_WIDTH = 24;
 const PANE_MIN_FIT_HEIGHT = 24;
+const PANE_FIT_STABILIZE_DELAYS_MS = [60, 180, 420];
+const PANE_MIN_READABLE_COLS = 128;
 const STREAM_TAIL_OVERLAP_LIMIT = 16_384;
 const PANE_PORTAL_MARGIN = 10;
+const PANE_TERMINAL_FONT_FAMILY = '"D2Coding", "Sarasa Mono K", "Cascadia Mono", "Consolas", "GulimChe", "굴림체", "Noto Sans Mono CJK KR", "Malgun Gothic", monospace';
 let fitAllPanesRaf = null;
 let outputFlushRaf = null;
 let outputFastFlushQueued = false;
@@ -643,15 +646,421 @@ function ensurePaneOverlay(view) {
       });
     });
 
-    overlay.append(title, detail, action);
+    const recent = document.createElement("div");
+    recent.className = "pane-terminal-overlay-recent";
+
+    overlay.append(title, detail, action, recent);
     view.overlayEl = overlay;
     view.overlayTitleEl = title;
     view.overlayDetailEl = detail;
     view.overlayActionEl = action;
+    view.overlayRecentEl = recent;
   }
 
   if (view.overlayEl.parentElement !== view.host) {
     view.host.appendChild(view.overlayEl);
+  }
+}
+
+function commandBaseNameForOverlay(cmd = "") {
+  return String(cmd).split(/[\\/]/).pop()?.toLowerCase() ?? "";
+}
+
+function parseSessionArgsForOverlay(spawnArgs = "[]") {
+  try {
+    const parsed = JSON.parse(spawnArgs || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function cleanShellCommandForOverlay(value = "") {
+  let text = String(value).trim();
+  text = text.replace(/^\$OutputEncoding=\[Console\]::OutputEncoding=\[TextUTF8Encoding\]::new\(\);\s*/i, "");
+  text = text.replace(/^\$OutputEncoding=\[Console\]::OutputEncoding=\[Text\.UTF8Encoding\]::new\(\);\s*/i, "");
+  text = text.replace(/^\[Console\]::InputEncoding=\[Text\.UTF8Encoding\]::new\(\);\s*/i, "");
+  text = text.replace(/^if \(Get-Variable PSStyle[\s\S]*?\};\s*/i, "");
+  text = text.replace(/^chcp(?:\.com)?\s+65001\s*>\s*(?:\$null|nul)\s*;?\s*/i, "");
+  return text || value;
+}
+
+function uniqueOverlayStrings(values) {
+  const seen = new Set();
+  const rows = [];
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    const key = text.toLowerCase();
+    if (!text || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    rows.push(text);
+  }
+  return rows;
+}
+
+function overlayShellCommands() {
+  const preferred = state.terminal?.default_shell || state.shellCommand || "powershell.exe";
+  const lower = String(preferred).toLowerCase();
+  const fallback = lower.includes("pwsh") ? "powershell.exe" : "pwsh.exe";
+  return uniqueOverlayStrings([preferred, fallback, "powershell.exe", "pwsh.exe"]);
+}
+
+function overlayShellArgs(shellCmd, commandText) {
+  const lower = String(shellCmd).toLowerCase();
+  if (lower.includes("powershell.exe") || lower === "powershell") {
+    return [
+      "-NoLogo",
+      "-NoExit",
+      "-Command",
+      `chcp.com 65001 > $null; [Console]::InputEncoding=[Text.UTF8Encoding]::new(); [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); ${commandText}`
+    ];
+  }
+  return [
+    "-NoLogo",
+    "-NoExit",
+    "-Command",
+    `$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); [Console]::InputEncoding=[Text.UTF8Encoding]::new(); if (Get-Variable PSStyle -ErrorAction SilentlyContinue) { $PSStyle.OutputRendering = 'Ansi' }; ${commandText}`
+  ];
+}
+
+async function startShellCommandForPane(paneId, commandText, options = {}) {
+  const ws = selectedWorkspace();
+  const cwdCandidates = uniqueOverlayStrings([options.cwd, ws?.path]);
+  const shells = overlayShellCommands();
+  let lastErr = null;
+  for (const cwd of cwdCandidates.length > 0 ? cwdCandidates : [undefined]) {
+    for (const shell of shells) {
+      try {
+        return await paneHandlers.startSessionForPane(paneId, {
+          force: options.force !== false,
+          cmd: shell,
+          args: overlayShellArgs(shell, commandText),
+          cwd,
+          focusTerm: options.focusTerm !== false
+        });
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+  }
+  throw lastErr ?? new Error("Failed to start shell command.");
+}
+
+function sessionLabelForOverlay(session) {
+  const cmd = commandBaseNameForOverlay(session?.spawn_cmd);
+  const parsedArgs = parseSessionArgsForOverlay(session?.spawn_args);
+  const commandIndex = parsedArgs.findIndex((arg) => String(arg).toLowerCase() === "-command");
+  if ((cmd === "pwsh.exe" || cmd === "powershell.exe" || cmd === "pwsh" || cmd === "powershell") && commandIndex >= 0) {
+    return cleanShellCommandForOverlay(parsedArgs.slice(commandIndex + 1).join(" "));
+  }
+  const displayArgs = parsedArgs.filter((arg) => {
+    const value = String(arg);
+    return !value.startsWith("-No") && !value.startsWith("chcp") && !value.startsWith("$Output") && !value.startsWith("[Console]");
+  });
+  return displayArgs.length > 0
+    ? `${session?.spawn_cmd ?? ""} ${displayArgs.join(" ")}`.trim()
+    : (session?.spawn_cmd ?? "");
+}
+
+function formatOverlaySessionTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return `${date.toLocaleDateString([], { month: "short", day: "numeric" })} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
+function overlaySessionSignature(item) {
+  return `${item.kind}|${item.sessionId ?? ""}|${item.command ?? ""}|${item.cwd ?? ""}`;
+}
+
+const PANE_SESSION_HISTORY_STORAGE_KEY = "wincmux.paneSessionHistory.v1";
+
+function paneHistoryKey(workspaceId, paneId) {
+  return `${workspaceId ?? ""}:${paneId ?? ""}`;
+}
+
+function readPaneSessionHistoryStore() {
+  try {
+    const raw = localStorage.getItem(PANE_SESSION_HISTORY_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writePaneSessionHistoryStore(store) {
+  localStorage.setItem(PANE_SESSION_HISTORY_STORAGE_KEY, JSON.stringify(store));
+}
+
+function recordOverlayPaneSession(input) {
+  const workspaceId = input?.workspaceId ?? state.selectedWorkspaceId;
+  const paneId = input?.paneId;
+  if (!workspaceId || !paneId || !input?.command) {
+    return;
+  }
+  const store = readPaneSessionHistoryStore();
+  const key = paneHistoryKey(workspaceId, paneId);
+  const args = Array.isArray(input.args) ? input.args : [];
+  const entry = {
+    sessionId: input.sessionId ?? null,
+    command: String(input.command),
+    args,
+    cwd: input.cwd ?? selectedWorkspace()?.path ?? "",
+    title: input.title || sessionLabelForOverlay({
+      spawn_cmd: input.command,
+      spawn_args: JSON.stringify(args),
+      spawn_cwd: input.cwd ?? ""
+    }),
+    time: input.time ?? new Date().toISOString()
+  };
+  const signature = `${entry.command}|${JSON.stringify(entry.args)}|${entry.cwd}`;
+  const existing = Array.isArray(store[key]) ? store[key] : [];
+  store[key] = [
+    entry,
+    ...existing.filter((row) => `${row.command}|${JSON.stringify(row.args ?? [])}|${row.cwd ?? ""}` !== signature)
+  ].slice(0, 12);
+  writePaneSessionHistoryStore(store);
+}
+
+function localPaneSessionHistory(workspaceId, paneId) {
+  const rows = readPaneSessionHistoryStore()[paneHistoryKey(workspaceId, paneId)];
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function collectRecentOverlaySessions(view) {
+  const ws = selectedWorkspace();
+  if (!ws || !view?.paneId) {
+    return [];
+  }
+  const [histRes, aiRes, bindRes] = await Promise.all([
+    rpc("session.history", { workspace_id: ws.id }).catch(() => ({ sessions: [] })),
+    rpc("ai.sessions", { workspace_id: ws.id }).catch(() => ({ sessions: [] })),
+    rpc("pane.session.bindings", { workspace_id: ws.id }).catch(() => ({ bindings: [] }))
+  ]);
+  const bindings = bindRes?.bindings ?? [];
+  const bindingBySessionId = new Map();
+  const sessionIdsForPane = new Set();
+  for (const binding of bindings) {
+    if (binding?.session_id && !bindingBySessionId.has(binding.session_id)) {
+      bindingBySessionId.set(binding.session_id, binding);
+    }
+    if (binding?.pane_id === view.paneId && binding.session_id) {
+      sessionIdsForPane.add(binding.session_id);
+    }
+  }
+  const currentPaneId = view.paneId;
+
+  const recent = [];
+  for (const row of localPaneSessionHistory(ws.id, currentPaneId)) {
+    if (!row?.command) {
+      continue;
+    }
+    recent.push({
+      kind: "history",
+      actionLabel: "Re-run",
+      title: row.title || String(row.command),
+      meta: `${row.sessionId ? `${String(row.sessionId).slice(0, 8)} · ` : ""}pane ${currentPaneId.slice(0, 8)}`,
+      time: row.time ?? new Date().toISOString(),
+      sessionId: row.sessionId ?? null,
+      paneId: currentPaneId,
+      command: row.command,
+      args: Array.isArray(row.args) ? row.args : [],
+      cwd: row.cwd || ws.path
+    });
+  }
+
+  for (const ai of aiRes?.sessions ?? []) {
+    const binding = bindingBySessionId.get(ai.pty_session_id);
+    if (binding?.pane_id !== currentPaneId && !sessionIdsForPane.has(ai.pty_session_id)) {
+      continue;
+    }
+    recent.push({
+      kind: "ai",
+      actionLabel: "Resume",
+      title: ai.resume_cmd,
+      meta: `${ai.tool ?? "assistant"}${binding?.pane_id ? ` · pane ${binding.pane_id.slice(0, 8)}` : ""}`,
+      time: ai.detected_at,
+      sessionId: ai.pty_session_id,
+      paneId: binding?.pane_id ?? null,
+      command: ai.resume_cmd,
+      cwd: ai.cwd || ws.path
+    });
+  }
+
+  for (const session of histRes?.sessions ?? []) {
+    if (!session?.spawn_cmd) {
+      continue;
+    }
+    const binding = bindingBySessionId.get(session.id);
+    if (binding?.pane_id !== currentPaneId && !sessionIdsForPane.has(session.id)) {
+      continue;
+    }
+    const isRunning = session.status === "running";
+    recent.push({
+      kind: isRunning ? "running" : "history",
+      actionLabel: isRunning ? "Attach" : "Re-run",
+      title: sessionLabelForOverlay(session),
+      meta: `${session.id.slice(0, 8)} · ${isRunning ? "running" : session.status}${binding?.pane_id ? ` · pane ${binding.pane_id.slice(0, 8)}` : ""}`,
+      time: session.started_at,
+      sessionId: session.id,
+      paneId: binding?.pane_id ?? null,
+      command: session.spawn_cmd,
+      args: parseSessionArgsForOverlay(session.spawn_args),
+      cwd: session.spawn_cwd || ws.path
+    });
+  }
+
+  const seen = new Set();
+  return recent
+    .filter((item) => {
+      const key = overlaySessionSignature(item);
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => {
+      return new Date(b.time).getTime() - new Date(a.time).getTime();
+    })
+    .slice(0, 6);
+}
+
+async function continueOverlaySession(view, item) {
+  const ws = selectedWorkspace();
+  if (!ws || !view?.paneId || !item) {
+    return;
+  }
+  if (item.kind === "ai") {
+    await startShellCommandForPane(view.paneId, item.command, {
+      cwd: item.cwd || ws.path,
+      focusTerm: true
+    });
+    return;
+  }
+  if (item.kind === "running") {
+    const currentSid = state.paneSessions[view.paneId] ?? null;
+    if (currentSid && currentSid !== item.sessionId) {
+      await rpc("session.close", { session_id: currentSid }).catch(() => {});
+    }
+    state.paneSessions[view.paneId] = item.sessionId;
+    await rpc("pane.session.bind", { workspace_id: ws.id, pane_id: view.paneId, session_id: item.sessionId }).catch(() => {});
+    recordOverlayPaneSession({
+      workspaceId: ws.id,
+      paneId: view.paneId,
+      sessionId: item.sessionId,
+      command: item.command,
+      args: item.args ?? [],
+      cwd: item.cwd || ws.path,
+      title: item.title,
+      time: new Date().toISOString()
+    });
+    if (typeof globalThis.loadSessions === "function") {
+      await globalThis.loadSessions(ws.id).catch(() => {});
+    }
+    normalizePaneSessions();
+    refreshPaneBindings();
+    await selectPane(view.paneId, { persist: true, focusTerm: true });
+    setStatus(`Attached: ${item.sessionId.slice(0, 8)}`);
+    return;
+  }
+  await paneHandlers.startSessionForPane(view.paneId, {
+    force: true,
+    cmd: item.command,
+    args: item.args ?? [],
+    cwd: item.cwd || ws.path,
+    focusTerm: true
+  });
+}
+
+async function runOverlayCommand(view, raw) {
+  const ws = selectedWorkspace();
+  const text = String(raw ?? "").trim();
+  if (!ws || !view?.paneId || !text) {
+    return;
+  }
+  await startShellCommandForPane(view.paneId, text, {
+    cwd: ws.path,
+    focusTerm: true
+  });
+}
+
+async function renderPaneOverlayRecentSessions(view, mode) {
+  if (!view?.overlayRecentEl) {
+    return;
+  }
+  const recentEl = view.overlayRecentEl;
+  if (mode === "starting") {
+    recentEl.hidden = true;
+    recentEl.innerHTML = "";
+    return;
+  }
+  const token = (view.overlayRecentToken ?? 0) + 1;
+  view.overlayRecentToken = token;
+  recentEl.hidden = false;
+  recentEl.innerHTML = '<div class="pane-terminal-overlay-recent-muted">Loading recent sessions...</div>';
+  try {
+    const items = await collectRecentOverlaySessions(view);
+    if (view.overlayRecentToken !== token || recentEl.hidden) {
+      return;
+    }
+    recentEl.innerHTML = `<div class="pane-terminal-overlay-recent-title">Pane ${view.paneId.slice(0, 8)} sessions</div>`;
+    if (items.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "pane-terminal-overlay-recent-muted";
+      empty.textContent = "No saved history for this pane yet.";
+      recentEl.appendChild(empty);
+    }
+    for (const item of items) {
+      const row = document.createElement("button");
+      row.className = "pane-terminal-overlay-session";
+      row.type = "button";
+      row.title = item.title;
+      row.innerHTML = `<span class="pane-terminal-overlay-session-main">
+        <span class="pane-terminal-overlay-session-title"></span>
+        <span class="pane-terminal-overlay-session-meta"></span>
+      </span><span class="pane-terminal-overlay-session-action"></span>`;
+      row.querySelector(".pane-terminal-overlay-session-title").textContent = item.title;
+      row.querySelector(".pane-terminal-overlay-session-meta").textContent = [item.meta, formatOverlaySessionTime(item.time)].filter(Boolean).join(" · ");
+      row.querySelector(".pane-terminal-overlay-session-action").textContent = item.actionLabel;
+      row.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        setPaneOverlay(view, "starting", `${item.actionLabel} session...`, item.title);
+        continueOverlaySession(view, item).catch((err) => {
+          setStatus(String(err?.message ?? err), true);
+          setPaneOverlay(view, mode, mode === "running" ? "Session running" : "No session running", String(err?.message ?? err), mode === "running" ? "Restart" : "Start");
+        });
+      });
+      recentEl.appendChild(row);
+    }
+    const form = document.createElement("form");
+    form.className = "pane-terminal-overlay-command";
+    form.innerHTML = '<input class="pane-terminal-overlay-command-input" placeholder="claude / codex / pwsh" /><button class="pane-terminal-overlay-command-run" type="submit">Run</button>';
+    form.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const input = form.querySelector("input");
+      const command = input?.value?.trim();
+      if (!command) {
+        input?.focus();
+        return;
+      }
+      setPaneOverlay(view, "starting", "Starting session...", command);
+      runOverlayCommand(view, command).catch((err) => {
+        setStatus(String(err?.message ?? err), true);
+        setPaneOverlay(view, mode, mode === "running" ? "Session running" : "No session running", String(err?.message ?? err), mode === "running" ? "Restart" : "Start");
+      });
+    });
+    recentEl.appendChild(form);
+  } catch {
+    if (view.overlayRecentToken === token) {
+      recentEl.innerHTML = '<div class="pane-terminal-overlay-recent-title">Pane sessions</div>';
+    }
   }
 }
 
@@ -667,11 +1076,16 @@ function setPaneOverlay(view, mode, title, detail = "", actionLabel = "") {
   view.overlayActionEl.textContent = actionLabel;
   view.overlayActionEl.hidden = !actionLabel;
   view.overlayEl.hidden = false;
+  renderPaneOverlayRecentSessions(view, mode);
 }
 
 function hidePaneOverlay(view) {
   if (view?.overlayEl && !view.overlayEl.hidden) {
     view.overlayEl.hidden = true;
+    if (view.overlayRecentEl) {
+      view.overlayRecentEl.hidden = true;
+      view.overlayRecentEl.innerHTML = "";
+    }
   }
 }
 
@@ -1239,6 +1653,7 @@ function disposeView(view) {
   }
   cancelPaneResizeSync(view);
   clearPaneFitRetry(view);
+  clearPaneFitStabilization(view);
   if (view.fitRaf) {
     cancelAnimationFrame(view.fitRaf);
   }
@@ -1302,6 +1717,30 @@ function clearPaneFitRetry(view) {
   }
 }
 
+function clearPaneFitStabilization(view) {
+  if (!view?.fitStabilizeTimers) {
+    return;
+  }
+  for (const timer of view.fitStabilizeTimers) {
+    clearTimeout(timer);
+  }
+  view.fitStabilizeTimers = [];
+}
+
+function schedulePaneFitStabilization(view) {
+  if (!view) {
+    return;
+  }
+  clearPaneFitStabilization(view);
+  view.fitStabilizeTimers = PANE_FIT_STABILIZE_DELAYS_MS.map((delay) =>
+    setTimeout(() => {
+      if (isPaneViewAttached(view)) {
+        schedulePaneFit(view, { force: true });
+      }
+    }, delay)
+  );
+}
+
 function schedulePaneFitRetry(view, options = {}) {
   if (!view || view.fitRetryTimer) {
     return;
@@ -1337,6 +1776,22 @@ function fitPaneView(view, options = {}) {
   const beforeRows = view.term.rows;
   updatePaneActionLayout(view.paneId);
   view.fitAddon.fit();
+  const fittedCols = Math.max(2, view.term.cols || 120);
+  const fittedRows = Math.max(1, view.term.rows || 24);
+  const targetCols = Math.max(fittedCols, PANE_MIN_READABLE_COLS);
+  if (targetCols > fittedCols) {
+    const contentWidth = Math.ceil(size.width * (targetCols / fittedCols));
+    view.host?.classList?.add("pane-terminal-wide");
+    if (view.term.element) {
+      view.term.element.style.minWidth = `${contentWidth}px`;
+    }
+    view.term.resize(targetCols, fittedRows);
+  } else {
+    view.host?.classList?.remove("pane-terminal-wide");
+    if (view.term.element) {
+      view.term.element.style.minWidth = "";
+    }
+  }
   view.lastFitWidth = size.width;
   view.lastFitHeight = size.height;
   if (view.term.cols !== beforeCols || view.term.rows !== beforeRows) {
@@ -2779,9 +3234,10 @@ function createPaneView(paneId, host) {
   const term = new window.Terminal({
     convertEol: false,
     cursorBlink: false,
-    fontFamily: "Cascadia Mono, D2Coding, NanumGothicCoding, Noto Sans Mono CJK KR, Malgun Gothic, Consolas, monospace",
+    fontFamily: PANE_TERMINAL_FONT_FAMILY,
     fontSize,
-    lineHeight: 1.2,
+    letterSpacing: 0,
+    lineHeight: 1.28,
     scrollback: 5000,
     scrollOnUserInput: true,
     scrollSensitivity: 1,
@@ -2839,6 +3295,7 @@ function createPaneView(paneId, host) {
     deferredStreamLength: 0,
     fitRaf: null,
     fitRetryTimer: null,
+    fitStabilizeTimers: [],
     forceNextFit: false,
     lastFitWidth: 0,
     lastFitHeight: 0,
@@ -3053,6 +3510,7 @@ function createPaneView(paneId, host) {
 
   state.paneViews.set(paneId, view);
   schedulePaneFit(view, { force: true });
+  schedulePaneFitStabilization(view);
 }
 
 function renderPaneSurface(force = false) {
@@ -3199,6 +3657,7 @@ function renderPaneSurface(force = false) {
       observer.observe(item.host);
       existing.observer = observer;
       schedulePaneFit(existing, { force: true });
+      schedulePaneFitStabilization(existing);
     } else {
       createPaneView(item.paneId, item.host);
     }
@@ -3320,14 +3779,30 @@ async function openSessionPicker(paneId, anchorBtn) {
   const sessionResults = await Promise.all(workspaceRows.map((row) =>
     Promise.all([
       rpc("session.history", { workspace_id: row.id }).catch(() => null),
-      rpc("ai.sessions", { workspace_id: row.id }).catch(() => null)
-    ]).then(([histRes, aiRes]) => ({ workspace: row, histRes, aiRes }))
+      rpc("ai.sessions", { workspace_id: row.id }).catch(() => null),
+      rpc("pane.session.bindings", { workspace_id: row.id }).catch(() => null)
+    ]).then(([histRes, aiRes, bindRes]) => ({ workspace: row, histRes, aiRes, bindRes }))
   ));
+  const paneBindings = sessionResults.flatMap((result) =>
+    (result.bindRes?.bindings ?? []).map((binding) => ({
+      ...binding,
+      workspace_id: result.workspace.id,
+      workspace_name: result.workspace.name,
+      workspace_path: result.workspace.path
+    }))
+  );
+  const bindingBySessionId = new Map();
+  for (const binding of paneBindings) {
+    if (binding?.session_id && !bindingBySessionId.has(binding.session_id)) {
+      bindingBySessionId.set(binding.session_id, binding);
+    }
+  }
   const aiSessions = sessionResults.flatMap((result) =>
     (result.aiRes?.sessions ?? []).map((session) => ({
       ...session,
       workspace_name: result.workspace.name,
-      workspace_path: result.workspace.path
+      workspace_path: result.workspace.path,
+      pane_id: bindingBySessionId.get(session.pty_session_id)?.pane_id ?? null
     }))
   );
 
@@ -3435,7 +3910,9 @@ async function openSessionPicker(paneId, anchorBtn) {
 
       const metaEl = document.createElement("span");
       metaEl.className = "session-meta";
-        metaEl.textContent = `${ai.workspace_name ?? "workspace"} - ${ai.tool} - detected ${timeStr}`;
+      const paneText = ai.pane_id ? ` - pane ${ai.pane_id.slice(0, 8)}` : "";
+      const ptyText = ai.pty_session_id ? ` - pty ${ai.pty_session_id.slice(0, 8)}` : "";
+      metaEl.textContent = `${ai.workspace_name ?? "workspace"} - ${ai.tool}${paneText}${ptyText} - detected ${timeStr}`;
 
       info.append(labelEl, metaEl);
 
@@ -3447,28 +3924,12 @@ async function openSessionPicker(paneId, anchorBtn) {
         ev.stopPropagation();
         dropdown.remove();
         try {
-          // Run via pwsh so PATH resolution works (claude is a Node script on PATH)
-          await paneHandlers.startSessionForPane(paneId, {
-            force: true,
-            cmd: "pwsh.exe",
-            args: [
-              "-NoLogo", "-NoExit",
-              "-Command",
-              `$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); [Console]::InputEncoding=[Text.UTF8Encoding]::new(); if (Get-Variable PSStyle -ErrorAction SilentlyContinue) { $PSStyle.OutputRendering = 'Ansi' }; ${ai.resume_cmd}`,
-            ],
+          await startShellCommandForPane(paneId, ai.resume_cmd, {
             cwd: ai.cwd || undefined,
+            focusTerm: true
           });
-        } catch {
-          try {
-            await paneHandlers.startSessionForPane(paneId, {
-              force: true,
-              cmd: "powershell.exe",
-              args: ["-NoLogo", "-NoExit", "-Command", ai.resume_cmd],
-              cwd: ai.cwd || undefined,
-            });
-          } catch (err2) {
-            setStatus(String(err2?.message ?? err2), true);
-          }
+        } catch (err) {
+          setStatus(String(err?.message ?? err), true);
         }
       });
 
@@ -3510,10 +3971,32 @@ async function openSessionPicker(paneId, anchorBtn) {
     (result.histRes?.sessions ?? []).map((session) => ({
       ...session,
       workspace_id: result.workspace.id,
-      workspace_name: result.workspace.name
+      workspace_name: result.workspace.name,
+      pane_id: bindingBySessionId.get(session.id)?.pane_id ?? null
     }))
   );
-  const namedSessions = [...dormantRows, ...allSessions].filter((s) => s.spawn_cmd);
+  const historySessionIds = new Set(allSessions.map((session) => session.id).filter(Boolean));
+  const stateDormantIds = new Set(dormantRows.map((session) => session.id).filter(Boolean));
+  const boundDormantRows = paneBindings
+    .filter((binding) =>
+      binding?.workspace_id === ws.id
+      && binding.spawn_cmd
+      && binding.session_id
+      && !historySessionIds.has(binding.session_id)
+      && !stateDormantIds.has(binding.session_id)
+    )
+    .map((binding) => ({
+      id: binding.session_id,
+      workspace_id: binding.workspace_id,
+      workspace_name: binding.workspace_name,
+      pane_id: binding.pane_id,
+      status: "dormant",
+      started_at: new Date().toISOString(),
+      spawn_cmd: binding.spawn_cmd,
+      spawn_args: binding.spawn_args,
+      spawn_cwd: binding.spawn_cwd
+    }));
+  const namedSessions = [...dormantRows, ...boundDormantRows, ...allSessions].filter((s) => s.spawn_cmd);
   const sessionSignature = (session) => {
     let argsText = "[]";
     try {
@@ -3586,7 +4069,16 @@ async function openSessionPicker(paneId, anchorBtn) {
         const isRunning = s.status === "running";
         const isDormant = s.status === "dormant";
         if (isDormant) {
+          state.dormantPaneSessions[paneId] = {
+            workspace_id: ws.id,
+            pane_id: paneId,
+            session_id: s.id,
+            spawn_cmd: s.spawn_cmd,
+            spawn_args: s.spawn_args,
+            spawn_cwd: s.spawn_cwd
+          };
           await paneHandlers.startSessionForPane(paneId, {
+            force: Boolean(state.paneSessions[paneId]),
             restoreDormant: true,
             silent: false,
             groupId: typeof groupIdForSession === "function" ? groupIdForSession(s.id) : undefined
@@ -3651,7 +4143,8 @@ async function openSessionPicker(paneId, anchorBtn) {
 
           const metaEl = document.createElement("span");
           metaEl.className = "session-meta";
-          metaEl.textContent = `${s.id.slice(0, 8)} · ${isRunning ? "running" : s.status} · ${timeStr}`;
+          const paneText = s.pane_id ? ` · pane ${s.pane_id.slice(0, 8)}` : "";
+          metaEl.textContent = `${s.id.slice(0, 8)} · ${isRunning ? "running" : s.status}${paneText} · ${timeStr}`;
 
           info.append(labelEl, metaEl);
 
@@ -3758,25 +4251,13 @@ async function openSessionPicker(paneId, anchorBtn) {
     const raw = cmdInput.value.trim();
     if (!raw) return;
     dropdown.remove();
-    // If user typed a shell-like command (e.g. "claude", "codex --resume xyz"),
-    // run it inside pwsh so PATH resolution works
-    const psCmd = `$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); [Console]::InputEncoding=[Text.UTF8Encoding]::new(); if (Get-Variable PSStyle -ErrorAction SilentlyContinue) { $PSStyle.OutputRendering = 'Ansi' }; ${raw}`;
     try {
-      await paneHandlers.startSessionForPane(paneId, {
-        force: true,
-        cmd: "pwsh.exe",
-        args: ["-NoLogo", "-NoExit", "-Command", psCmd],
+      await startShellCommandForPane(paneId, raw, {
+        cwd: ws.path,
+        focusTerm: true
       });
-    } catch {
-      try {
-        await paneHandlers.startSessionForPane(paneId, {
-          force: true,
-          cmd: "powershell.exe",
-          args: ["-NoLogo", "-NoExit", "-Command", raw],
-        });
-      } catch (err2) {
-        setStatus(String(err2?.message ?? err2), true);
-      }
+    } catch (err) {
+      setStatus(String(err?.message ?? err), true);
     }
   }
 
@@ -3848,3 +4329,10 @@ globalThis.equalizePaneSizes = equalizePaneSizes;
 globalThis.setGlobalFontScale = setGlobalFontScale;
 globalThis.writeToPane = writeToPane;
 globalThis.markPaneStarting = markPaneStarting;
+globalThis.recordOverlayPaneSession = recordOverlayPaneSession;
+
+if (document.fonts?.ready) {
+  document.fonts.ready
+    .then(() => fitAllPanes({ force: true }))
+    .catch(() => {});
+}

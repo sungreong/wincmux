@@ -1638,7 +1638,8 @@ li.active .ws-delete-btn {
   border: none;
   border-radius: 6px;
   background: #060b11;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   contain: layout paint style;
 }
 
@@ -1647,27 +1648,48 @@ li.active .ws-delete-btn {
   height: 100%;
   min-width: 0;
   min-height: 0;
-  padding: 4px;
-  font-family: "Cascadia Mono", "D2Coding", "Noto Sans Mono CJK KR", "Consolas", monospace;
+  padding: 0;
+  font-family: "D2Coding", "Sarasa Mono K", "Cascadia Mono", "Consolas", "GulimChe", "굴림체", "Noto Sans Mono CJK KR", "Malgun Gothic", monospace;
   font-size: 14px;
+  font-variant-ligatures: none;
+  letter-spacing: 0;
+}
+
+.pane-terminal-host.pane-terminal-wide .xterm {
+  max-width: none;
 }
 
 .pane-terminal-host .xterm-viewport {
   overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.pane-terminal-host .xterm-screen,
+.pane-terminal-host .xterm-rows {
+  min-width: 0;
+  max-width: 100%;
+  letter-spacing: 0 !important;
+}
+
+.pane-terminal-host .xterm-rows {
+  font-variant-ligatures: none;
+  text-rendering: geometricPrecision;
 }
 
 .pane-terminal-overlay {
   position: absolute;
   inset: 0;
   z-index: 5;
-  display: grid;
-  place-content: center;
-  justify-items: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   gap: 8px;
-  padding: 20px;
+  padding: 56px 44px 36px;
   text-align: center;
   background: rgba(6, 11, 17, 0.82);
   color: #d7e6f7;
+  overflow: auto;
   pointer-events: none;
 }
 
@@ -1684,9 +1706,8 @@ li.active .ws-delete-btn {
   max-width: min(520px, 80%);
   color: var(--muted);
   font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .pane-terminal-overlay-action {
@@ -1695,6 +1716,122 @@ li.active .ws-delete-btn {
   border-color: #3f6f95;
   background: #173552;
   pointer-events: auto;
+}
+
+.pane-terminal-overlay-recent {
+  width: min(920px, 92%);
+  height: clamp(260px, 44%, 520px);
+  max-height: calc(100% - 190px);
+  display: grid;
+  grid-auto-rows: max-content;
+  gap: 5px;
+  margin-top: 14px;
+  overflow-y: auto;
+  pointer-events: auto;
+}
+
+.pane-terminal-overlay-recent[hidden] {
+  display: none;
+}
+
+.pane-terminal-overlay-recent-title,
+.pane-terminal-overlay-recent-muted {
+  color: var(--muted);
+  font-size: 11px;
+  text-align: left;
+}
+
+.pane-terminal-overlay-session {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(15, 25, 39, 0.94);
+  text-align: left;
+}
+
+.pane-terminal-overlay-session-main {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.pane-terminal-overlay-session-title,
+.pane-terminal-overlay-session-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-terminal-overlay-session-title {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.pane-terminal-overlay-session-meta {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.pane-terminal-overlay-session-action {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.pane-terminal-overlay-command {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.pane-terminal-overlay-command-input {
+  min-width: 0;
+  height: 34px;
+  border: 1px solid #355069;
+  border-radius: 6px;
+  background: rgba(8, 15, 26, 0.96);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 0 9px;
+  outline: none;
+}
+
+.pane-terminal-overlay-command-input:focus {
+  border-color: var(--accent);
+}
+
+.pane-terminal-overlay-command-run {
+  min-width: 64px;
+  height: 34px;
+  border-color: rgba(76, 195, 138, 0.7);
+  background: rgba(31, 107, 73, 0.95);
+  color: #ecfff6;
+}
+
+@media (max-width: 760px), (max-height: 640px) {
+  .pane-terminal-overlay {
+    justify-content: flex-start;
+    padding: 46px 18px 18px;
+  }
+
+  .pane-terminal-overlay-recent {
+    width: 100%;
+    height: auto;
+    max-height: none;
+  }
+
+  .pane-terminal-overlay-command {
+    grid-template-columns: 1fr;
+  }
 }
 
 #statusBar {
@@ -2326,13 +2463,14 @@ li.active .ws-info-btn {
   display: grid;
   grid-template-columns: minmax(420px, 0.95fr) minmax(360px, 1.05fr);
   gap: 10px;
-  min-height: 420px;
-  max-height: min(560px, calc(100vh - 225px));
+  flex: 1;
+  min-height: 0;
   overflow: hidden;
 }
 
 .agent-asset-browser {
   min-width: 0;
+  min-height: 0;
   overflow-y: auto;
   padding-right: 4px;
 }
@@ -2645,7 +2783,6 @@ li.active .ws-info-btn {
 @media (max-width: 980px) {
   .agent-assets-layout {
     grid-template-columns: 1fr;
-    max-height: min(620px, calc(100vh - 190px));
   }
 
   .agent-asset-viewer {
@@ -2749,14 +2886,15 @@ li.active .ws-info-btn {
   display: grid;
   grid-template-columns: minmax(420px, 0.95fr) minmax(360px, 1.05fr);
   gap: 10px;
-  min-height: 420px;
-  max-height: min(560px, calc(100vh - 225px));
+  flex: 1;
+  min-height: 0;
   overflow: hidden;
   margin-top: 8px;
 }
 
 .input-asset-browser {
   min-width: 0;
+  min-height: 0;
   overflow-y: auto;
   padding-right: 4px;
   display: flex;
@@ -3014,7 +3152,6 @@ li.active .ws-info-btn {
 @media (max-width: 980px) {
   .input-assets-layout {
     grid-template-columns: 1fr;
-    max-height: min(620px, calc(100vh - 190px));
   }
 
   .input-asset-viewer {
