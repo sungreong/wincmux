@@ -1,4 +1,4 @@
-﻿# JSON-RPC Methods (MVP)
+# JSON-RPC methods
 
 ## workspace.create
 Params: `{ "name": string, "path": string, "backend": string }`
@@ -35,6 +35,19 @@ Params: `{ "session_id": string, "data": string }`
 
 ## session.read
 Params: `{ "session_id": string, "max_bytes"?: number }`
+
+## session.tail
+Params: `{ "session_id": string, "max_bytes"?: number, "after_offset"?: number }`
+
+Reads retained UTF-8 output without advancing the polling cursor. The result includes `output`, `start_offset`, `end_offset`, and `available_end_offset`. If `start_offset` exceeds the requested offset, older output has fallen outside the retention window.
+
+## session.stream.subscribe
+Params: `{ "workspace_id"?: string, "session_id"?: string, "topics"?: ("session" | "notify")[] }`
+
+Returns a `subscription_id`. Events arrive on the same connection, including `session.output`, `session.state_changed`, `session.exit`, and `notify.created`.
+
+## session.stream.unsubscribe
+Params: `{ "subscription_id": string }`
 
 ## notify.push
 Params: `{ "workspace_id": string, "title": string, "body": string, "level": string }`

@@ -1,9 +1,9 @@
-﻿# Bridge Contracts
+# Bridge contracts
 
-This folder stores protocol-level contracts shared by UI/CLI integrations.
+The Rust core exposes JSON-RPC 2.0 to the local Windows user running WinCMux and SYSTEM.
 
-- Transport: JSON-RPC 2.0 over Windows named pipe (`\\.\\pipe\\wincmux-rpc`)
-- Framing: newline-delimited JSON messages
-- Eventing: server push events reserved under `event.*` methods (MVP currently request/response only)
+- Pipe: `\\.\pipe\wincmux-tauri-rpc`
+- Framing: newline-delimited UTF-8 JSON.
+- Events: subscribe with `session.stream.subscribe` for session output, lifecycle events, and notifications.
 
-See `schema/jsonrpc.request.schema.json` for request shape and required fields.
+See [method documentation](API.md) and the [request schema](schema/jsonrpc.request.schema.json).

@@ -19,9 +19,9 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if not exist "node_modules" (
+if not exist "node_modules\.bin\tauri.cmd" (
   echo [WinCMux] Installing dependencies...
-  call npm install
+  call npm ci
   if errorlevel 1 exit /b %errorlevel%
 )
 
@@ -32,6 +32,6 @@ exit /b %errorlevel%
 :help
 echo Usage: dev.bat
 echo.
-echo Starts the WinCMux Electron development app with the Node core auto-spawned.
-echo If node_modules is missing, dependencies are installed first.
+echo Starts WinCMux with Tauri and the Rust core.
+echo Requires Node.js 20+, Rust MSVC, Visual Studio C++ Build Tools, and WebView2.
 exit /b 0

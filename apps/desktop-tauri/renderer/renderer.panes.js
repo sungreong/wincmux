@@ -1,0 +1,4211 @@
+const paneHandlers = {
+  startSessionForPane: async () => {},
+  closeSessionForPane: async () => {},
+  splitPane: async () => {},
+  closePane: async () => {},
+  hidePane: async () => {},
+  adjustPaneFont: async () => {},
+  insertQuickCommand: async () => {},
+  markPaneNotificationsRead: async () => {},
+  startPaneMove: async () => {},
+  swapPanePositions: async () => {},
+  movePaneToPlacement: async () => {},
+  movePaneToGroup: async () => {},
+  openSessionInSplit: async () => {}
+};
+const INPUT_FLUSH_DELAY_MS = 12;
+const INPUT_INTERACTIVE_FLUSH_DELAY_MS = 0;
+const INPUT_BULK_THRESHOLD = 256;
+const INPUT_PERF_DETAIL_LATENCY_MS = 16;
+const INPUT_PERF_SUMMARY_INTERVAL_MS = 1000;
+const INPUT_PERF_SUMMARY_MAX_SAMPLES = 32;
+const OUTPUT_FLUSH_CHUNK_SIZE = 32_768;
+const OUTPUT_FLUSH_MAX_PANES_PER_FRAME = 3;
+const OUTPUT_QUEUE_LIMIT = 256_000;
+const OUTPUT_QUEUE_KEEP = 180_000;
+const OUTPUT_DROP_LOG_INTERVAL_MS = 1000;
+const PANE_POLL_ACTIVE_DELAY_MS = 45;
+const PANE_POLL_IDLE_DELAY_MS = 90;
+const PANE_POLL_ERROR_DELAY_MS = 500;
+const PANE_POLL_JITTER_MS = 35;
+const PANE_RESIZE_SYNC_DELAY_MS = 60;
+const PANE_RESIZE_SYNC_MAX_PANES_PER_FRAME = 4;
+const PANE_DEBUG_LOGS = localStorage.getItem("wincmux.debug.panes") === "1";
+const PANE_FIT_RETRY_DELAY_MS = 80;
+const PANE_MIN_FIT_WIDTH = 24;
+const PANE_MIN_FIT_HEIGHT = 24;
+const PANE_FIT_STABILIZE_DELAYS_MS = [60, 180, 420];
+const STREAM_TAIL_OVERLAP_LIMIT = 16_384;
+const PANE_PORTAL_MARGIN = 10;
+const PANE_TERMINAL_FONT_FAMILY = '"D2Coding", "Sarasa Mono K", "Cascadia Mono", "Consolas", "GulimChe", "굴림체", "Noto Sans Mono CJK KR", "Malgun Gothic", monospace';
+let fitAllPanesRaf = null;
+let outputFlushRaf = null;
+let outputFastFlushQueued = false;
+let paneResizeSyncTimer = null;
+let paneResizeSyncRaf = null;
+const outputFlushPaneQueue = new Set();
+const paneResizeSyncQueue = new Set();
+const PANE_DROP_CLASS_KEYS = ["left", "right", "above", "below"];
+const paneSelectionStyleState = {
+  selectedPaneId: null,
+  moveSourcePaneId: null,
+  moveTargetPaneId: null,
+  placement: null,
+  cardCount: 0
+};
+
+function invalidatePaneSelectionStyleCache() {
+  paneSelectionStyleState.cardCount = -1;
+}
+
+function paneDebug(...args) {
+  if (PANE_DEBUG_LOGS) {
+    console.debug(...args);
+  }
+}
+
+function paneWarn(...args) {
+  if (PANE_DEBUG_LOGS) {
+    console.warn(...args);
+  }
+}
+
+function ensurePanePortalElement(el) {
+  if (!el || !document.body) {
+    return;
+  }
+  if (el.parentElement !== document.body || document.body.lastElementChild !== el) {
+    document.body.appendChild(el);
+  }
+}
+
+function clampPanePortalPosition(left, top, width, height, margin = PANE_PORTAL_MARGIN) {
+  const safeWidth = Math.max(0, Number(width) || 0);
+  const safeHeight = Math.max(0, Number(height) || 0);
+  const maxLeft = Math.max(margin, window.innerWidth - margin - safeWidth);
+  const maxTop = Math.max(margin, window.innerHeight - margin - safeHeight);
+  return {
+    left: Math.max(margin, Math.min(Number(left) || margin, maxLeft)),
+    top: Math.max(margin, Math.min(Number(top) || margin, maxTop))
+  };
+}
+
+function clampPanePortalSize(width, height = 0, margin = PANE_PORTAL_MARGIN) {
+  const maxWidth = Math.max(1, window.innerWidth - margin * 2);
+  const maxHeight = Math.max(1, window.innerHeight - margin * 2);
+  return {
+    width: Math.max(1, Math.min(Math.max(1, Number(width) || maxWidth), maxWidth)),
+    height: Math.max(1, Math.min(Math.max(1, Number(height) || maxHeight), maxHeight))
+  };
+}
+
+function isPaneViewAttached(view) {
+  return Boolean(
+    view?.host?.isConnected
+    && view?.term?.element?.isConnected
+    && (!paneSurface || paneSurface.contains(view.host))
+  );
+}
+
+function paneViewSize(view) {
+  const rect = view?.host?.getBoundingClientRect?.();
+  return {
+    width: Math.floor(rect?.width ?? 0),
+    height: Math.floor(rect?.height ?? 0)
+  };
+}
+
+function trimRestoredOutputPrefix(tailOutput, liveOutput) {
+  if (!tailOutput || !liveOutput) {
+    return liveOutput ?? "";
+  }
+  if (tailOutput.endsWith(liveOutput)) {
+    return "";
+  }
+  const overlap = restoredOutputOverlapLength(tailOutput, liveOutput);
+  return overlap > 0 ? liveOutput.slice(overlap) : liveOutput;
+}
+
+function restoredOutputOverlapLength(tailOutput, liveOutput) {
+  const maxOverlap = Math.min(tailOutput.length, liveOutput.length, STREAM_TAIL_OVERLAP_LIMIT);
+  if (maxOverlap <= 0) {
+    return 0;
+  }
+  const livePrefix = liveOutput.slice(0, maxOverlap);
+  const tailSuffix = tailOutput.slice(-maxOverlap);
+  const separator = ["\u0000", "\u0001", "\u0002", "\u0003", "\uE000"]
+    .find((candidate) => !livePrefix.includes(candidate) && !tailSuffix.includes(candidate)) ?? "\uE001";
+  const probe = `${livePrefix}${separator}${tailSuffix}`;
+  const prefixLengths = new Array(probe.length).fill(0);
+  for (let index = 1; index < probe.length; index += 1) {
+    let candidate = prefixLengths[index - 1];
+    while (candidate > 0 && probe[index] !== probe[candidate]) {
+      candidate = prefixLengths[candidate - 1];
+    }
+    if (probe[index] === probe[candidate]) {
+      candidate += 1;
+    }
+    prefixLengths[index] = candidate;
+  }
+  return Math.min(prefixLengths[prefixLengths.length - 1] ?? 0, maxOverlap);
+}
+
+function compactPaneOutputQueue(view) {
+  if (!view?.outputQueueHead) {
+    return;
+  }
+  if (view.outputQueueHead >= view.outputQueueChunks.length) {
+    view.outputQueueChunks = [];
+    view.outputQueueHead = 0;
+    return;
+  }
+  if (view.outputQueueHead >= 64 && view.outputQueueHead * 2 >= view.outputQueueChunks.length) {
+    view.outputQueueChunks = view.outputQueueChunks.slice(view.outputQueueHead);
+    view.outputQueueHead = 0;
+  }
+}
+
+function resetPaneOutputQueue(view) {
+  if (!view) {
+    return;
+  }
+  view.outputQueueChunks = [];
+  view.outputQueueHead = 0;
+  view.outputQueueLength = 0;
+}
+
+function compactDeferredStreamOutput(view) {
+  if (!view?.deferredStreamHead) {
+    return;
+  }
+  if (view.deferredStreamHead >= view.deferredStreamChunks.length) {
+    resetDeferredStreamOutput(view);
+    return;
+  }
+  if (view.deferredStreamHead >= 64 && view.deferredStreamHead * 2 >= view.deferredStreamChunks.length) {
+    view.deferredStreamChunks = view.deferredStreamChunks.slice(view.deferredStreamHead);
+    view.deferredStreamHead = 0;
+  }
+}
+
+function resetDeferredStreamOutput(view) {
+  if (!view) {
+    return;
+  }
+  view.deferredStreamChunks = [];
+  view.deferredStreamHead = 0;
+  view.deferredStreamLength = 0;
+}
+
+function trimDeferredStreamOutput(view, keepLength = OUTPUT_QUEUE_KEEP) {
+  if (!view || view.deferredStreamLength <= keepLength) {
+    return;
+  }
+  let dropLength = view.deferredStreamLength - keepLength;
+  while (dropLength > 0 && view.deferredStreamHead < view.deferredStreamChunks.length) {
+    const first = view.deferredStreamChunks[view.deferredStreamHead];
+    if (first.length <= dropLength) {
+      view.deferredStreamHead += 1;
+      view.deferredStreamLength -= first.length;
+      dropLength -= first.length;
+      continue;
+    }
+    view.deferredStreamChunks[view.deferredStreamHead] = first.slice(dropLength);
+    view.deferredStreamLength -= dropLength;
+    dropLength = 0;
+  }
+  compactDeferredStreamOutput(view);
+}
+
+function takeDeferredStreamOutput(view) {
+  if (!view?.deferredStreamLength) {
+    return "";
+  }
+  const chunks = view.deferredStreamChunks.slice(view.deferredStreamHead);
+  const output = chunks.length === 1 ? chunks[0] : chunks.join("");
+  resetDeferredStreamOutput(view);
+  return output;
+}
+
+function trimPaneOutputQueue(view, keepLength = OUTPUT_QUEUE_KEEP) {
+  if (!view || view.outputQueueLength <= keepLength) {
+    return 0;
+  }
+  const beforeLength = view.outputQueueLength;
+  let dropLength = view.outputQueueLength - keepLength;
+  while (dropLength > 0 && view.outputQueueHead < view.outputQueueChunks.length) {
+    const first = view.outputQueueChunks[view.outputQueueHead];
+    if (first.length <= dropLength) {
+      view.outputQueueHead += 1;
+      view.outputQueueLength -= first.length;
+      dropLength -= first.length;
+      continue;
+    }
+    view.outputQueueChunks[view.outputQueueHead] = first.slice(dropLength);
+    view.outputQueueLength -= dropLength;
+    dropLength = 0;
+  }
+  compactPaneOutputQueue(view);
+  return Math.max(0, beforeLength - view.outputQueueLength);
+}
+
+function recordPaneOutputDrop(view, droppedBytes) {
+  if (!view) {
+    return;
+  }
+  view.outputDropCount = (view.outputDropCount ?? 0) + 1;
+  view.outputDropBytes = (view.outputDropBytes ?? 0) + Math.max(0, Number(droppedBytes) || 0);
+  const now = performance.now();
+  if (view.outputDropLastLogAt && now - view.outputDropLastLogAt < OUTPUT_DROP_LOG_INTERVAL_MS) {
+    return;
+  }
+  view.outputDropLastLogAt = now;
+  const dropCount = view.outputDropCount;
+  const dropBytes = view.outputDropBytes;
+  view.outputDropCount = 0;
+  view.outputDropBytes = 0;
+  logPerf("stream.dropped", {
+    pane_id: view.paneId,
+    dropped_frames: state.metrics.dropped_frames,
+    drop_count: dropCount,
+    dropped_bytes: dropBytes
+  });
+}
+
+function appendPaneOutputQueue(view, output) {
+  if (!view || !output) {
+    return;
+  }
+  view.outputQueueChunks.push(output);
+  view.outputQueueLength += output.length;
+  if (view.outputQueueLength > OUTPUT_QUEUE_LIMIT) {
+    const droppedBytes = trimPaneOutputQueue(view);
+    state.metrics.dropped_frames += 1;
+    recordPaneOutputDrop(view, droppedBytes);
+  }
+}
+
+function takePaneOutputChunk(view, maxLength = OUTPUT_FLUSH_CHUNK_SIZE) {
+  if (!view?.outputQueueLength) {
+    return "";
+  }
+  let remaining = maxLength;
+  const chunks = view.outputQueueChunks;
+  const head = view.outputQueueHead;
+  if (remaining <= 0) {
+    return "";
+  }
+  if (head >= chunks.length) {
+    resetPaneOutputQueue(view);
+    return "";
+  }
+
+  const first = chunks[head];
+  if (first.length > remaining) {
+    const output = first.slice(0, remaining);
+    chunks[head] = first.slice(remaining);
+    view.outputQueueLength -= remaining;
+    return output;
+  }
+
+  const nextHead = head + 1;
+  if (first.length === remaining || nextHead >= chunks.length) {
+    view.outputQueueHead = nextHead;
+    view.outputQueueLength -= first.length;
+    compactPaneOutputQueue(view);
+    return first;
+  }
+
+  const parts = [first];
+  view.outputQueueHead = nextHead;
+  view.outputQueueLength -= first.length;
+  remaining -= first.length;
+  while (remaining > 0 && view.outputQueueHead < view.outputQueueChunks.length) {
+    const next = view.outputQueueChunks[view.outputQueueHead];
+    if (next.length <= remaining) {
+      parts.push(next);
+      view.outputQueueHead += 1;
+      view.outputQueueLength -= next.length;
+      remaining -= next.length;
+      continue;
+    }
+    parts.push(next.slice(0, remaining));
+    view.outputQueueChunks[view.outputQueueHead] = next.slice(remaining);
+    view.outputQueueLength -= remaining;
+    remaining = 0;
+  }
+  compactPaneOutputQueue(view);
+  return parts.join("");
+}
+
+function appendDeferredStreamOutput(view, output) {
+  if (!view || !output) {
+    return;
+  }
+  view.deferredStreamChunks.push(output);
+  view.deferredStreamLength += output.length;
+  if (view.deferredStreamLength > OUTPUT_QUEUE_LIMIT) {
+    trimDeferredStreamOutput(view);
+  }
+}
+
+function bindQuickCommandPanelSafe(paneId, quickPanel, quickBtn) {
+  const binder = typeof globalThis.bindQuickCommandPanel === "function"
+    ? globalThis.bindQuickCommandPanel
+    : null;
+  if (!binder) {
+    quickBtn.disabled = true;
+    quickBtn.title = "Quick command unavailable";
+    quickPanel.remove();
+    return;
+  }
+
+  try {
+    binder(paneId, quickPanel, quickBtn);
+  } catch (err) {
+    quickBtn.disabled = true;
+    quickBtn.title = "Quick command unavailable";
+    quickPanel.classList.remove("open");
+    quickPanel.innerHTML = "";
+    setStatus(`Quick command disabled: ${err?.message ?? err}`, true, { priority: 70, holdMs: 6000 });
+    console.error("[renderer] quickcmd bind failed:", err);
+  }
+}
+
+const paneIcon = {
+  fontDown: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 15l4.5-10 4.5 10"/><path d="M5.5 11h6"/><path d="M14.5 13h3"/></svg>`,
+  fontUp: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 15l4.5-10 4.5 10"/><path d="M5.5 11h6"/><path d="M16 10v6"/><path d="M13 13h6"/></svg>`,
+  splitRight: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="2"/><path d="M10 4v12"/><path d="M13.5 10h2.5"/><path d="M14.75 8.75v2.5"/></svg>`,
+  splitDown: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="2"/><path d="M3 10h14"/><path d="M8.75 13h2.5"/><path d="M10 11.75v2.5"/></svg>`,
+  start: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 5.5v9l7-4.5-7-4.5z" fill="currentColor" stroke="none"/></svg>`,
+  restart: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 9.5a5.5 5.5 0 1 1-1.7-4"/><path d="M14 2.5v3.5h3.5"/></svg>`,
+  restore: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 11a5 5 0 1 0 1.4-4.2"/><path d="M3.5 7h3.8v-3.8"/></svg>`,
+  sessions: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5.5h10"/><path d="M5 10h10"/><path d="M5 14.5h6"/><circle cx="3" cy="5.5" r=".7" fill="currentColor" stroke="none"/><circle cx="3" cy="10" r=".7" fill="currentColor" stroke="none"/><circle cx="3" cy="14.5" r=".7" fill="currentColor" stroke="none"/></svg>`,
+  closeSession: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="5" width="12" height="10" rx="2"/><path d="M8 8.5l4 3"/><path d="M12 8.5l-4 3"/></svg>`,
+  closePane: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="4" width="12" height="12" rx="2"/><path d="M7.5 7.5l5 5"/><path d="M12.5 7.5l-5 5"/></svg>`,
+  hidePane: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 10s2.8-4.5 7.5-4.5 7.5 4.5 7.5 4.5-2.8 4.5-7.5 4.5S2.5 10 2.5 10z"/><path d="M3.5 3.5l13 13"/></svg>`,
+  movePane: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v14"/><path d="M7.5 5.5L10 3l2.5 2.5"/><path d="M7.5 14.5L10 17l2.5-2.5"/><path d="M3 10h14"/><path d="M5.5 7.5L3 10l2.5 2.5"/><path d="M14.5 7.5L17 10l-2.5 2.5"/></svg>`,
+  quick: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M11 2.5l-6 8h5l-1 7 6-8h-5l1-7z" fill="currentColor" stroke="none"/><circle cx="15.5" cy="4.5" r="1.2" fill="currentColor" stroke="none"/></svg>`,
+  auto: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5h10v10H5z"/><path d="M8 3h4"/><path d="M8 17h4"/><path d="M3 8v4"/><path d="M17 8v4"/></svg>`,
+  group: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5h8l2.5 2.5v8.5h-13v-11z"/><path d="M6 4.5v3h10.5"/><path d="M7 11h6"/><path d="M7 14h4"/></svg>`,
+  more: `<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="10" r="1.2" fill="currentColor" stroke="none"/><circle cx="10" cy="10" r="1.2" fill="currentColor" stroke="none"/><circle cx="15" cy="10" r="1.2" fill="currentColor" stroke="none"/></svg>`
+};
+
+function makeSplitResizableSafe(...args) {
+  if (typeof globalThis.makeSplitResizable !== "function") {
+    return;
+  }
+  globalThis.makeSplitResizable(...args);
+}
+
+function applyStoredSplitRatioSafe(...args) {
+  if (typeof globalThis.applyStoredSplitRatio !== "function") {
+    return;
+  }
+  globalThis.applyStoredSplitRatio(...args);
+}
+
+function setPaneHandlers(handlers = {}) {
+  if (typeof handlers.startSessionForPane === "function") {
+    paneHandlers.startSessionForPane = handlers.startSessionForPane;
+  }
+  if (typeof handlers.closeSessionForPane === "function") {
+    paneHandlers.closeSessionForPane = handlers.closeSessionForPane;
+  }
+  if (typeof handlers.splitPane === "function") {
+    paneHandlers.splitPane = handlers.splitPane;
+  }
+  if (typeof handlers.closePane === "function") {
+    paneHandlers.closePane = handlers.closePane;
+  }
+  if (typeof handlers.hidePane === "function") {
+    paneHandlers.hidePane = handlers.hidePane;
+  }
+  if (typeof handlers.adjustPaneFont === "function") {
+    paneHandlers.adjustPaneFont = handlers.adjustPaneFont;
+  }
+  if (typeof handlers.insertQuickCommand === "function") {
+    paneHandlers.insertQuickCommand = handlers.insertQuickCommand;
+  }
+  if (typeof handlers.markPaneNotificationsRead === "function") {
+    paneHandlers.markPaneNotificationsRead = handlers.markPaneNotificationsRead;
+  }
+  if (typeof handlers.startPaneMove === "function") {
+    paneHandlers.startPaneMove = handlers.startPaneMove;
+  }
+  if (typeof handlers.swapPanePositions === "function") {
+    paneHandlers.swapPanePositions = handlers.swapPanePositions;
+  }
+  if (typeof handlers.movePaneToPlacement === "function") {
+    paneHandlers.movePaneToPlacement = handlers.movePaneToPlacement;
+  }
+  if (typeof handlers.movePaneToGroup === "function") {
+    paneHandlers.movePaneToGroup = handlers.movePaneToGroup;
+  }
+  if (typeof handlers.openSessionInSplit === "function") {
+    paneHandlers.openSessionInSplit = handlers.openSessionInSplit;
+  }
+}
+
+function paneForSession(sessionId, options = {}) {
+  if (!sessionId) {
+    return null;
+  }
+  const visibleOnly = Boolean(options?.visibleOnly);
+  const cached = visibleOnly
+    ? state.visibleSessionPaneLookup.get(sessionId)
+    : state.sessionPaneLookup.get(sessionId);
+  if (cached && isPaneSessionLookupValid(cached, sessionId, visibleOnly, { fast: true })) {
+    return cached;
+  }
+
+  rebuildPaneSessionLookup();
+  const rebuilt = visibleOnly
+    ? state.visibleSessionPaneLookup.get(sessionId)
+    : state.sessionPaneLookup.get(sessionId);
+  return rebuilt && isPaneSessionLookupValid(rebuilt, sessionId, visibleOnly) ? rebuilt : null;
+}
+
+function visiblePaneForSessionFast(sessionId) {
+  if (!sessionId) {
+    return null;
+  }
+  let paneId = state.visibleSessionPaneLookup.get(sessionId);
+  if (paneId) {
+    const view = state.paneViews.get(paneId);
+    if (state.paneSessions[paneId] === sessionId && view?.sessionId === sessionId) {
+      return paneId;
+    }
+  }
+  rebuildPaneSessionLookup();
+  paneId = state.visibleSessionPaneLookup.get(sessionId);
+  return paneId && isPaneSessionLookupValid(paneId, sessionId, true) ? paneId : null;
+}
+
+function isPaneSessionLookupValid(paneId, sessionId, visibleOnly = false, options = {}) {
+  if (!paneId || state.paneSessions[paneId] !== sessionId) {
+    return false;
+  }
+  if (!visibleOnly) {
+    return true;
+  }
+  const view = state.paneViews.get(paneId);
+  if (options?.fast) {
+    return view?.sessionId === sessionId;
+  }
+  return Boolean(view?.sessionId === sessionId && isPaneViewAttached(view));
+}
+
+function rebuildPaneSessionLookup() {
+  const best = new Map();
+  const visible = new Map();
+  for (const paneId in state.paneSessions) {
+    const sessionId = state.paneSessions[paneId];
+    if (!sessionId) {
+      continue;
+    }
+    const view = state.paneViews.get(paneId);
+    const rank = view?.sessionId === sessionId
+      ? (isPaneViewAttached(view) ? 2 : 1)
+      : 0;
+    const current = best.get(sessionId);
+    if (!current || rank > current.rank) {
+      best.set(sessionId, { paneId, rank });
+    }
+    if (rank === 2 && !visible.has(sessionId)) {
+      visible.set(sessionId, paneId);
+    }
+  }
+  state.sessionPaneLookup = new Map([...best.entries()].map(([sessionId, item]) => [sessionId, item.paneId]));
+  state.visibleSessionPaneLookup = visible;
+}
+
+function openPaneGroupMenu(paneId, anchorBtn) {
+  document.querySelectorAll(".pane-group-menu").forEach((el) => el.remove());
+  const ws = selectedWorkspace();
+  if (!ws || !state.paneGroups.length) {
+    setStatus("No pane groups available.", true);
+    return;
+  }
+
+  const menu = document.createElement("div");
+  menu.className = "pane-group-menu";
+
+  const title = document.createElement("div");
+  title.className = "pane-group-menu-title";
+  title.textContent = "Move this terminal";
+  menu.appendChild(title);
+
+  const hint = document.createElement("div");
+  hint.className = "pane-group-menu-hint";
+  hint.textContent = "Pick a group, or create one below.";
+  menu.appendChild(hint);
+
+  const currentGroup = typeof groupForPane === "function" ? groupForPane(paneId) : null;
+  for (const group of state.paneGroups) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "pane-group-menu-item";
+    btn.style.setProperty("--group-color", group.color ?? "#6b7c93");
+    btn.textContent = group.name;
+    btn.dataset.active = currentGroup?.id === group.id ? "1" : "0";
+    btn.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      menu.remove();
+      try {
+        await paneHandlers.movePaneToGroup(paneId, group.id);
+      } catch (err) {
+        setStatus(String(err?.message ?? err), true);
+      }
+    });
+    menu.appendChild(btn);
+  }
+
+  const newBtn = document.createElement("button");
+  newBtn.type = "button";
+  newBtn.className = "pane-group-menu-item pane-group-menu-new";
+  newBtn.textContent = "+ New group...";
+  newBtn.addEventListener("click", async (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    menu.remove();
+    if (typeof showGroupCreateInput === "function") {
+      showGroupCreateInput(groupBar?.querySelector(".group-add"), {
+        onCreated: (group) => paneHandlers.movePaneToGroup(paneId, group.id)
+      });
+      return;
+    }
+    setStatus("Group creator unavailable.", true);
+  });
+  menu.appendChild(newBtn);
+
+  document.body.appendChild(menu);
+  menu.style.minWidth = "0";
+  menu.style.maxWidth = `${Math.max(1, window.innerWidth - PANE_PORTAL_MARGIN * 2)}px`;
+  menu.style.maxHeight = `${Math.max(1, window.innerHeight - PANE_PORTAL_MARGIN * 2)}px`;
+  const rect = anchorBtn.getBoundingClientRect();
+  const measuredW = menu.offsetWidth || 180;
+  const measuredH = menu.offsetHeight || 220;
+  const size = clampPanePortalSize(measuredW, measuredH, PANE_PORTAL_MARGIN);
+  menu.style.width = `${Math.round(size.width)}px`;
+  let left = rect.left;
+  let top = rect.bottom + 4;
+  if (top + size.height > window.innerHeight - PANE_PORTAL_MARGIN) {
+    top = rect.top - size.height - 4;
+  }
+  const position = clampPanePortalPosition(left, top, size.width, size.height, PANE_PORTAL_MARGIN);
+  menu.style.left = `${Math.round(position.left)}px`;
+  menu.style.top = `${Math.round(position.top)}px`;
+
+  const closeHandler = (ev) => {
+    if (!menu.contains(ev.target)) {
+      menu.remove();
+      document.removeEventListener("click", closeHandler, true);
+    }
+  };
+  setTimeout(() => document.addEventListener("click", closeHandler, true), 0);
+}
+
+function ensurePaneOverlay(view) {
+  if (!view.overlayEl) {
+    const overlay = document.createElement("div");
+    overlay.className = "pane-terminal-overlay";
+
+    const title = document.createElement("div");
+    title.className = "pane-terminal-overlay-title";
+
+    const detail = document.createElement("div");
+    detail.className = "pane-terminal-overlay-detail";
+
+    const action = document.createElement("button");
+    action.className = "pane-terminal-overlay-action";
+    action.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const mode = overlay.dataset.mode ?? "empty";
+      setPaneOverlay(view, "starting", "Starting session...", "Launching terminal process");
+      paneHandlers.startSessionForPane(view.paneId, {
+        force: mode !== "dormant" && Boolean(view.sessionId),
+        restoreDormant: mode === "dormant",
+        focusTerm: true
+      }).catch((err) => {
+        const canRestore = mode === "dormant";
+        if (mode === "running" || mode === "detached") {
+          const title = mode === "detached" ? "Session detached" : "Session running";
+          setPaneOverlay(view, mode, title, String(err?.message ?? err), "Restart");
+        } else {
+          setPaneOverlay(view, mode, canRestore ? "Restore available" : "No session running", String(err?.message ?? err), canRestore ? "Restore" : "Start");
+        }
+        setStatus(String(err?.message ?? err), true);
+      });
+    });
+
+    const recent = document.createElement("div");
+    recent.className = "pane-terminal-overlay-recent";
+
+    overlay.append(title, detail, action, recent);
+    view.overlayEl = overlay;
+    view.overlayTitleEl = title;
+    view.overlayDetailEl = detail;
+    view.overlayActionEl = action;
+    view.overlayRecentEl = recent;
+  }
+
+  if (view.overlayEl.parentElement !== view.host) {
+    view.host.appendChild(view.overlayEl);
+  }
+}
+
+function commandBaseNameForOverlay(cmd = "") {
+  return String(cmd).split(/[\\/]/).pop()?.toLowerCase() ?? "";
+}
+
+function parseSessionArgsForOverlay(spawnArgs = "[]") {
+  try {
+    const parsed = JSON.parse(spawnArgs || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function cleanShellCommandForOverlay(value = "") {
+  let text = String(value).trim();
+  text = text.replace(/^\$OutputEncoding=\[Console\]::OutputEncoding=\[TextUTF8Encoding\]::new\(\);\s*/i, "");
+  text = text.replace(/^\$OutputEncoding=\[Console\]::OutputEncoding=\[Text\.UTF8Encoding\]::new\(\);\s*/i, "");
+  text = text.replace(/^\[Console\]::InputEncoding=\[Text\.UTF8Encoding\]::new\(\);\s*/i, "");
+  text = text.replace(/^if \(Get-Variable PSStyle[\s\S]*?\};\s*/i, "");
+  text = text.replace(/^chcp(?:\.com)?\s+65001\s*>\s*(?:\$null|nul)\s*;?\s*/i, "");
+  return text || value;
+}
+
+function uniqueOverlayStrings(values) {
+  const seen = new Set();
+  const rows = [];
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    const key = text.toLowerCase();
+    if (!text || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    rows.push(text);
+  }
+  return rows;
+}
+
+function overlayShellCommands() {
+  const preferred = state.terminal?.default_shell || state.shellCommand || "powershell.exe";
+  const lower = String(preferred).toLowerCase();
+  const fallback = lower.includes("pwsh") ? "powershell.exe" : "pwsh.exe";
+  return uniqueOverlayStrings([preferred, fallback, "powershell.exe", "pwsh.exe"]);
+}
+
+function overlayShellArgs(shellCmd, commandText) {
+  const lower = String(shellCmd).toLowerCase();
+  if (lower.includes("powershell.exe") || lower === "powershell") {
+    return [
+      "-NoLogo",
+      "-NoExit",
+      "-Command",
+      `chcp.com 65001 > $null; [Console]::InputEncoding=[Text.UTF8Encoding]::new(); [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); ${commandText}`
+    ];
+  }
+  return [
+    "-NoLogo",
+    "-NoExit",
+    "-Command",
+    `$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); [Console]::InputEncoding=[Text.UTF8Encoding]::new(); if (Get-Variable PSStyle -ErrorAction SilentlyContinue) { $PSStyle.OutputRendering = 'Ansi' }; ${commandText}`
+  ];
+}
+
+async function startShellCommandForPane(paneId, commandText, options = {}) {
+  const ws = selectedWorkspace();
+  const cwdCandidates = uniqueOverlayStrings([options.cwd, ws?.path]);
+  const shells = overlayShellCommands();
+  let lastErr = null;
+  for (const cwd of cwdCandidates.length > 0 ? cwdCandidates : [undefined]) {
+    for (const shell of shells) {
+      try {
+        return await paneHandlers.startSessionForPane(paneId, {
+          force: options.force !== false,
+          cmd: shell,
+          args: overlayShellArgs(shell, commandText),
+          cwd,
+          focusTerm: options.focusTerm !== false
+        });
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+  }
+  throw lastErr ?? new Error("Failed to start shell command.");
+}
+
+function sessionLabelForOverlay(session) {
+  const cmd = commandBaseNameForOverlay(session?.spawn_cmd);
+  const parsedArgs = parseSessionArgsForOverlay(session?.spawn_args);
+  const commandIndex = parsedArgs.findIndex((arg) => String(arg).toLowerCase() === "-command");
+  if ((cmd === "pwsh.exe" || cmd === "powershell.exe" || cmd === "pwsh" || cmd === "powershell") && commandIndex >= 0) {
+    return cleanShellCommandForOverlay(parsedArgs.slice(commandIndex + 1).join(" "));
+  }
+  const displayArgs = parsedArgs.filter((arg) => {
+    const value = String(arg);
+    return !value.startsWith("-No") && !value.startsWith("chcp") && !value.startsWith("$Output") && !value.startsWith("[Console]");
+  });
+  return displayArgs.length > 0
+    ? `${session?.spawn_cmd ?? ""} ${displayArgs.join(" ")}`.trim()
+    : (session?.spawn_cmd ?? "");
+}
+
+function formatOverlaySessionTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return `${date.toLocaleDateString([], { month: "short", day: "numeric" })} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
+function overlaySessionSignature(item) {
+  return `${item.kind}|${item.sessionId ?? ""}|${item.command ?? ""}|${item.cwd ?? ""}`;
+}
+
+const PANE_SESSION_HISTORY_STORAGE_KEY = "wincmux.paneSessionHistory.v1";
+
+function paneHistoryKey(workspaceId, paneId) {
+  return `${workspaceId ?? ""}:${paneId ?? ""}`;
+}
+
+function readPaneSessionHistoryStore() {
+  try {
+    const raw = localStorage.getItem(PANE_SESSION_HISTORY_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writePaneSessionHistoryStore(store) {
+  localStorage.setItem(PANE_SESSION_HISTORY_STORAGE_KEY, JSON.stringify(store));
+}
+
+function recordOverlayPaneSession(input) {
+  const workspaceId = input?.workspaceId ?? state.selectedWorkspaceId;
+  const paneId = input?.paneId;
+  if (!workspaceId || !paneId || !input?.command) {
+    return;
+  }
+  const store = readPaneSessionHistoryStore();
+  const key = paneHistoryKey(workspaceId, paneId);
+  const args = Array.isArray(input.args) ? input.args : [];
+  const entry = {
+    sessionId: input.sessionId ?? null,
+    command: String(input.command),
+    args,
+    cwd: input.cwd ?? selectedWorkspace()?.path ?? "",
+    title: input.title || sessionLabelForOverlay({
+      spawn_cmd: input.command,
+      spawn_args: JSON.stringify(args),
+      spawn_cwd: input.cwd ?? ""
+    }),
+    time: input.time ?? new Date().toISOString()
+  };
+  const signature = `${entry.command}|${JSON.stringify(entry.args)}|${entry.cwd}`;
+  const existing = Array.isArray(store[key]) ? store[key] : [];
+  store[key] = [
+    entry,
+    ...existing.filter((row) => `${row.command}|${JSON.stringify(row.args ?? [])}|${row.cwd ?? ""}` !== signature)
+  ].slice(0, 12);
+  writePaneSessionHistoryStore(store);
+}
+
+function localPaneSessionHistory(workspaceId, paneId) {
+  const rows = readPaneSessionHistoryStore()[paneHistoryKey(workspaceId, paneId)];
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function collectRecentOverlaySessions(view) {
+  const ws = selectedWorkspace();
+  if (!ws || !view?.paneId) {
+    return [];
+  }
+  const [histRes, aiRes, bindRes] = await Promise.all([
+    rpc("session.history", { workspace_id: ws.id }).catch(() => ({ sessions: [] })),
+    rpc("ai.sessions", { workspace_id: ws.id }).catch(() => ({ sessions: [] })),
+    rpc("pane.session.bindings", { workspace_id: ws.id }).catch(() => ({ bindings: [] }))
+  ]);
+  const bindings = bindRes?.bindings ?? [];
+  const bindingBySessionId = new Map();
+  const sessionIdsForPane = new Set();
+  for (const binding of bindings) {
+    if (binding?.session_id && !bindingBySessionId.has(binding.session_id)) {
+      bindingBySessionId.set(binding.session_id, binding);
+    }
+    if (binding?.pane_id === view.paneId && binding.session_id) {
+      sessionIdsForPane.add(binding.session_id);
+    }
+  }
+  const currentPaneId = view.paneId;
+
+  const recent = [];
+  for (const row of localPaneSessionHistory(ws.id, currentPaneId)) {
+    if (!row?.command) {
+      continue;
+    }
+    recent.push({
+      kind: "history",
+      actionLabel: "Re-run",
+      title: row.title || String(row.command),
+      meta: `${row.sessionId ? `${String(row.sessionId).slice(0, 8)} · ` : ""}pane ${currentPaneId.slice(0, 8)}`,
+      time: row.time ?? new Date().toISOString(),
+      sessionId: row.sessionId ?? null,
+      paneId: currentPaneId,
+      command: row.command,
+      args: Array.isArray(row.args) ? row.args : [],
+      cwd: row.cwd || ws.path
+    });
+  }
+
+  for (const ai of aiRes?.sessions ?? []) {
+    const binding = bindingBySessionId.get(ai.pty_session_id);
+    if (binding?.pane_id !== currentPaneId && !sessionIdsForPane.has(ai.pty_session_id)) {
+      continue;
+    }
+    recent.push({
+      kind: "ai",
+      actionLabel: "Resume",
+      title: ai.resume_cmd,
+      meta: `${ai.tool ?? "assistant"}${binding?.pane_id ? ` · pane ${binding.pane_id.slice(0, 8)}` : ""}`,
+      time: ai.detected_at,
+      sessionId: ai.pty_session_id,
+      paneId: binding?.pane_id ?? null,
+      command: ai.resume_cmd,
+      cwd: ai.cwd || ws.path
+    });
+  }
+
+  for (const session of histRes?.sessions ?? []) {
+    if (!session?.spawn_cmd) {
+      continue;
+    }
+    const binding = bindingBySessionId.get(session.id);
+    if (binding?.pane_id !== currentPaneId && !sessionIdsForPane.has(session.id)) {
+      continue;
+    }
+    const isRunning = session.status === "running";
+    recent.push({
+      kind: isRunning ? "running" : "history",
+      actionLabel: isRunning ? "Attach" : "Re-run",
+      title: sessionLabelForOverlay(session),
+      meta: `${session.id.slice(0, 8)} · ${isRunning ? "running" : session.status}${binding?.pane_id ? ` · pane ${binding.pane_id.slice(0, 8)}` : ""}`,
+      time: session.started_at,
+      sessionId: session.id,
+      paneId: binding?.pane_id ?? null,
+      command: session.spawn_cmd,
+      args: parseSessionArgsForOverlay(session.spawn_args),
+      cwd: session.spawn_cwd || ws.path
+    });
+  }
+
+  const seen = new Set();
+  return recent
+    .filter((item) => {
+      const key = overlaySessionSignature(item);
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => {
+      return new Date(b.time).getTime() - new Date(a.time).getTime();
+    })
+    .slice(0, 6);
+}
+
+async function continueOverlaySession(view, item) {
+  const ws = selectedWorkspace();
+  if (!ws || !view?.paneId || !item) {
+    return;
+  }
+  if (item.kind === "ai") {
+    await startShellCommandForPane(view.paneId, item.command, {
+      cwd: item.cwd || ws.path,
+      focusTerm: true
+    });
+    return;
+  }
+  if (item.kind === "running") {
+    const currentSid = state.paneSessions[view.paneId] ?? null;
+    if (currentSid && currentSid !== item.sessionId) {
+      await rpc("session.close", { session_id: currentSid }).catch(() => {});
+    }
+    state.paneSessions[view.paneId] = item.sessionId;
+    await rpc("pane.session.bind", { workspace_id: ws.id, pane_id: view.paneId, session_id: item.sessionId }).catch(() => {});
+    recordOverlayPaneSession({
+      workspaceId: ws.id,
+      paneId: view.paneId,
+      sessionId: item.sessionId,
+      command: item.command,
+      args: item.args ?? [],
+      cwd: item.cwd || ws.path,
+      title: item.title,
+      time: new Date().toISOString()
+    });
+    if (typeof globalThis.loadSessions === "function") {
+      await globalThis.loadSessions(ws.id).catch(() => {});
+    }
+    normalizePaneSessions();
+    refreshPaneBindings();
+    await selectPane(view.paneId, { persist: true, focusTerm: true });
+    setStatus(`Attached: ${item.sessionId.slice(0, 8)}`);
+    return;
+  }
+  await paneHandlers.startSessionForPane(view.paneId, {
+    force: true,
+    cmd: item.command,
+    args: item.args ?? [],
+    cwd: item.cwd || ws.path,
+    focusTerm: true
+  });
+}
+
+async function runOverlayCommand(view, raw) {
+  const ws = selectedWorkspace();
+  const text = String(raw ?? "").trim();
+  if (!ws || !view?.paneId || !text) {
+    return;
+  }
+  await startShellCommandForPane(view.paneId, text, {
+    cwd: ws.path,
+    focusTerm: true
+  });
+}
+
+async function renderPaneOverlayRecentSessions(view, mode) {
+  if (!view?.overlayRecentEl) {
+    return;
+  }
+  const recentEl = view.overlayRecentEl;
+  if (mode === "starting") {
+    recentEl.hidden = true;
+    recentEl.innerHTML = "";
+    return;
+  }
+  const token = (view.overlayRecentToken ?? 0) + 1;
+  view.overlayRecentToken = token;
+  recentEl.hidden = false;
+  recentEl.innerHTML = '<div class="pane-terminal-overlay-recent-muted">Loading recent sessions...</div>';
+  try {
+    const items = await collectRecentOverlaySessions(view);
+    if (view.overlayRecentToken !== token || recentEl.hidden) {
+      return;
+    }
+    recentEl.innerHTML = `<div class="pane-terminal-overlay-recent-title">Pane ${view.paneId.slice(0, 8)} sessions</div>`;
+    if (items.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "pane-terminal-overlay-recent-muted";
+      empty.textContent = "No saved history for this pane yet.";
+      recentEl.appendChild(empty);
+    }
+    for (const item of items) {
+      const row = document.createElement("button");
+      row.className = "pane-terminal-overlay-session";
+      row.type = "button";
+      row.title = item.title;
+      row.innerHTML = `<span class="pane-terminal-overlay-session-main">
+        <span class="pane-terminal-overlay-session-title"></span>
+        <span class="pane-terminal-overlay-session-meta"></span>
+      </span><span class="pane-terminal-overlay-session-action"></span>`;
+      row.querySelector(".pane-terminal-overlay-session-title").textContent = item.title;
+      row.querySelector(".pane-terminal-overlay-session-meta").textContent = [item.meta, formatOverlaySessionTime(item.time)].filter(Boolean).join(" · ");
+      row.querySelector(".pane-terminal-overlay-session-action").textContent = item.actionLabel;
+      row.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        setPaneOverlay(view, "starting", `${item.actionLabel} session...`, item.title);
+        continueOverlaySession(view, item).catch((err) => {
+          setStatus(String(err?.message ?? err), true);
+          setPaneOverlay(view, mode, mode === "running" ? "Session running" : "No session running", String(err?.message ?? err), mode === "running" ? "Restart" : "Start");
+        });
+      });
+      recentEl.appendChild(row);
+    }
+    const form = document.createElement("form");
+    form.className = "pane-terminal-overlay-command";
+    form.innerHTML = '<input class="pane-terminal-overlay-command-input" placeholder="claude / codex / pwsh" /><button class="pane-terminal-overlay-command-run" type="submit">Run</button>';
+    form.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const input = form.querySelector("input");
+      const command = input?.value?.trim();
+      if (!command) {
+        input?.focus();
+        return;
+      }
+      setPaneOverlay(view, "starting", "Starting session...", command);
+      runOverlayCommand(view, command).catch((err) => {
+        setStatus(String(err?.message ?? err), true);
+        setPaneOverlay(view, mode, mode === "running" ? "Session running" : "No session running", String(err?.message ?? err), mode === "running" ? "Restart" : "Start");
+      });
+    });
+    recentEl.appendChild(form);
+  } catch {
+    if (view.overlayRecentToken === token) {
+      recentEl.innerHTML = '<div class="pane-terminal-overlay-recent-title">Pane sessions</div>';
+    }
+  }
+}
+
+function setPaneOverlay(view, mode, title, detail = "", actionLabel = "") {
+  if (!view) {
+    return;
+  }
+  ensurePaneOverlay(view);
+  view.overlayEl.dataset.mode = mode;
+  view.overlayTitleEl.textContent = title;
+  view.overlayDetailEl.textContent = detail;
+  view.overlayDetailEl.hidden = !detail;
+  view.overlayActionEl.textContent = actionLabel;
+  view.overlayActionEl.hidden = !actionLabel;
+  view.overlayEl.hidden = false;
+  renderPaneOverlayRecentSessions(view, mode);
+}
+
+function hidePaneOverlay(view) {
+  if (view?.overlayEl && !view.overlayEl.hidden) {
+    view.overlayEl.hidden = true;
+    if (view.overlayRecentEl) {
+      view.overlayRecentEl.hidden = true;
+      view.overlayRecentEl.innerHTML = "";
+    }
+  }
+}
+
+function markPaneStarting(paneId, title = "Starting session...", detail = "Launching terminal process") {
+  const view = state.paneViews.get(paneId);
+  if (!view) {
+    return;
+  }
+  setPaneOverlay(view, "starting", title, detail);
+}
+
+function markPaneDetached(view, detail = "Terminal process is no longer attached") {
+  if (!view) {
+    return;
+  }
+  view.detached = true;
+  setPaneOverlay(view, "detached", "Session detached", detail, "Restart");
+  const meta = state.paneMeta.get(view.paneId);
+  if (meta) {
+    meta.statusEl.textContent = "Detached";
+    meta.statusEl.title = detail;
+    meta.startBtn.dataset.fullLabel = "Restart";
+    meta.closeBtn.disabled = false;
+  }
+}
+
+function focusPaneView(view) {
+  if (!view) {
+    return;
+  }
+  view.term.focus();
+}
+
+function focusPaneTerm(paneId) {
+  focusPaneView(state.paneViews.get(paneId));
+}
+
+function enqueueStreamOutput(paneId, output, options = {}) {
+  const view = state.paneViews.get(paneId);
+  if (!view || !output) {
+    return;
+  }
+  const expectedSessionId = typeof options === "string" ? options : (options?.sessionId ?? null);
+  const source = typeof options === "object" && options?.source ? options.source : "stream";
+  if (expectedSessionId && view.sessionId !== expectedSessionId) {
+    paneWarn("[output] skipped stale output", {
+      pane: paneId?.slice(0, 8),
+      expected: expectedSessionId?.slice(0, 8),
+      actual: view.sessionId?.slice(0, 8)
+    });
+    return;
+  }
+  if (
+    source === "stream"
+    && expectedSessionId
+    && view.tailRestoreSessionId === expectedSessionId
+  ) {
+    appendDeferredStreamOutput(view, output);
+    return;
+  }
+
+  // Mark which session produced this output (for workspace-switch reset guard)
+  if (view.sessionId) {
+    view.renderedSessionId = view.sessionId;
+  }
+  if (!view.hasOutput || (view.overlayEl && !view.overlayEl.hidden)) {
+    hidePaneOverlay(view);
+  }
+  view.hasOutput = true;
+  appendPaneOutputQueue(view, output);
+  if (view.outputQueueLength > state.metrics.stream_queue_depth) {
+    state.metrics.stream_queue_depth = view.outputQueueLength;
+  }
+
+  schedulePaneOutputFlush(view);
+}
+
+function enqueueSessionStreamOutput(sessionId, output) {
+  if (!sessionId || !output) {
+    return false;
+  }
+  const paneId = visiblePaneForSessionFast(sessionId);
+  if (!paneId) {
+    return false;
+  }
+  enqueueStreamOutput(paneId, output, sessionId);
+  return true;
+}
+
+function schedulePaneOutputFlush(view) {
+  if (!view || view.outputFlushQueued || view.outputWriteInFlight) {
+    return;
+  }
+  view.outputFlushQueued = true;
+  outputFlushPaneQueue.add(view.paneId);
+  if (canFastFlushPaneOutput(view)) {
+    scheduleOutputFastFlush();
+    return;
+  }
+  scheduleOutputFlushFrame();
+}
+
+function canFastFlushPaneOutput(view) {
+  return Boolean(
+    view
+    && view.paneId === state.selectedPaneId
+    && !view.outputWriteInFlight
+    && view.outputQueueLength > 0
+  );
+}
+
+function scheduleOutputFastFlush() {
+  if (outputFastFlushQueued) {
+    return;
+  }
+  outputFastFlushQueued = true;
+  const run = () => {
+    outputFastFlushQueued = false;
+    flushFastPaneOutput();
+  };
+  if (typeof queueMicrotask === "function") {
+    queueMicrotask(run);
+  } else {
+    Promise.resolve().then(run).catch(() => {});
+  }
+}
+
+function flushFastPaneOutput() {
+  const paneId = state.selectedPaneId ?? null;
+  if (!paneId || !outputFlushPaneQueue.has(paneId)) {
+    if (outputFlushPaneQueue.size > 0) {
+      scheduleOutputFlushFrame();
+    }
+    return;
+  }
+  const view = state.paneViews.get(paneId);
+  if (!canFastFlushPaneOutput(view)) {
+    scheduleOutputFlushFrame();
+    return;
+  }
+  outputFlushPaneQueue.delete(paneId);
+  view.outputFlushQueued = false;
+  flushPaneOutput(paneId);
+  if (outputFlushPaneQueue.size > 0) {
+    scheduleOutputFlushFrame();
+  }
+}
+
+function scheduleOutputFlushFrame() {
+  if (outputFlushRaf) {
+    return;
+  }
+  outputFlushRaf = window.requestAnimationFrame(flushQueuedPaneOutputs);
+}
+
+function flushQueuedPaneOutputs() {
+  outputFlushRaf = null;
+  let processed = 0;
+  const flushQueuedPane = (paneId) => {
+    outputFlushPaneQueue.delete(paneId);
+    const view = state.paneViews.get(paneId);
+    if (view) {
+      view.outputFlushQueued = false;
+    }
+    if (!view || !view.outputQueueLength || view.outputWriteInFlight) {
+      return false;
+    }
+    flushPaneOutput(paneId);
+    return true;
+  };
+  const selectedPaneId = state.selectedPaneId ?? null;
+  if (selectedPaneId && outputFlushPaneQueue.has(selectedPaneId)) {
+    processed += flushQueuedPane(selectedPaneId) ? 1 : 0;
+  }
+  for (const paneId of outputFlushPaneQueue) {
+    processed += flushQueuedPane(paneId) ? 1 : 0;
+    if (processed >= OUTPUT_FLUSH_MAX_PANES_PER_FRAME) {
+      break;
+    }
+  }
+  if (outputFlushPaneQueue.size > 0) {
+    scheduleOutputFlushFrame();
+  }
+}
+
+function cancelPaneOutputFlush(view) {
+  if (!view) {
+    return;
+  }
+  outputFlushPaneQueue.delete(view.paneId);
+  view.outputFlushQueued = false;
+  if (outputFlushPaneQueue.size === 0 && outputFlushRaf) {
+    cancelAnimationFrame(outputFlushRaf);
+    outputFlushRaf = null;
+  }
+}
+
+function flushPaneOutput(paneId) {
+  const view = state.paneViews.get(paneId);
+  if (!view) {
+    return;
+  }
+  if (!view.outputQueueLength || view.outputWriteInFlight) {
+    return;
+  }
+
+  const chunk = takePaneOutputChunk(view);
+  const receipt = wincmuxTauriBeginOutput(view);
+
+  view.renderedSessionId = view.sessionId;
+  view.outputWriteInFlight = true;
+  try {
+    view.term.write(chunk, () => {
+      view.outputWriteInFlight = false;
+      if (view.disposed) return;
+      if (view.resetTerminalAfterWrite) {
+        view.resetTerminalAfterWrite = false;
+        view.term.reset();
+      }
+      wincmuxTauriFinishOutput(view, receipt, true);
+      if (view.outputQueueLength > 0) {
+        schedulePaneOutputFlush(view);
+      }
+    });
+  } catch (err) {
+    view.outputWriteInFlight = false;
+    wincmuxTauriFinishOutput(view, receipt, false);
+    setStatus(`Terminal render error: ${err?.message ?? err}`, true);
+    if (view.outputQueueLength > 0) {
+      schedulePaneOutputFlush(view);
+    }
+  }
+}
+function currentLayoutHash() {
+  const stable = state.panes
+    .map((p) => `${p.pane_id}:${p.parent_id ?? "root"}:${p.split ? `${p.split.direction}:${p.split.first}:${p.split.second}` : "leaf"}`)
+    .sort();
+  return `${state.selectedWorkspaceId ?? ""}|${stable.join("|")}`;
+}
+
+function ensureSelectedPane() {
+  const leaves = leafPanes();
+  const leafSet = new Set(leaves.map((p) => p.pane_id));
+
+  if (!state.selectedPaneId || !leafSet.has(state.selectedPaneId)) {
+    const focusedLeaf = leaves.find((p) => p.is_focused);
+    state.selectedPaneId = focusedLeaf?.pane_id ?? leaves[0]?.pane_id ?? null;
+  }
+
+  selectedPaneLabel.textContent = `Selected Pane: ${state.selectedPaneId ? state.selectedPaneId.slice(0, 8) : "-"}`;
+}
+
+function normalizePaneSessions() {
+  const leafIds = new Set(leafPanes().map((p) => p.pane_id));
+  const running = new Map(runningSessions().map((s) => [s.id, s]));
+  const hiddenSessions = typeof hiddenSessionIdsForWorkspace === "function"
+    ? hiddenSessionIdsForWorkspace(state.selectedWorkspaceId)
+    : new Set();
+
+  paneDebug("[normalize] running sessions:", [...running.keys()].map(s => s.slice(0,8)));
+  paneDebug("[normalize] paneSessions before:", Object.entries(state.paneSessions).map(([p,s]) => `${p.slice(0,8)}→${s?.slice(0,8)}`));
+
+  for (const paneId of Object.keys(state.paneSessions)) {
+    const sid = state.paneSessions[paneId];
+    // Only clean up entries belonging to the CURRENT workspace's panes.
+    // paneIds not in leafIds belong to other workspaces — preserve them for workspace-switch cache.
+    if (!leafIds.has(paneId)) continue;
+    if (sid && (!running.has(sid) || hiddenSessions.has(sid))) {
+      paneWarn("[normalize] DELETING pane session:", paneId.slice(0,8), "->", sid?.slice(0,8), "reason: running=", running.has(sid), "hidden=", hiddenSessions.has(sid));
+      clearPromptDetectorSession(sid);
+      delete state.paneSessions[paneId];
+    }
+  }
+
+  const assigned = new Set(Object.values(state.paneSessions).filter(Boolean));
+  for (const pane of leafPanes()) {
+    if (state.paneSessions[pane.pane_id]) {
+      continue;
+    }
+    const free = runningSessions().find((s) => !assigned.has(s.id) && !hiddenSessions.has(s.id));
+    if (free) {
+      state.paneSessions[pane.pane_id] = free.id;
+      assigned.add(free.id);
+    }
+  }
+
+  ensureSelectedPane();
+  rebuildPaneSessionLookup();
+}
+
+function applyPaneSelectionClasses(paneId, card, moveSourcePaneId, moveTargetPaneId, placement) {
+  card.classList.toggle("active", paneId === state.selectedPaneId);
+  card.classList.toggle("pane-move-source", paneId === moveSourcePaneId);
+  card.classList.toggle("pane-move-target", Boolean(moveSourcePaneId) && paneId !== moveSourcePaneId);
+  card.classList.toggle("pane-drop-active", paneId === moveTargetPaneId);
+  for (const key of PANE_DROP_CLASS_KEYS) {
+    card.classList.toggle(`pane-drop-${key}`, paneId === moveTargetPaneId && placement === key);
+  }
+}
+
+function applyPaneSelectionStyles() {
+  const selectedPaneId = state.selectedPaneId ?? null;
+  const moveSourcePaneId = state.paneMove?.sourcePaneId ?? null;
+  const moveTargetPaneId = state.paneMove?.targetPaneId ?? null;
+  const placement = state.paneMove?.placement ?? null;
+  const prev = paneSelectionStyleState;
+  const fullRefresh = prev.cardCount !== state.paneCards.size || prev.moveSourcePaneId !== moveSourcePaneId;
+
+  if (fullRefresh) {
+    for (const [paneId, card] of state.paneCards.entries()) {
+      applyPaneSelectionClasses(paneId, card, moveSourcePaneId, moveTargetPaneId, placement);
+    }
+  } else {
+    const dirtyPaneIds = new Set([
+      prev.selectedPaneId,
+      selectedPaneId,
+      prev.moveTargetPaneId,
+      moveTargetPaneId
+    ].filter(Boolean));
+    for (const paneId of dirtyPaneIds) {
+      const card = state.paneCards.get(paneId);
+      if (card) {
+        applyPaneSelectionClasses(paneId, card, moveSourcePaneId, moveTargetPaneId, placement);
+      }
+    }
+  }
+
+  paneSelectionStyleState.selectedPaneId = selectedPaneId;
+  paneSelectionStyleState.moveSourcePaneId = moveSourcePaneId;
+  paneSelectionStyleState.moveTargetPaneId = moveTargetPaneId;
+  paneSelectionStyleState.placement = placement;
+  paneSelectionStyleState.cardCount = state.paneCards.size;
+
+  const selectedText = `Selected Pane: ${selectedPaneId ? selectedPaneId.slice(0, 8) : "-"}`;
+  if (selectedPaneLabel.textContent !== selectedText) {
+    selectedPaneLabel.textContent = selectedText;
+  }
+}
+
+function paneDropPlacement(card, clientX, clientY) {
+  const rect = card.getBoundingClientRect();
+  const x = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+  const y = Math.max(0, Math.min(1, (clientY - rect.top) / Math.max(1, rect.height)));
+  const dx = Math.abs(x - 0.5);
+  const dy = Math.abs(y - 0.5);
+  if (dy >= dx) {
+    return y < 0.5 ? "above" : "below";
+  }
+  return x < 0.5 ? "left" : "right";
+}
+
+function setPaneMoveTarget(paneId, placement) {
+  if (state.paneMove.targetPaneId === paneId && state.paneMove.placement === placement) {
+    return;
+  }
+  state.paneMove.targetPaneId = paneId;
+  state.paneMove.placement = placement;
+  applyPaneSelectionStyles();
+}
+
+function clearPaneMoveTarget(paneId = null) {
+  if (paneId && state.paneMove.targetPaneId !== paneId) {
+    return;
+  }
+  if (!state.paneMove.targetPaneId && !state.paneMove.placement) {
+    return;
+  }
+  state.paneMove.targetPaneId = null;
+  state.paneMove.placement = null;
+  applyPaneSelectionStyles();
+}
+
+function unreadCountsForWorkspacePanes(workspaceId) {
+  if (typeof notificationCountsForWorkspacePanes === "function") {
+    return notificationCountsForWorkspacePanes(workspaceId);
+  }
+  const counts = {
+    pane: new Map(),
+    session: new Map()
+  };
+  if (!workspaceId) {
+    return counts;
+  }
+
+  for (const row of state.notifications) {
+    const target = normalizeNotificationTarget(row);
+    const targetWorkspaceId = target.workspaceId ?? row.workspace_id ?? null;
+    if (targetWorkspaceId !== workspaceId) {
+      continue;
+    }
+    if (target.paneId) {
+      counts.pane.set(target.paneId, (counts.pane.get(target.paneId) ?? 0) + 1);
+      continue;
+    }
+    if (target.sessionId) {
+      counts.session.set(target.sessionId, (counts.session.get(target.sessionId) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+function unreadCountForPane(unreadCounts, paneId, sessionId) {
+  const paneCount = unreadCounts?.pane?.get(paneId) ?? 0;
+  if (paneCount > 0) {
+    return paneCount;
+  }
+  return sessionId ? (unreadCounts?.session?.get(sessionId) ?? 0) : 0;
+}
+
+function paneBindingState(paneId, sessionId, runningMap, dormant, fontSize, unreadCount, leafCount, view) {
+  const session = sessionId ? runningMap.get(sessionId) : null;
+  const group = typeof groupForPane === "function" ? groupForPane(paneId) : null;
+  const statusText = sessionId
+    ? (session ? `Running - pid ${session.pid}` : "Attached")
+    : (dormant?.spawn_cmd ? `Dormant - ${dormant.spawn_cmd}` : "No session");
+  const statusTitle = sessionId ? "" : (dormant?.spawn_cmd ? "Restore available" : "");
+  const startLabel = sessionId ? "Restart" : (dormant?.spawn_cmd ? "Restore" : "Start");
+  const closeDisabled = !sessionId;
+  const unreadText = unreadCount > 99 ? "99+" : String(unreadCount);
+  const groupText = group ? `${group.name} ▾` : "";
+  const groupTitle = group ? `Move this terminal from ${group.name} to another group` : "Move this terminal to a group";
+  const key = [
+    sessionId ?? "",
+    session?.pid ?? "",
+    dormant?.session_id ?? "",
+    dormant?.spawn_cmd ?? "",
+    fontSize,
+    view?.sessionId ?? "",
+    unreadCount,
+    leafCount,
+    group?.id ?? "",
+    group?.name ?? "",
+    group?.color ?? "",
+    state.paneAutoResize === false ? "manual" : "auto"
+  ].join("|");
+  return {
+    key,
+    statusText,
+    statusTitle,
+    startLabel,
+    closeDisabled,
+    unreadText,
+    group,
+    groupText,
+    groupTitle
+  };
+}
+
+async function selectPane(paneId, options = {}) {
+  const { persist = true, focusTerm = true } = options;
+  if (!paneId || !leafPanes().some((p) => p.pane_id === paneId)) {
+    return;
+  }
+
+  const wasSelected = state.selectedPaneId === paneId;
+  state.selectedPaneId = paneId;
+  applyPaneSelectionStyles();
+
+  if (persist && !wasSelected) {
+    const ws = selectedWorkspace();
+    if (ws) {
+      await rpc("layout.focus", { workspace_id: ws.id, pane_id: paneId });
+    }
+  }
+  await paneHandlers.markPaneNotificationsRead(paneId).catch(() => {});
+
+  if (focusTerm) {
+    window.requestAnimationFrame(() => {
+      focusPaneView(state.paneViews.get(paneId));
+    });
+  }
+}
+
+function orderedLeafPaneIds() {
+  return leafPanes().map((pane) => pane.pane_id).filter(Boolean);
+}
+
+async function selectAdjacentPane(delta = 1, options = {}) {
+  const paneIds = orderedLeafPaneIds();
+  if (paneIds.length === 0) {
+    return null;
+  }
+  const currentIndex = state.selectedPaneId ? paneIds.indexOf(state.selectedPaneId) : -1;
+  const startIndex = currentIndex >= 0 ? currentIndex : 0;
+  const nextIndex = (startIndex + delta + paneIds.length) % paneIds.length;
+  const nextPaneId = paneIds[nextIndex];
+  await selectPane(nextPaneId, {
+    persist: true,
+    focusTerm: options.focusTerm !== false
+  });
+  setStatus(`Selected pane: ${nextPaneId.slice(0, 8)}`);
+  return nextPaneId;
+}
+
+async function selectPaneByDirection(direction, options = {}) {
+  const currentPaneId = state.selectedPaneId;
+  const currentCard = currentPaneId ? state.paneCards.get(currentPaneId) : null;
+  if (!currentCard) {
+    return selectAdjacentPane(direction === "left" || direction === "up" ? -1 : 1, options);
+  }
+
+  const currentRect = currentCard.getBoundingClientRect();
+  const currentCenter = {
+    x: currentRect.left + currentRect.width / 2,
+    y: currentRect.top + currentRect.height / 2
+  };
+  let best = null;
+  for (const [paneId, card] of state.paneCards.entries()) {
+    if (paneId === currentPaneId) {
+      continue;
+    }
+    const rect = card.getBoundingClientRect();
+    const center = {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2
+    };
+    const dx = center.x - currentCenter.x;
+    const dy = center.y - currentCenter.y;
+    const isCandidate =
+      (direction === "left" && dx < -4)
+      || (direction === "right" && dx > 4)
+      || (direction === "up" && dy < -4)
+      || (direction === "down" && dy > 4);
+    if (!isCandidate) {
+      continue;
+    }
+    const primary = direction === "left" || direction === "right" ? Math.abs(dx) : Math.abs(dy);
+    const secondary = direction === "left" || direction === "right" ? Math.abs(dy) : Math.abs(dx);
+    const score = primary + secondary * 0.45;
+    if (!best || score < best.score) {
+      best = { paneId, score };
+    }
+  }
+
+  if (!best) {
+    return null;
+  }
+  await selectPane(best.paneId, {
+    persist: true,
+    focusTerm: options.focusTerm !== false
+  });
+  setStatus(`Selected pane: ${best.paneId.slice(0, 8)}`);
+  return best.paneId;
+}
+
+function disposeView(view) {
+  if (!view) {
+    return;
+  }
+  stopPanePolling(view);
+  if (view.flushTimer) {
+    clearTimeout(view.flushTimer);
+    view.flushTimer = null;
+  }
+  view.inputFlushToken = (view.inputFlushToken ?? 0) + 1;
+  view.inputFlushScheduled = false;
+  view.disposed = true;
+  discardPendingPaneInput(view);
+  clearPaneInputPerfSummary(view, { flush: true, reason: "dispose" });
+  cancelPaneResizeSync(view);
+  clearPaneFitRetry(view);
+  clearPaneFitStabilization(view);
+  if (view.fitRaf) {
+    cancelAnimationFrame(view.fitRaf);
+  }
+  cancelPaneOutputFlush(view);
+  if (view.observer) {
+    view.observer.disconnect();
+  }
+  const meta = state.paneMeta.get(view.paneId);
+  meta?.actionsOverflowMenu?.remove();
+  meta?.quickPanel?.remove();
+  if (view.term) {
+    view.term.dispose();
+  }
+}
+
+function removePanePortalElements() {
+  closePaneOverflowMenus(null);
+  for (const meta of state.paneMeta.values()) {
+    meta?.actionsOverflowMenu?.remove();
+    meta?.quickPanel?.remove();
+  }
+}
+
+function disposeAllViews() {
+  if (fitAllPanesRaf) {
+    cancelAnimationFrame(fitAllPanesRaf);
+    fitAllPanesRaf = null;
+  }
+  for (const view of state.paneViews.values()) {
+    disposeView(view);
+  }
+  state.paneViews.clear();
+  // Also dispose cached views from other workspaces
+  for (const cachedMap of state.workspacePaneViewCache.values()) {
+    for (const view of cachedMap.values()) {
+      disposeView(view);
+    }
+  }
+  state.workspacePaneViewCache.clear();
+  state.workspacePaneSessionCache.clear();
+  state._lastRenderedWorkspaceId = null;
+}
+
+function clearPaneFitRetry(view) {
+  if (view?.fitRetryTimer) {
+    clearTimeout(view.fitRetryTimer);
+    view.fitRetryTimer = null;
+  }
+}
+
+function clearPaneFitStabilization(view) {
+  if (!view?.fitStabilizeTimers) {
+    return;
+  }
+  for (const timer of view.fitStabilizeTimers) {
+    clearTimeout(timer);
+  }
+  view.fitStabilizeTimers = [];
+}
+
+function schedulePaneFitStabilization(view) {
+  if (!view) {
+    return;
+  }
+  clearPaneFitStabilization(view);
+  view.fitStabilizeTimers = PANE_FIT_STABILIZE_DELAYS_MS.map((delay) =>
+    setTimeout(() => {
+      if (isPaneViewAttached(view)) {
+        schedulePaneFit(view, { force: true });
+      }
+    }, delay)
+  );
+}
+
+function schedulePaneFitRetry(view, options = {}) {
+  if (!view || view.fitRetryTimer) {
+    return;
+  }
+  view.fitRetryTimer = setTimeout(() => {
+    view.fitRetryTimer = null;
+    schedulePaneFit(view, options);
+  }, PANE_FIT_RETRY_DELAY_MS);
+}
+
+function fitPaneView(view, options = {}) {
+  if (!view?.term || !view.fitAddon) {
+    return false;
+  }
+  if (view.fitRaf) {
+    cancelAnimationFrame(view.fitRaf);
+    view.fitRaf = null;
+  }
+  if (!isPaneViewAttached(view)) {
+    clearPaneFitRetry(view);
+    return false;
+  }
+  const size = paneViewSize(view);
+  if (size.width < PANE_MIN_FIT_WIDTH || size.height < PANE_MIN_FIT_HEIGHT) {
+    schedulePaneFitRetry(view, options);
+    return false;
+  }
+  clearPaneFitRetry(view);
+  if (!options?.force && view.lastFitWidth === size.width && view.lastFitHeight === size.height) {
+    return false;
+  }
+  const beforeCols = view.term.cols;
+  const beforeRows = view.term.rows;
+  updatePaneActionLayout(view.paneId);
+  view.fitAddon.fit();
+  view.lastFitWidth = size.width;
+  view.lastFitHeight = size.height;
+  if (view.term.cols !== beforeCols || view.term.rows !== beforeRows) {
+    schedulePaneResize(view);
+  }
+  return true;
+}
+
+function schedulePaneFit(view, options = {}) {
+  if (!view || view.fitRaf) {
+    return;
+  }
+  if (options?.force) {
+    view.forceNextFit = true;
+  }
+  view.fitRaf = window.requestAnimationFrame(() => {
+    view.fitRaf = null;
+    try {
+      const force = view.forceNextFit || options?.force;
+      view.forceNextFit = false;
+      fitPaneView(view, { force });
+    } catch {
+      // ignore fit errors during layout teardown
+    }
+  });
+}
+
+function performFitAllPanes(options = {}) {
+  for (const view of state.paneViews.values()) {
+    try {
+      fitPaneView(view, options);
+    } catch {
+      // ignore fit errors during layout teardown
+    }
+  }
+}
+
+function fitAllPanes(options = {}) {
+  if (options?.immediate) {
+    if (fitAllPanesRaf) {
+      cancelAnimationFrame(fitAllPanesRaf);
+      fitAllPanesRaf = null;
+    }
+    performFitAllPanes(options);
+    return;
+  }
+  if (fitAllPanesRaf) {
+    return;
+  }
+  fitAllPanesRaf = window.requestAnimationFrame(() => {
+    fitAllPanesRaf = null;
+    performFitAllPanes(options);
+  });
+}
+
+function countLeaves(node, paneMap) {
+  if (!node.split) {
+    return 1;
+  }
+  const first = paneMap.get(node.split.first);
+  const second = paneMap.get(node.split.second);
+  return (first ? countLeaves(first, paneMap) : 1) + (second ? countLeaves(second, paneMap) : 1);
+}
+
+function applyEqualFlex(node, paneMap, el) {
+  if (!node.split) {
+    return;
+  }
+  const firstChild = paneMap.get(node.split.first);
+  const secondChild = paneMap.get(node.split.second);
+  const firstLeaves = firstChild ? countLeaves(firstChild, paneMap) : 1;
+  const secondLeaves = secondChild ? countLeaves(secondChild, paneMap) : 1;
+
+  // Children of this split are the first and second .pane-split-item elements
+  const items = Array.from(el.children).filter((c) => c.classList.contains("pane-split-item"));
+  if (items.length === 2) {
+    items[0].style.flex = `${firstLeaves} 1 0`;
+    items[1].style.flex = `${secondLeaves} 1 0`;
+  }
+
+  // Recurse into sub-splits
+  if (firstChild?.split && items[0]) {
+    applyEqualFlex(firstChild, paneMap, items[0]);
+  }
+  if (secondChild?.split && items[1]) {
+    applyEqualFlex(secondChild, paneMap, items[1]);
+  }
+}
+
+function equalizePaneSizes() {
+  if (!state.panes || state.panes.length === 0) {
+    return;
+  }
+  // Reset stored ratios
+  state.splitRatios = {};
+  saveSplitRatios();
+
+  const paneMap = new Map(state.panes.map((p) => [p.pane_id, p]));
+  const root = state.panes.find((p) => p.parent_id === null);
+  if (!root) {
+    return;
+  }
+  const rootEl = paneSurface.firstElementChild;
+  if (!rootEl) {
+    return;
+  }
+  applyEqualFlex(root, paneMap, rootEl);
+
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      fitAllPanes();
+    });
+  });
+}
+
+function schedulePaneResize(view) {
+  if (!view?.paneId || state.paneAutoResize === false) {
+    return;
+  }
+  paneResizeSyncQueue.add(view.paneId);
+  if (paneResizeSyncTimer || paneResizeSyncRaf) {
+    return;
+  }
+  paneResizeSyncTimer = setTimeout(() => {
+    paneResizeSyncTimer = null;
+    schedulePaneResizeSyncFrame();
+  }, PANE_RESIZE_SYNC_DELAY_MS);
+}
+
+function schedulePaneResizeSyncFrame() {
+  if (paneResizeSyncRaf) {
+    return;
+  }
+  paneResizeSyncRaf = window.requestAnimationFrame(flushQueuedPaneResizes);
+}
+
+function flushQueuedPaneResizes() {
+  paneResizeSyncRaf = null;
+  let processed = 0;
+  for (const paneId of paneResizeSyncQueue) {
+    paneResizeSyncQueue.delete(paneId);
+    const view = state.paneViews.get(paneId);
+    if (!view) {
+      continue;
+    }
+    void syncPaneSize(paneId).catch(() => {});
+    processed += 1;
+    if (processed >= PANE_RESIZE_SYNC_MAX_PANES_PER_FRAME) {
+      break;
+    }
+  }
+  if (paneResizeSyncQueue.size > 0) {
+    schedulePaneResizeSyncFrame();
+  }
+}
+
+function cancelPaneResizeSync(view) {
+  if (!view?.paneId) {
+    return;
+  }
+  paneResizeSyncQueue.delete(view.paneId);
+  if (paneResizeSyncQueue.size > 0) {
+    return;
+  }
+  if (paneResizeSyncTimer) {
+    clearTimeout(paneResizeSyncTimer);
+    paneResizeSyncTimer = null;
+  }
+  if (paneResizeSyncRaf) {
+    cancelAnimationFrame(paneResizeSyncRaf);
+    paneResizeSyncRaf = null;
+  }
+}
+
+function applyPaneFontToView(paneId, size) {
+  const view = state.paneViews.get(paneId);
+  if (!view) {
+    return;
+  }
+  const nextSize = clampPaneFontSize(size);
+  if (Number(view.term.options.fontSize) === nextSize) {
+    return;
+  }
+  view.term.options.fontSize = nextSize;
+  fitPaneView(view, { force: true });
+}
+
+const PANE_ACTION_COMPACT_BREAKPOINT = 1080;
+const PANE_ACTION_TIGHT_BREAKPOINT = 760;
+let paneOverflowCloseBound = false;
+let paneOverflowPositionBound = false;
+let paneOverflowOpenPaneId = null;
+
+function positionPaneOverflowMenu(paneId) {
+  const meta = state.paneMeta.get(paneId);
+  if (!meta?.actionsOverflowMenu || !meta?.actionsOverflowBtn) {
+    return;
+  }
+  if (!meta.actionsOverflowMenu.classList.contains("open")) {
+    return;
+  }
+
+  const anchor = meta.actionsOverflowBtn.getBoundingClientRect();
+  const menu = meta.actionsOverflowMenu;
+  const margin = 10;
+  ensurePanePortalElement(menu);
+
+  menu.style.width = "";
+  menu.style.minWidth = "0";
+  menu.style.maxHeight = `${Math.max(1, window.innerHeight - margin * 2)}px`;
+  menu.style.maxWidth = `${Math.max(1, window.innerWidth - margin * 2)}px`;
+  menu.style.visibility = "hidden";
+
+  const rect = menu.getBoundingClientRect();
+  const size = clampPanePortalSize(Math.min(Math.max(rect.width || 250, 250), 360), rect.height, margin);
+  const width = size.width;
+  menu.style.width = `${Math.round(width)}px`;
+  const nextRect = menu.getBoundingClientRect();
+
+  let left = anchor.right - width;
+  left = Math.max(margin, Math.min(left, window.innerWidth - margin - width));
+
+  let top = anchor.bottom + 6;
+  if (top + nextRect.height > window.innerHeight - margin) {
+    top = anchor.top - nextRect.height - 6;
+  }
+  const position = clampPanePortalPosition(left, top, width, nextRect.height, margin);
+
+  menu.style.left = `${Math.round(position.left)}px`;
+  menu.style.top = `${Math.round(position.top)}px`;
+  menu.style.visibility = "";
+}
+
+function closePaneOverflowMenus(exceptPaneId = null) {
+  for (const [paneId, meta] of state.paneMeta.entries()) {
+    if (!meta?.actionsOverflowMenu) {
+      continue;
+    }
+    if (exceptPaneId && paneId === exceptPaneId) {
+      continue;
+    }
+    meta.actionsOverflowMenu.classList.remove("open");
+    meta.actionsOverflowMenu.style.left = "";
+    meta.actionsOverflowMenu.style.top = "";
+    meta.actionsOverflowMenu.style.width = "";
+    meta.actionsOverflowMenu.style.minWidth = "";
+    meta.actionsOverflowMenu.style.maxWidth = "";
+    meta.actionsOverflowMenu.style.visibility = "";
+    meta.actionsOverflowMenu.style.maxHeight = "";
+    meta.actionsOverflowBtn?.setAttribute("aria-expanded", "false");
+  }
+  paneOverflowOpenPaneId = exceptPaneId;
+}
+
+function togglePaneOverflowMenu(paneId, forceOpen = null) {
+  const meta = state.paneMeta.get(paneId);
+  if (!meta?.actionsOverflowMenu || !meta?.actionsOverflowBtn) {
+    return false;
+  }
+  const isOpen = paneOverflowOpenPaneId === paneId && meta.actionsOverflowMenu.classList.contains("open");
+  const shouldOpen = typeof forceOpen === "boolean" ? forceOpen : !isOpen;
+  if (!shouldOpen) {
+    closePaneOverflowMenus(null);
+    meta.actionsOverflowMenu.classList.remove("open");
+    meta.actionsOverflowBtn.setAttribute("aria-expanded", "false");
+    return true;
+  }
+
+  closePaneOverflowMenus(paneId);
+  if (typeof globalThis.closeQuickCommandPanels === "function") {
+    globalThis.closeQuickCommandPanels(null);
+  }
+  document.querySelectorAll(".session-picker-dropdown").forEach((el) => el.remove());
+  ensurePanePortalElement(meta.actionsOverflowMenu);
+  meta.actionsOverflowMenu.classList.add("open");
+  meta.actionsOverflowBtn.setAttribute("aria-expanded", "true");
+  paneOverflowOpenPaneId = paneId;
+  positionPaneOverflowMenu(paneId);
+  return true;
+}
+
+function cancelPaneMoveMode() {
+  state.paneMove.sourcePaneId = null;
+  state.paneMove.targetPaneId = null;
+  state.paneMove.placement = null;
+  applyPaneSelectionStyles();
+}
+
+function updatePaneActionLayout(paneId) {
+  const meta = state.paneMeta.get(paneId);
+  const card = state.paneCards.get(paneId);
+  if (!meta || !card || !meta.actionsPrimary || !meta.actionsOverflowMenu || !meta.actionsOverflowWrap) {
+    return;
+  }
+
+  const autoEnabled = state.paneAutoResize !== false;
+  const width = card.clientWidth || 0;
+  let level = 0;
+  if (width <= 0) {
+    level = 2;
+  } else {
+    if (width <= PANE_ACTION_TIGHT_BREAKPOINT) {
+      level = 2;
+    } else if (width <= PANE_ACTION_COMPACT_BREAKPOINT) {
+      level = 1;
+    }
+  }
+
+  const startFullLabel = meta.startBtn?.dataset?.fullLabel || "Start";
+  const layoutKey = `${level}|${autoEnabled ? "1" : "0"}|${startFullLabel}`;
+  if (meta._actionLayoutKey === layoutKey) {
+    if (!meta.actionsOverflowWrap.hidden && paneOverflowOpenPaneId === paneId && meta.actionsOverflowMenu.classList.contains("open")) {
+      window.requestAnimationFrame(() => positionPaneOverflowMenu(paneId));
+    }
+    return;
+  }
+  meta._actionLayoutKey = layoutKey;
+
+  const allActionButtons = [
+    meta.fontDownBtn,
+    meta.fontUpBtn,
+    meta.splitHBtn,
+    meta.splitVBtn,
+    meta.startBtn,
+    meta.sessionPickerBtn,
+    meta.closeBtn,
+    meta.movePaneBtn,
+    meta.hidePaneBtn,
+    meta.quickBtn,
+    meta.closePaneBtn
+  ].filter(Boolean);
+
+  const primarySet = new Set();
+  if (level === 0) {
+    for (const button of allActionButtons) {
+      primarySet.add(button);
+    }
+  } else if (level === 1) {
+    [meta.startBtn, meta.movePaneBtn, meta.sessionPickerBtn, meta.quickBtn].forEach((button) => {
+      if (button) {
+        primarySet.add(button);
+      }
+    });
+  } else {
+    [meta.startBtn, meta.movePaneBtn, meta.quickBtn].forEach((button) => {
+      if (button) {
+        primarySet.add(button);
+      }
+    });
+  }
+
+  meta.actionsPrimary.innerHTML = "";
+  meta.actionsOverflowMenu.innerHTML = "";
+
+  for (const button of allActionButtons) {
+    if (primarySet.has(button)) {
+      meta.actionsPrimary.appendChild(button);
+      continue;
+    }
+    meta.actionsOverflowMenu.appendChild(button);
+  }
+
+  if (meta.autoResizeBtn) {
+    const autoLabel = autoEnabled ? "Auto On" : "Auto Off";
+    const shortcut = meta.autoResizeBtn.dataset.shortcut ?? "";
+    meta.autoResizeBtn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${paneIcon.auto}</span><span class="pane-btn-label">${autoLabel}</span>${shortcut ? `<span class="pane-btn-shortcut">${shortcut}</span>` : ""}`;
+    meta.autoResizeBtn.dataset.hasIcon = "1";
+    meta.autoResizeBtn.classList.toggle("active", autoEnabled);
+    meta.autoResizeBtn.title = autoEnabled
+      ? "Automatic compact layout is enabled"
+      : "Automatic compact layout is disabled";
+    if (level === 0) {
+      meta.actionsPrimary.appendChild(meta.autoResizeBtn);
+    } else {
+      meta.actionsOverflowMenu.prepend(meta.autoResizeBtn);
+    }
+  }
+
+  const hasOverflow = meta.actionsOverflowMenu.childElementCount > 0;
+  meta.actionsOverflowWrap.hidden = !hasOverflow;
+  if (hasOverflow) {
+    meta.actionsPrimary.appendChild(meta.actionsOverflowWrap);
+  } else {
+    meta.actionsOverflowMenu.classList.remove("open");
+    meta.actionsOverflowBtn?.setAttribute("aria-expanded", "false");
+  }
+
+  if (hasOverflow && paneOverflowOpenPaneId === paneId && meta.actionsOverflowMenu.classList.contains("open")) {
+    window.requestAnimationFrame(() => positionPaneOverflowMenu(paneId));
+  }
+
+  card.classList.toggle("pane-actions-compact", level > 0);
+  card.classList.toggle("pane-actions-tight", level > 1);
+
+  if (meta.startBtn) {
+    const isRestart = /^restart$/i.test(startFullLabel.trim());
+    const isRestore = /^restore$/i.test(startFullLabel.trim());
+    if (level > 1) {
+      const iconSvg = isRestart ? paneIcon.restart : (isRestore ? paneIcon.restore : paneIcon.start);
+      meta.startBtn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${iconSvg}</span>`;
+      meta.startBtn.classList.add("pane-btn-icon");
+      meta.startBtn.title = startFullLabel;
+      meta.startBtn.dataset.hasIcon = "1";
+    } else {
+      const iconSvg = isRestart ? paneIcon.restart : (isRestore ? paneIcon.restore : paneIcon.start);
+      const shortcut = meta.startBtn.dataset.shortcut ?? "";
+      meta.startBtn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${iconSvg}</span><span class="pane-btn-label">${startFullLabel}</span>${shortcut ? `<span class="pane-btn-shortcut">${shortcut}</span>` : ""}`;
+      meta.startBtn.dataset.hasIcon = "1";
+      meta.startBtn.classList.remove("pane-btn-icon");
+      meta.startBtn.title = startFullLabel;
+    }
+  }
+}
+
+function setPaneAutoResizeEnabled(enabled) {
+  state.paneAutoResize = Boolean(enabled);
+  localStorage.setItem(STORAGE_KEYS.paneAutoResize, state.paneAutoResize ? "1" : "0");
+  for (const paneId of state.paneCards.keys()) {
+    updatePaneActionLayout(paneId);
+  }
+  fitAllPanes({ force: true });
+}
+
+function setGlobalFontScale(scale, { resetPerPane = false } = {}) {
+  const clamped = Math.max(70, Math.min(150, Number(scale) || 100));
+  state.globalFontScale = clamped;
+  localStorage.setItem(STORAGE_KEYS.globalFontScale, String(clamped));
+
+  if (resetPerPane) {
+    state.paneFontSizes = {};
+    persistPaneFontSizes();
+  }
+
+  // Apply: default × scale% for all panes, ignoring per-pane stored delta
+  const targetSize = clampPaneFontSize(Math.round(PANE_FONT_LIMITS.default * clamped / 100));
+  for (const [paneId, view] of state.paneViews.entries()) {
+    // Update stored size so per-pane Font+/- works relative to scaled base
+    if (state.selectedWorkspaceId) {
+      setPaneFontSize(state.selectedWorkspaceId, paneId, targetSize);
+    }
+    if (Number(view.term.options.fontSize) !== targetSize) {
+      view.term.options.fontSize = targetSize;
+      fitPaneView(view, { force: true });
+    }
+  }
+
+  // Sync select element
+  const sel = document.getElementById("fontScaleSelect");
+  if (sel) {
+    sel.value = String(clamped);
+  }
+}
+
+async function syncPaneSize(paneId) {
+  if (state.paneAutoResize === false) {
+    return;
+  }
+  const view = state.paneViews.get(paneId);
+  if (!view || !view.sessionId) {
+    return;
+  }
+  if (!isPaneViewAttached(view)) {
+    return;
+  }
+  const cols = Math.max(2, view.term.cols || 120);
+  const rows = Math.max(1, view.term.rows || 24);
+  if (view.lastSyncedCols === cols && view.lastSyncedRows === rows) {
+    return;
+  }
+  if (view.resizeInFlight) {
+    view.pendingResizeSync = true;
+    return;
+  }
+  const sessionId = view.sessionId;
+  view.resizeInFlight = true;
+  try {
+    await rpc("session.resize", { session_id: sessionId, cols, rows });
+    if (view.sessionId === sessionId) {
+      view.lastSyncedCols = cols;
+      view.lastSyncedRows = rows;
+    }
+  } catch (err) {
+    if (isDetachedInputError(err)) {
+      markPaneDetached(view, "Restart this pane to attach a new terminal");
+      return;
+    }
+    throw err;
+  } finally {
+    view.resizeInFlight = false;
+    if (view.pendingResizeSync) {
+      view.pendingResizeSync = false;
+      schedulePaneResize(view);
+    }
+  }
+}
+
+function inputFlushDelayForData(data) {
+  if (!data) {
+    return INPUT_FLUSH_DELAY_MS;
+  }
+  if (data.length > INPUT_BULK_THRESHOLD) {
+    return INPUT_FLUSH_DELAY_MS;
+  }
+  if (/[\r\n\x1b\x7f\b]/.test(data) || data.length <= 8) {
+    return INPUT_INTERACTIVE_FLUSH_DELAY_MS;
+  }
+  return Math.min(4, INPUT_FLUSH_DELAY_MS);
+}
+
+function runScheduledPaneInputFlush(view, token) {
+  if (!view || view.inputFlushToken !== token) {
+    return;
+  }
+  view.flushTimer = null;
+  view.inputFlushDelayMs = null;
+  view.inputFlushScheduled = false;
+  void flushPaneInput(view);
+}
+
+function schedulePaneInputFlush(view, delayMs = INPUT_FLUSH_DELAY_MS) {
+  if (!view || view.inputFlushInFlight) {
+    return;
+  }
+  const normalizedDelay = Math.max(0, Number(delayMs) || 0);
+  if (view.inputFlushScheduled) {
+    if (view.inputFlushDelayMs !== null && view.inputFlushDelayMs <= normalizedDelay) {
+      return;
+    }
+    if (view.flushTimer) {
+      clearTimeout(view.flushTimer);
+      view.flushTimer = null;
+    }
+  }
+
+  view.inputFlushDelayMs = normalizedDelay;
+  view.inputFlushScheduled = true;
+  const token = (view.inputFlushToken ?? 0) + 1;
+  view.inputFlushToken = token;
+  if (normalizedDelay === 0) {
+    if (typeof queueMicrotask === "function") {
+      queueMicrotask(() => runScheduledPaneInputFlush(view, token));
+    } else {
+      Promise.resolve().then(() => runScheduledPaneInputFlush(view, token));
+    }
+    return;
+  }
+  view.flushTimer = setTimeout(() => runScheduledPaneInputFlush(view, token), normalizedDelay);
+}
+
+function clearPaneInputPerfSummary(view, { flush = false, reason = "clear" } = {}) {
+  if (!view) {
+    return;
+  }
+  if (view.inputPerfTimer) {
+    clearTimeout(view.inputPerfTimer);
+    view.inputPerfTimer = null;
+  }
+  if (flush) {
+    flushPaneInputPerfSummary(view, reason);
+  } else {
+    view.inputPerfSummary = null;
+  }
+}
+
+function flushPaneInputPerfSummary(view, reason = "interval") {
+  const summary = view?.inputPerfSummary;
+  if (!summary || summary.count <= 0) {
+    return;
+  }
+  if (view.inputPerfTimer) {
+    clearTimeout(view.inputPerfTimer);
+    view.inputPerfTimer = null;
+  }
+  view.inputPerfSummary = null;
+  logPerf("input.flush.summary", {
+    pane_id: view.paneId,
+    session_id: summary.sessionId,
+    count: summary.count,
+    bytes: summary.bytes,
+    max_queued: summary.maxQueued,
+    avg_latency_ms: Number((summary.latencySum / summary.count).toFixed(2)),
+    max_latency_ms: Number(summary.maxLatency.toFixed(2)),
+    reason
+  });
+}
+
+function recordPaneInputPerf(view, sessionId, queued, sent, dropped, latency) {
+  if (!view) {
+    return;
+  }
+  const roundedLatency = Number(latency.toFixed(2));
+  const shouldLogDetail = dropped > 0
+    || sent <= 0
+    || queued > INPUT_BULK_THRESHOLD
+    || latency >= INPUT_PERF_DETAIL_LATENCY_MS;
+
+  if (shouldLogDetail) {
+    flushPaneInputPerfSummary(view, "detail");
+    if (sent > 0) {
+      logPerf("input.latency", {
+        pane_id: view.paneId,
+        session_id: sessionId,
+        latency_ms: roundedLatency
+      });
+    }
+    logPerf("input.flush", {
+      pane_id: view.paneId,
+      session_id: sessionId,
+      queued,
+      sent,
+      dropped,
+      in_flight_ms: roundedLatency
+    });
+    return;
+  }
+
+  const now = performance.now();
+  let summary = view.inputPerfSummary;
+  if (!summary || summary.sessionId !== sessionId || now - summary.startedAt >= INPUT_PERF_SUMMARY_INTERVAL_MS) {
+    flushPaneInputPerfSummary(view, summary ? "session" : "start");
+    summary = {
+      sessionId,
+      startedAt: now,
+      count: 0,
+      bytes: 0,
+      maxQueued: 0,
+      latencySum: 0,
+      maxLatency: 0
+    };
+    view.inputPerfSummary = summary;
+  }
+
+  summary.count += 1;
+  summary.bytes += queued;
+  summary.maxQueued = Math.max(summary.maxQueued, queued);
+  summary.latencySum += latency;
+  summary.maxLatency = Math.max(summary.maxLatency, latency);
+
+  if (summary.count >= INPUT_PERF_SUMMARY_MAX_SAMPLES) {
+    flushPaneInputPerfSummary(view, "count");
+    return;
+  }
+
+  if (!view.inputPerfTimer) {
+    view.inputPerfTimer = setTimeout(() => flushPaneInputPerfSummary(view, "timer"), INPUT_PERF_SUMMARY_INTERVAL_MS);
+  }
+}
+
+function queuePaneInput(view, data) {
+  if (!view.sessionId || !data) {
+    return;
+  }
+
+  view.pendingInput += data;
+  paneDebug("[input] queued", {
+    pane: view.paneId?.slice(0, 8),
+    session: view.sessionId?.slice(0, 8),
+    bytes: data.length,
+    pending: view.pendingInput.length
+  });
+  if (view.inputFlushInFlight) {
+    return;
+  }
+
+  schedulePaneInputFlush(view, inputFlushDelayForData(data));
+}
+
+function discardPendingPaneInput(view) {
+  view.pendingInput = "";
+  view.pendingPromptWrite?.reject(new Error("터미널 세션이 변경되었습니다."));
+  view.pendingPromptWrite = null;
+}
+
+function isDetachedInputError(err) {
+  return String(err?.message ?? err).toLowerCase().includes("pty session not attached");
+}
+
+async function flushPaneInput(view) {
+  if (view.inputFlushInFlight) {
+    return;
+  }
+
+  if (!view.sessionId || !view.pendingInput) {
+    return;
+  }
+
+  view.inputFlushInFlight = true;
+  try {
+    while (!view.disposed && view.sessionId && view.pendingInput) {
+      const sessionId = view.sessionId;
+      const payload = view.pendingInput;
+      const promptWrite = view.pendingPromptWrite;
+      const queued = payload.length;
+      view.pendingInput = "";
+      view.pendingPromptWrite = null;
+      const started = performance.now();
+
+      try {
+        await rpc("session.write", { session_id: sessionId, data: payload });
+        promptWrite?.resolve();
+        const latency = performance.now() - started;
+        state.metrics.input_latency_ms.push(latency);
+        if (state.metrics.input_latency_ms.length > 50) {
+          state.metrics.input_latency_ms.shift();
+        }
+        recordPaneInputPerf(view, sessionId, queued, queued, 0, latency);
+        if (!state.useStream && !view.disposed && view.sessionId === sessionId) {
+          schedulePanePolling(view, PANE_POLL_ACTIVE_DELAY_MS, { reset: true });
+        }
+        paneDebug("[input] write ok", {
+          pane: view.paneId?.slice(0, 8),
+          session: sessionId.slice(0, 8),
+          bytes: queued,
+          latency: Number(latency.toFixed(2))
+        });
+      } catch (err) {
+        promptWrite?.reject(err);
+        if (view.disposed || view.sessionId !== sessionId) {
+          continue;
+        }
+        const msg = err?.message ?? String(err);
+        if (isDetachedInputError(err)) {
+          markPaneDetached(view, "Restart this pane to attach a new terminal");
+          setStatus("Terminal detached. Restart the pane to continue input.", true);
+        } else {
+          setStatus(`Terminal input error: ${msg}`, true);
+        }
+        const latency = performance.now() - started;
+        recordPaneInputPerf(view, sessionId, queued, 0, queued, latency);
+        paneDebug("[input] write failed", {
+          pane: view.paneId?.slice(0, 8),
+          session: sessionId.slice(0, 8),
+          bytes: queued,
+          message: msg
+        });
+        break;
+      }
+    }
+  } finally {
+    view.inputFlushInFlight = false;
+    if (!view.disposed && view.sessionId && view.pendingInput && !view.inputFlushScheduled) {
+      schedulePaneInputFlush(view, inputFlushDelayForData(view.pendingInput));
+    }
+  }
+}
+
+function writeToPane(paneId, data) {
+  const view = state.paneViews.get(paneId);
+  if (!view || !data) {
+    return;
+  }
+  queuePaneInput(view, data);
+}
+
+function isTerminalPromptShortcut(ev) {
+  return ev.ctrlKey && ev.altKey && !ev.shiftKey && !ev.metaKey && ev.key === "Enter";
+}
+
+function terminalPromptPayload(text, preserveLineBreaks, bracketedPasteMode) {
+  const value = text.replace(/\r\n?/g, "\n");
+  if (/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(value)) {
+    throw new Error("입력에 터미널 제어 문자가 포함되어 있습니다.");
+  }
+  if (!preserveLineBreaks) {
+    return value.replace(/[\n\t]+/g, " ");
+  }
+  if (!bracketedPasteMode) {
+    throw new Error("이 세션은 여러 줄 붙여넣기를 지원하지 않습니다. 한 줄로 편집하거나 복사해 두세요.");
+  }
+  return `\x1b[200~${value}\x1b[201~`;
+}
+
+function bindTerminalPrompt() {
+  const dialog = $("terminalPrompt");
+  const form = $("terminalPromptForm");
+  const editor = $("terminalPromptText");
+  const error = $("terminalPromptError");
+  const close = $("terminalPromptClose");
+  const insert = $("terminalPromptInsert");
+  const insertMultiline = $("terminalPromptMultiline");
+  const multilineHint = $("terminalPromptMultilineHint");
+  let target = null;
+  let composing = false;
+  let writing = false;
+
+  const showError = (message) => {
+    error.textContent = message;
+    error.hidden = !message;
+  };
+  const updateInsertActions = () => {
+    const hasLineBreaks = /[\n\t]/.test(editor.value);
+    insert.textContent = hasLineBreaks ? "한 줄로 삽입" : "터미널에 삽입";
+    insertMultiline.hidden = multilineHint.hidden = !hasLineBreaks;
+  };
+  const open = () => {
+    if (dialog.open) return;
+    const view = state.paneViews.get(state.selectedPaneId);
+    if (!view?.sessionId || view.detached || !isPaneViewAttached(view)) {
+      setStatus("먼저 실행 중인 터미널을 선택하세요.", true);
+      return;
+    }
+    target = { view, sessionId: view.sessionId };
+    editor.value = view.promptDraft ?? "";
+    updateInsertActions();
+    composing = false;
+    showError("");
+    $("terminalPromptTarget").textContent = `Pane ${view.paneId.slice(0, 8)} · 세션 ${view.sessionId.slice(0, 8)}`;
+    dialog.showModal();
+    editor.focus();
+  };
+
+  $("terminalPromptBtn").addEventListener("click", open);
+  document.addEventListener("keydown", (ev) => {
+    if (!ev.defaultPrevented && !ev.isComposing && ev.keyCode !== 229 && isTerminalPromptShortcut(ev)) {
+      ev.preventDefault();
+      open();
+    }
+  });
+  editor.addEventListener("compositionstart", () => { composing = true; });
+  editor.addEventListener("compositionend", () => { composing = false; });
+  editor.addEventListener("input", () => {
+    if (target) target.view.promptDraft = editor.value;
+    updateInsertActions();
+  });
+  editor.addEventListener("keydown", (ev) => {
+    if (ev.ctrlKey && !ev.altKey && !ev.shiftKey && ev.key === "Enter"
+      && !ev.isComposing && ev.keyCode !== 229 && !composing) {
+      ev.preventDefault();
+      form.requestSubmit(insert);
+    }
+  });
+  close.addEventListener("click", () => dialog.close());
+  dialog.addEventListener("cancel", (ev) => {
+    if (composing || writing) ev.preventDefault();
+  });
+  dialog.addEventListener("close", () => {
+    if (dialog.open || !target) return;
+    const { view, sessionId } = target;
+    target = null;
+    if (view.sessionId === sessionId && state.selectedPaneId === view.paneId && isPaneViewAttached(view)) {
+      focusPaneView(view);
+    }
+  });
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    if (!target || writing || composing || !editor.value) return;
+    const { view, sessionId } = target;
+    showError("");
+    try {
+      if (view.sessionId !== sessionId || view.detached
+        || state.paneViews.get(view.paneId) !== view || !isPaneViewAttached(view)) {
+        throw new Error("대상 세션이 변경되었습니다. 입력창을 다시 열어 주세요.");
+      }
+      const data = terminalPromptPayload(editor.value, ev.submitter === insertMultiline, view.term.modes.bracketedPasteMode);
+      writing = true;
+      editor.readOnly = close.disabled = insert.disabled = insertMultiline.disabled = true;
+      await new Promise((resolve, reject) => {
+        view.pendingPromptWrite = { resolve, reject };
+        queuePaneInput(view, data);
+      });
+      view.promptDraft = "";
+      editor.value = "";
+      dialog.close();
+      setStatus("터미널에 입력을 전달했습니다.");
+    } catch (err) {
+      const message = err?.message ?? String(err);
+      showError(/pipe disconnected|RPC timeout/.test(message)
+        ? "전달 여부를 확인할 수 없습니다. 터미널 내용을 확인한 뒤 다시 시도하세요."
+        : message);
+      editor.focus();
+    } finally {
+      writing = false;
+      editor.readOnly = close.disabled = insert.disabled = insertMultiline.disabled = false;
+    }
+  });
+}
+
+function bindViewToSession(view, sessionId) {
+  const nextSession = sessionId ?? null;
+
+  // If same session and already bound, just sync PTY size
+  if (view.sessionId === nextSession && view._boundToStream) {
+    return;
+  }
+
+  paneWarn("[bindView] REBIND pane:", view.paneId?.slice(0,8),
+    "prevSession:", view.sessionId?.slice(0,8),
+    "nextSession:", nextSession?.slice(0,8),
+    "_boundToStream:", view._boundToStream,
+    "sameId:", view.sessionId === nextSession,
+    "stack:", new Error().stack?.split("\n")[2]?.trim()
+  );
+
+  const previousSession = view.sessionId;
+  if (previousSession !== nextSession) {
+    view.detached = false;
+  }
+  if (previousSession && previousSession !== nextSession) {
+    clearPromptDetectorSession(previousSession);
+  }
+
+  // Stop any existing polling/timers
+  stopPanePolling(view);
+  if (view.flushTimer) {
+    clearTimeout(view.flushTimer);
+    view.flushTimer = null;
+  }
+  view.inputFlushScheduled = false;
+  view.inputFlushToken = (view.inputFlushToken ?? 0) + 1;
+  clearPaneInputPerfSummary(view, { flush: true, reason: "bind" });
+  cancelPaneOutputFlush(view);
+  if (view.fitRaf) {
+    cancelAnimationFrame(view.fitRaf);
+    view.fitRaf = null;
+  }
+  clearPaneFitRetry(view);
+
+  discardPendingPaneInput(view);
+  resetPaneOutputQueue(view);
+  view.inputFlushDelayMs = null;
+  view.tailRestoreSessionId = null;
+  resetDeferredStreamOutput(view);
+  view.lastSyncedCols = 0;
+  view.lastSyncedRows = 0;
+  view.resizeInFlight = false;
+  view.pendingResizeSync = false;
+  view.readBusy = false;
+  view.sessionId = nextSession;
+
+  // If the xterm buffer already contains this session's output (e.g. returning to a workspace
+  // after the view was stashed in the workspace cache), skip term.reset() to preserve content.
+  const sameRendered = nextSession !== null && nextSession === view.renderedSessionId;
+  if (!sameRendered) {
+    if (view.outputWriteInFlight) {
+      view.resetTerminalAfterWrite = true;
+    } else {
+      view.term.reset();
+    }
+    view.renderedSessionId = nextSession;
+    view.hasOutput = false;
+  }
+
+  if (view.sessionId) {
+    if (sameRendered && view.hasOutput) {
+      hidePaneOverlay(view);
+    } else if (view.detached) {
+      setPaneOverlay(view, "detached", "Session detached", "Restart this pane to attach a new terminal", "Restart");
+    } else {
+      setPaneOverlay(view, "running", "Session running", "No output yet", "Restart");
+    }
+    if (state.useStream) {
+      wincmuxTauriRestoreOutput(view);
+    } else if (!sameRendered) {
+      restoreSessionTail(view, view.sessionId);
+    }
+    if (!state.useStream) {
+      startPanePolling(view);
+    }
+    view._boundToStream = state.useStream;
+    schedulePaneResize(view);
+  } else {
+    view._boundToStream = false;
+    const dormant = state.dormantPaneSessions[view.paneId] ?? null;
+    if (dormant?.spawn_cmd) {
+      setPaneOverlay(view, "dormant", "Restore available", dormant.spawn_cmd, "Restore");
+    } else {
+      setPaneOverlay(view, "empty", "No session running", "Start a terminal in this pane", "Start");
+    }
+  }
+}
+
+function restoreSessionTail(view, sessionId) {
+  const restoreId = sessionId;
+  view.tailRestoreSessionId = restoreId;
+  resetDeferredStreamOutput(view);
+  rpc("session.tail", { session_id: restoreId, max_bytes: 65536 })
+    .then((res) => {
+      if (view.sessionId !== restoreId || view.renderedSessionId !== restoreId) {
+        return;
+      }
+      const tailOutput = res?.output ?? "";
+      if (tailOutput) {
+        enqueueStreamOutput(view.paneId, tailOutput, { sessionId: restoreId, source: "tail" });
+      }
+      const liveOutput = trimRestoredOutputPrefix(tailOutput, takeDeferredStreamOutput(view));
+      view.tailRestoreSessionId = null;
+      if (liveOutput) {
+        enqueueStreamOutput(view.paneId, liveOutput, { sessionId: restoreId, source: "stream" });
+      }
+    })
+    .catch(() => {
+      if (view.sessionId === restoreId && view.deferredStreamLength) {
+        const liveOutput = takeDeferredStreamOutput(view);
+        view.tailRestoreSessionId = null;
+        enqueueStreamOutput(view.paneId, liveOutput, { sessionId: restoreId, source: "stream" });
+      }
+    })
+    .finally(() => {
+      if (view.tailRestoreSessionId === restoreId) {
+        view.tailRestoreSessionId = null;
+        resetDeferredStreamOutput(view);
+      }
+    });
+}
+
+function startPanePolling(view) {
+  if (!view?.sessionId || state.useStream) {
+    return;
+  }
+
+  schedulePanePolling(view, PANE_POLL_IDLE_DELAY_MS);
+}
+
+function stopPanePolling(view) {
+  if (!view?.poller) {
+    return;
+  }
+  clearTimeout(view.poller);
+  view.poller = null;
+}
+
+function panePollJitter(view) {
+  if (typeof view?.pollJitterMs === "number") {
+    return view.pollJitterMs;
+  }
+  let hash = 0;
+  const id = String(view?.paneId ?? "");
+  for (let index = 0; index < id.length; index += 1) {
+    hash = (hash * 31 + id.charCodeAt(index)) % PANE_POLL_JITTER_MS;
+  }
+  view.pollJitterMs = hash;
+  return hash;
+}
+
+function schedulePanePolling(view, delayMs = PANE_POLL_IDLE_DELAY_MS, options = {}) {
+  if (!view?.sessionId || state.useStream) {
+    return;
+  }
+  if (view.poller && !options.reset) {
+    return;
+  }
+  if (view.poller) {
+    stopPanePolling(view);
+  }
+  const jitter = delayMs >= PANE_POLL_IDLE_DELAY_MS ? panePollJitter(view) : 0;
+  view.poller = window.setTimeout(() => {
+    view.poller = null;
+    void pollPaneOutput(view);
+  }, Math.max(0, delayMs + jitter));
+}
+
+async function pollPaneOutput(view) {
+  if (!view?.sessionId || state.useStream) {
+    return;
+  }
+  if (view.readBusy) {
+    schedulePanePolling(view, PANE_POLL_ACTIVE_DELAY_MS);
+    return;
+  }
+
+  view.readBusy = true;
+  let nextDelay = PANE_POLL_IDLE_DELAY_MS;
+  try {
+    const activeSessionId = view.sessionId;
+    if (!activeSessionId) {
+      return;
+    }
+    const res = await rpc("session.read", {
+      session_id: activeSessionId,
+      max_bytes: 16384
+    });
+    if (res?.output) {
+      nextDelay = PANE_POLL_ACTIVE_DELAY_MS;
+      queuePromptNotificationFromOutput(activeSessionId, res.output, selectedWorkspace()?.id ?? null);
+      enqueueStreamOutput(view.paneId, res.output, { sessionId: activeSessionId, source: "poll" });
+    }
+  } catch (err) {
+    const message = String(err?.message ?? err);
+    if (message.includes("session not found")) {
+      // Session ended: stop polling but keep terminal output visible (don't reset)
+      stopPanePolling(view);
+      view.sessionId = null;
+      delete state.paneSessions[view.paneId];
+      refreshPaneBindings();
+    } else {
+      nextDelay = PANE_POLL_ERROR_DELAY_MS;
+      setStatus(`Terminal read error: ${message}`, true);
+    }
+  } finally {
+    view.readBusy = false;
+    if (view.sessionId && !state.useStream) {
+      schedulePanePolling(view, nextDelay);
+    }
+  }
+}
+
+function createPaneLeaf(node, hosts) {
+  const paneId = node.pane_id;
+  const card = document.createElement("div");
+  card.className = "pane-leaf";
+  card.dataset.paneId = paneId;
+  const header = document.createElement("div");
+  header.className = "pane-header";
+  const idEl = document.createElement("span");
+  idEl.className = "pane-id";
+  idEl.textContent = paneId.slice(0, 8);
+  const unreadBadgeEl = document.createElement("span");
+  unreadBadgeEl.className = "pane-unread-badge";
+  unreadBadgeEl.hidden = true;
+  const groupBadgeEl = document.createElement("button");
+  groupBadgeEl.type = "button";
+  groupBadgeEl.className = "pane-group-badge";
+  groupBadgeEl.hidden = true;
+  groupBadgeEl.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    openPaneGroupMenu(paneId, groupBadgeEl);
+  });
+  const idWrap = document.createElement("div");
+  idWrap.className = "pane-id-wrap";
+  idWrap.append(idEl, groupBadgeEl, unreadBadgeEl);
+  const statusEl = document.createElement("span");
+  statusEl.className = "pane-session";
+  statusEl.textContent = "No session";
+  const statusWrap = document.createElement("div");
+  statusWrap.className = "pane-status-wrap";
+  statusWrap.append(statusEl);
+  const actions = document.createElement("div");
+  actions.className = "pane-actions";
+  const actionsPrimary = document.createElement("div");
+  actionsPrimary.className = "pane-actions-primary";
+  const actionsOverflowWrap = document.createElement("div");
+  actionsOverflowWrap.className = "pane-overflow";
+  const actionsOverflowBtn = document.createElement("button");
+  actionsOverflowBtn.className = "pane-btn pane-overflow-btn";
+  actionsOverflowBtn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${paneIcon.more}</span>`;
+  actionsOverflowBtn.dataset.hasIcon = "1";
+  actionsOverflowBtn.title = "More actions (Ctrl+Alt+M)";
+  actionsOverflowBtn.setAttribute("aria-label", "More actions (Ctrl+Alt+M)");
+  actionsOverflowBtn.setAttribute("aria-expanded", "false");
+  const actionsOverflowMenu = document.createElement("div");
+  actionsOverflowMenu.className = "pane-overflow-menu";
+  actionsOverflowWrap.append(actionsOverflowBtn);
+  document.body.appendChild(actionsOverflowMenu);
+  actions.append(actionsPrimary);
+  const makeBtn = (text, title, onClick, cls = "pane-btn", iconHtml = "", shortcut = "") => {
+    const btn = document.createElement("button");
+    btn.className = cls;
+    if (iconHtml) {
+      btn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${iconHtml}</span><span class="pane-btn-label">${text}</span>${shortcut ? `<span class="pane-btn-shortcut">${shortcut}</span>` : ""}`;
+      btn.dataset.hasIcon = "1";
+    } else {
+      btn.textContent = text;
+    }
+    if (shortcut) {
+      btn.dataset.shortcut = shortcut;
+    }
+    btn.title = title || text;
+    btn.addEventListener("click", onClick);
+    return btn;
+  };
+  const fontDownBtn = makeBtn("Font -", "Decrease font size", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    paneHandlers.adjustPaneFont(paneId, -PANE_FONT_LIMITS.step).catch((err) => setStatus(String(err), true));
+  }, "pane-btn", paneIcon.fontDown, "Ctrl+-");
+  const fontUpBtn = makeBtn("Font +", "Increase font size", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    paneHandlers.adjustPaneFont(paneId, PANE_FONT_LIMITS.step).catch((err) => setStatus(String(err), true));
+  }, "pane-btn", paneIcon.fontUp, "Ctrl+=");
+  const splitHBtn = makeBtn("Split Right", "Split horizontally (add column)", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    paneHandlers.splitPane(paneId, "horizontal").catch((err) => setStatus(String(err), true));
+  }, "pane-btn", paneIcon.splitRight, "Ctrl+Alt+\\");
+  const splitVBtn = makeBtn("Split Down", "Split vertically (add row)", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    paneHandlers.splitPane(paneId, "vertical").catch((err) => setStatus(String(err), true));
+  }, "pane-btn", paneIcon.splitDown, "Ctrl+Alt+-");
+  const startBtn = makeBtn("Start", "Start session", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    paneHandlers.startSessionForPane(paneId, { force: true }).catch((err) => setStatus(String(err), true));
+  }, "pane-btn pane-btn-primary", paneIcon.start, "Ctrl+Alt+T");
+  startBtn.dataset.fullLabel = "Start";
+  const sessionPickerBtn = makeBtn("Sessions", "Manage running, dormant, and previous sessions", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    openSessionPicker(paneId, sessionPickerBtn);
+  }, "pane-btn", paneIcon.sessions, "Menu");
+  sessionPickerBtn.className = "pane-btn session-picker-btn";
+  const closeBtn = makeBtn("Close Session", "Close terminal session", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    paneHandlers.closeSessionForPane(paneId).catch((err) => setStatus(String(err), true));
+  }, "pane-btn", paneIcon.closeSession, "Ctrl+Alt+R");
+  const movePaneBtn = makeBtn("Move Pane", "Move this pane to another position", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    closePaneOverflowMenus(null);
+    paneHandlers.startPaneMove(paneId).catch((err) => setStatus(String(err), true));
+  }, "pane-btn", paneIcon.movePane, "Ctrl+Alt+P");
+  const closePaneBtn = makeBtn("Close Pane", "Close pane", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    paneHandlers.closePane(paneId).catch((err) => setStatus(String(err), true));
+  }, "pane-btn pane-btn-danger", paneIcon.closePane, "Ctrl+Alt+Q");
+  const hidePaneBtn = makeBtn("Hide Pane", "Hide this pane without ending session", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    paneHandlers.hidePane(paneId).catch((err) => setStatus(String(err), true));
+  }, "pane-btn", paneIcon.hidePane, "Ctrl+Alt+W");
+  const quickBtn = makeBtn("", "Quick command", () => {});
+  quickBtn.classList.add("quickcmd-toggle");
+  quickBtn.setAttribute("aria-label", "Quick command");
+  quickBtn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${paneIcon.quick}</span>`;
+  quickBtn.dataset.hasIcon = "1";
+  const autoResizeBtn = makeBtn("", "Toggle automatic compact layout", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    setPaneAutoResizeEnabled(!(state.paneAutoResize !== false));
+    setStatus(state.paneAutoResize !== false ? "Auto resize enabled" : "Auto resize disabled");
+  }, "pane-btn pane-btn-auto", paneIcon.auto);
+  actionsOverflowBtn.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    togglePaneOverflowMenu(paneId);
+  });
+  actionsOverflowMenu.addEventListener("click", () => {
+    actionsOverflowMenu.classList.remove("open");
+    actionsOverflowMenu.style.left = "";
+    actionsOverflowMenu.style.top = "";
+    actionsOverflowMenu.style.width = "";
+    actionsOverflowMenu.style.minWidth = "";
+    actionsOverflowMenu.style.maxWidth = "";
+    actionsOverflowMenu.style.visibility = "";
+    actionsOverflowMenu.style.maxHeight = "";
+    paneOverflowOpenPaneId = null;
+    actionsOverflowBtn.setAttribute("aria-expanded", "false");
+  });
+
+  if (!paneOverflowCloseBound) {
+    paneOverflowCloseBound = true;
+    document.addEventListener("pointerdown", (ev) => {
+      const target = ev.target;
+      if (target instanceof HTMLElement && (target.closest(".pane-overflow") || target.closest(".pane-overflow-menu"))) {
+        return;
+      }
+      closePaneOverflowMenus();
+    });
+  }
+  if (!paneOverflowPositionBound) {
+    paneOverflowPositionBound = true;
+    const reposition = () => {
+      if (paneOverflowOpenPaneId) {
+        positionPaneOverflowMenu(paneOverflowOpenPaneId);
+      }
+    };
+    window.addEventListener("resize", reposition);
+    window.addEventListener("scroll", reposition, true);
+  }
+  header.append(idWrap, statusWrap, actions);
+  const quickPanel = document.createElement("div");
+  quickPanel.className = "quickcmd-popover";
+  document.body.appendChild(quickPanel);
+  const terminalHost = document.createElement("div");
+  terminalHost.className = "pane-terminal-host";
+  card.append(header, terminalHost);
+  card.addEventListener("pointermove", (ev) => {
+    const sourcePaneId = state.paneMove?.sourcePaneId ?? null;
+    if (!sourcePaneId || sourcePaneId === paneId) {
+      return;
+    }
+    setPaneMoveTarget(paneId, paneDropPlacement(card, ev.clientX, ev.clientY));
+  });
+  card.addEventListener("pointerleave", () => {
+    clearPaneMoveTarget(paneId);
+  });
+  card.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0) {
+      return;
+    }
+    const target = ev.target;
+    if (target instanceof HTMLElement && target.closest("button")) {
+      return;
+    }
+    if (state.paneMove.sourcePaneId) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (state.paneMove.sourcePaneId === paneId) {
+        cancelPaneMoveMode();
+        setStatus("Pane move cancelled");
+        return;
+      }
+      const placement = paneDropPlacement(card, ev.clientX, ev.clientY);
+      setPaneMoveTarget(paneId, placement);
+      paneHandlers.movePaneToPlacement(state.paneMove.sourcePaneId, paneId, placement)
+        .catch((err) => setStatus(String(err), true));
+      return;
+    }
+    const isTerminalClick = target instanceof HTMLElement && Boolean(target.closest(".pane-terminal-host"));
+    selectPane(paneId, { persist: true, focusTerm: false })
+      .then(() => {
+        if (isTerminalClick) {
+          focusPaneTerm(paneId);
+        }
+      })
+      .catch((err) => setStatus(String(err), true));
+  });
+  hosts.push({ paneId, host: terminalHost });
+  state.paneCards.set(paneId, card);
+  state.paneMeta.set(paneId, {
+    actionsPrimary,
+    actionsOverflowWrap,
+    actionsOverflowBtn,
+    actionsOverflowMenu,
+    statusEl,
+    groupBadgeEl,
+    splitHBtn,
+    splitVBtn,
+    startBtn,
+    sessionPickerBtn,
+    closeBtn,
+    movePaneBtn,
+    closePaneBtn,
+    hidePaneBtn,
+    fontDownBtn,
+    fontUpBtn,
+    autoResizeBtn,
+    quickBtn,
+    quickPanel,
+    unreadBadgeEl
+  });
+  bindQuickCommandPanelSafe(paneId, quickPanel, quickBtn);
+  updatePaneActionLayout(paneId);
+  return card;
+}
+
+function renderPaneNode(node, paneMap, hosts) {
+  if (!node.split) {
+    if (state.selectedGroupId) {
+      const group = typeof groupForPane === "function" ? groupForPane(node.pane_id) : null;
+      if (group?.id !== state.selectedGroupId) {
+        return null;
+      }
+    }
+    return createPaneLeaf(node, hosts);
+  }
+
+  const wrap = document.createElement("div");
+  wrap.className = `pane-split ${node.split.direction}`;
+
+  const first = paneMap.get(node.split.first);
+  const second = paneMap.get(node.split.second);
+  if (!first || !second) {
+    const broken = document.createElement("div");
+    broken.className = "muted";
+    broken.textContent = "Invalid split state";
+    wrap.appendChild(broken);
+    return wrap;
+  }
+
+  const firstNode = renderPaneNode(first, paneMap, hosts);
+  const secondNode = renderPaneNode(second, paneMap, hosts);
+  if (!firstNode && !secondNode) {
+    return null;
+  }
+  if (!firstNode) {
+    return secondNode;
+  }
+  if (!secondNode) {
+    return firstNode;
+  }
+  firstNode.classList.add("pane-split-item");
+  secondNode.classList.add("pane-split-item");
+
+  const divider = document.createElement("div");
+  divider.className = `pane-divider ${node.split.direction}`;
+
+  wrap.append(firstNode, divider, secondNode);
+  const splitKey = `${state.selectedWorkspaceId ?? "none"}:${node.pane_id}`;
+  makeSplitResizableSafe(wrap, firstNode, secondNode, divider, node.split.direction, splitKey);
+  applyStoredSplitRatioSafe(firstNode, secondNode, splitKey, node.split.direction);
+  return wrap;
+}
+
+function createPaneView(paneId, host) {
+  const fontSize = currentPaneFontSize(state.selectedWorkspaceId, paneId);
+  const term = new window.Terminal({
+    convertEol: false,
+    cursorBlink: false,
+    fontFamily: PANE_TERMINAL_FONT_FAMILY,
+    fontSize,
+    letterSpacing: 0,
+    lineHeight: 1.28,
+    scrollback: 5000,
+    scrollOnUserInput: true,
+    scrollSensitivity: 1,
+    theme: {
+      background: "#060b11",
+      foreground: "#e8edf7"
+    }
+  });
+
+  const fitAddon = new window.FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  if (state.terminal.unicode_width === "unicode11" && window.Unicode11Addon?.Unicode11Addon) {
+    try {
+      const unicode11Addon = new window.Unicode11Addon.Unicode11Addon();
+      term.loadAddon(unicode11Addon);
+      if (term.unicode?.activeVersion !== undefined) {
+        term.unicode.activeVersion = "11";
+      }
+    } catch {
+      // ignore unicode addon failures
+    }
+  }
+  term.open(host);
+
+  const view = {
+    paneId,
+    host,
+    term,
+    fitAddon,
+    sessionId: null,
+    renderedSessionId: null,  // tracks which session's output is actually in the xterm buffer
+    hasOutput: false,
+    poller: null,
+    pollJitterMs: null,
+    observer: null,
+    pendingInput: "",
+    pendingPromptWrite: null,
+    flushTimer: null,
+    inputFlushDelayMs: null,
+    inputFlushScheduled: false,
+    inputFlushToken: 0,
+    inputPerfSummary: null,
+    inputPerfTimer: null,
+    inputFlushInFlight: false,
+    outputFlushQueued: false,
+    outputQueueChunks: [],
+    outputQueueHead: 0,
+    outputQueueLength: 0,
+    outputDropCount: 0,
+    outputDropBytes: 0,
+    outputDropLastLogAt: 0,
+    outputWriteInFlight: false,
+    resetTerminalAfterWrite: false,
+    tailRestoreSessionId: null,
+    deferredStreamChunks: [],
+    deferredStreamHead: 0,
+    deferredStreamLength: 0,
+    fitRaf: null,
+    fitRetryTimer: null,
+    fitStabilizeTimers: [],
+    forceNextFit: false,
+    lastFitWidth: 0,
+    lastFitHeight: 0,
+    lastSyncedCols: 0,
+    lastSyncedRows: 0,
+    resizeInFlight: false,
+    pendingResizeSync: false,
+    readBusy: false,
+    detached: false,
+    overlayEl: null,
+    overlayTitleEl: null,
+    overlayDetailEl: null,
+    overlayActionEl: null
+  };
+  ensurePaneOverlay(view);
+  setPaneOverlay(view, "empty", "No session running", "Start a terminal in this pane", "Start");
+
+  term.attachCustomKeyEventHandler((ev) => {
+    const key = ev.key?.toLowerCase?.() ?? "";
+    if (ev.type !== "keydown") {
+      return true;
+    }
+    if (ev.isComposing || ev.keyCode === 229 || key === "process") {
+      return true;
+    }
+    if (isTerminalPromptShortcut(ev)) {
+      ev.preventDefault();
+      $("terminalPromptBtn").click();
+      return false;
+    }
+
+    if ((ev.ctrlKey || ev.metaKey) && ev.key === "Tab") {
+      ev.preventDefault();
+      void selectAdjacentPane(ev.shiftKey ? -1 : 1, { focusTerm: true }).catch((err) => setStatus(String(err?.message ?? err), true));
+      return false;
+    }
+
+    const ctrl = ev.ctrlKey || ev.metaKey;
+    if (ctrl && !ev.altKey && !ev.shiftKey && ev.code === "Slash") {
+      ev.preventDefault();
+      globalThis.toggleShortcutHelp?.();
+      return false;
+    }
+
+    if (ctrl && ev.altKey && !ev.shiftKey) {
+      const arrowMap = {
+        ArrowLeft: "left",
+        ArrowRight: "right",
+        ArrowUp: "up",
+        ArrowDown: "down"
+      };
+      if (arrowMap[ev.key]) {
+        ev.preventDefault();
+        void selectPaneByDirection(arrowMap[ev.key], { focusTerm: true }).catch((err) => setStatus(String(err?.message ?? err), true));
+        return false;
+      }
+      if (ev.code === "Backslash") {
+        ev.preventDefault();
+        paneHandlers.splitPane(paneId, "horizontal").catch((err) => setStatus(String(err), true));
+        return false;
+      }
+      if (ev.code === "Minus" || ev.code === "NumpadSubtract") {
+        ev.preventDefault();
+        paneHandlers.splitPane(paneId, "vertical").catch((err) => setStatus(String(err), true));
+        return false;
+      }
+      if (key === "t") {
+        ev.preventDefault();
+        paneHandlers.startSessionForPane(paneId, { focusTerm: true }).catch((err) => setStatus(String(err), true));
+        return false;
+      }
+      if (key === "r") {
+        ev.preventDefault();
+        paneHandlers.startSessionForPane(paneId, { force: true, focusTerm: true }).catch((err) => setStatus(String(err), true));
+        return false;
+      }
+      if (key === "w") {
+        ev.preventDefault();
+        paneHandlers.hidePane(paneId).catch((err) => setStatus(String(err), true));
+        return false;
+      }
+      if (key === "q") {
+        ev.preventDefault();
+        paneHandlers.closePane(paneId).catch((err) => setStatus(String(err), true));
+        return false;
+      }
+      if (key === "m") {
+        ev.preventDefault();
+        togglePaneOverflowMenu(paneId);
+        return false;
+      }
+      if (key === "p") {
+        ev.preventDefault();
+        paneHandlers.startPaneMove(paneId).catch((err) => setStatus(String(err), true));
+        return false;
+      }
+    }
+
+    if (ev.ctrlKey && key === "c" && (ev.shiftKey || term.hasSelection())) {
+      ev.preventDefault();
+      writeTerminalClipboard(terminalSelectionText(term));
+      return false;
+    }
+
+    if (ev.ctrlKey && key === "v") {
+      ev.preventDefault();
+      if (typeof globalThis.handlePaneClipboardPaste === "function") {
+        void globalThis.handlePaneClipboardPaste(paneId).catch((err) => setStatus(String(err?.message ?? err), true));
+        return false;
+      }
+      void window.wincmux.clipboardRead().then((text) => {
+        if (text) {
+          if (typeof globalThis.handlePanePasteText === "function") {
+            return globalThis.handlePanePasteText(paneId, text);
+          } else {
+            queuePaneInput(view, text);
+          }
+        }
+      }).catch((err) => setStatus(String(err?.message ?? err), true));
+      return false;
+    }
+
+    return true;
+  });
+
+  term.element.addEventListener("copy", (ev) => {
+    const text = terminalSelectionText(term);
+    if (!text) return;
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+    if (ev.clipboardData) {
+      ev.clipboardData.setData("text/plain", text);
+    } else {
+      writeTerminalClipboard(text);
+    }
+  }, true);
+
+  term.onData((data) => {
+    paneDebug("[input] onData", {
+      pane: paneId.slice(0, 8),
+      len: data.length,
+      active: document.activeElement?.tagName ?? null,
+      hostActive: view.host.contains(document.activeElement)
+    });
+    queuePaneInput(view, data);
+  });
+
+  term.onBinary((data) => {
+    paneDebug("[input] onBinary", {
+      pane: paneId.slice(0, 8),
+      len: data.length,
+      active: document.activeElement?.tagName ?? null,
+      hostActive: view.host.contains(document.activeElement)
+    });
+    queuePaneInput(view, data);
+  });
+
+  host.addEventListener("contextmenu", (ev) => {
+    void selectPane(paneId, { persist: true, focusTerm: false }).catch(() => {});
+    if (!ev.shiftKey) {
+      return;
+    }
+    ev.preventDefault();
+    void window.wincmux.showContextMenu(term.hasSelection());
+  });
+
+  const observer = new ResizeObserver(() => {
+    schedulePaneFit(view);
+  });
+  observer.observe(host);
+  view.observer = observer;
+
+  state.paneViews.set(paneId, view);
+  schedulePaneFit(view, { force: true });
+  schedulePaneFitStabilization(view);
+}
+
+function renderPaneSurface(force = false) {
+  const nextHash = currentLayoutHash();
+  if (!force && nextHash === state.layoutHash) {
+    return;
+  }
+
+  state.layoutHash = nextHash;
+
+  if (!state.selectedWorkspaceId) {
+    paneSurface.innerHTML = "";
+    state.paneCards.clear();
+    invalidatePaneSelectionStyleCache();
+    removePanePortalElements();
+    state.paneMeta.clear();
+    state.quickCommandOpenPaneId = null;
+    disposeAllViews();
+    renderPaneEmptyState("No workspace selected", "Create or select a workspace to start.");
+    return;
+  }
+
+  if (state.panes.length === 0) {
+    paneSurface.innerHTML = "";
+    state.paneCards.clear();
+    invalidatePaneSelectionStyleCache();
+    removePanePortalElements();
+    state.paneMeta.clear();
+    state.quickCommandOpenPaneId = null;
+    disposeAllViews();
+    renderPaneEmptyState("No panes available", "Refresh workspace or create a new workspace.");
+    return;
+  }
+
+  const paneMap = new Map(state.panes.map((p) => [p.pane_id, p]));
+  const root = state.panes.find((p) => p.parent_id === null);
+
+  if (!root) {
+    paneSurface.innerHTML = "";
+    state.paneCards.clear();
+    invalidatePaneSelectionStyleCache();
+    removePanePortalElements();
+    state.paneMeta.clear();
+    state.quickCommandOpenPaneId = null;
+    disposeAllViews();
+    renderPaneEmptyState("Invalid layout", "Root pane not found. Re-open workspace or restart the app.");
+    return;
+  }
+
+  // On workspace switch: stash current workspace's views+sessions into cache, restore returning workspace's
+  const renderingWorkspaceId = state.selectedWorkspaceId;
+  if (state._lastRenderedWorkspaceId !== renderingWorkspaceId) {
+    // Save outgoing workspace's live views and session mappings into cache (stop polling first)
+    if (state._lastRenderedWorkspaceId) {
+      for (const view of state.paneViews.values()) {
+        stopPanePolling(view);
+        if (view.flushTimer) { clearTimeout(view.flushTimer); view.flushTimer = null; }
+        cancelPaneOutputFlush(view);
+        if (view.fitRaf) { cancelAnimationFrame(view.fitRaf); view.fitRaf = null; }
+        view.readBusy = false;
+        resetPaneOutputQueue(view);
+        view.inputFlushScheduled = false;
+        view.inputFlushToken = (view.inputFlushToken ?? 0) + 1;
+        clearPaneInputPerfSummary(view, { flush: true, reason: "workspace-switch" });
+        view.inputFlushDelayMs = null;
+        discardPendingPaneInput(view);
+        view._boundToStream = false; // force rebind on restore
+      }
+      state.workspacePaneViewCache.set(state._lastRenderedWorkspaceId, new Map(state.paneViews));
+      state.workspacePaneSessionCache.set(state._lastRenderedWorkspaceId, { ...state.paneSessions });
+      state.paneViews.clear();
+    }
+    // Restore incoming workspace's cached views and session mappings (if any)
+    const cachedViews = state.workspacePaneViewCache.get(renderingWorkspaceId);
+    if (cachedViews) {
+      for (const [paneId, view] of cachedViews.entries()) {
+        state.paneViews.set(paneId, view);
+      }
+    }
+    const cachedSessions = state.workspacePaneSessionCache.get(renderingWorkspaceId);
+    if (cachedSessions) {
+      // Merge cached session mappings back — but don't overwrite entries that
+      // tryRestorePaneSessions already assigned from the authoritative backend response.
+      for (const [paneId, sessionId] of Object.entries(cachedSessions)) {
+        if (!state.paneSessions[paneId]) {
+          state.paneSessions[paneId] = sessionId;
+        }
+      }
+    }
+    state._lastRenderedWorkspaceId = renderingWorkspaceId;
+  }
+
+  // Preserve existing views so scrollback buffers survive layout changes within same workspace
+  const survivingPaneIds = new Set(leafPanes().map((p) => p.pane_id));
+  const preservedViews = new Map();
+  for (const [paneId, view] of state.paneViews.entries()) {
+    if (survivingPaneIds.has(paneId)) {
+      preservedViews.set(paneId, view);
+    } else {
+      disposeView(view);
+    }
+  }
+  state.paneViews.clear();
+  for (const [paneId, view] of preservedViews.entries()) {
+    state.paneViews.set(paneId, view);
+  }
+
+  paneSurface.innerHTML = "";
+  state.paneCards.clear();
+  invalidatePaneSelectionStyleCache();
+  removePanePortalElements();
+  state.paneMeta.clear();
+  state.quickCommandOpenPaneId = null;
+
+  const hosts = [];
+  const rootNode = renderPaneNode(root, paneMap, hosts);
+  if (!rootNode) {
+    const group = paneGroupById(state.selectedGroupId);
+    renderPaneEmptyState("No panes in this group", `${group?.name ?? "Selected"} has no panes. Choose All or move a terminal into this group.`);
+    return;
+  }
+  paneSurface.appendChild(rootNode);
+
+  for (const item of hosts) {
+    const existing = state.paneViews.get(item.paneId);
+    if (existing) {
+      // Reuse existing xterm — append xterm's own root element into the new slot.
+      // Using term.element (the .xterm div) preserves xterm's internal _element reference
+      // so fitAddon.fit() measures the correct container after workspace switch.
+      if (existing.term.element) {
+        item.host.appendChild(existing.term.element);
+      }
+      existing.host = item.host;
+      if (existing._boundToStream) wincmuxTauriRestoreOutput(existing);
+      existing.lastFitWidth = 0;
+      existing.lastFitHeight = 0;
+      ensurePaneOverlay(existing);
+      existing.observer?.disconnect();
+      const observer = new ResizeObserver(() => {
+        schedulePaneFit(existing);
+      });
+      observer.observe(item.host);
+      existing.observer = observer;
+      schedulePaneFit(existing, { force: true });
+      schedulePaneFitStabilization(existing);
+    } else {
+      createPaneView(item.paneId, item.host);
+    }
+  }
+
+  refreshPaneBindings();
+  applyPaneSelectionStyles();
+  // Defer fit until after browser has applied layout, so xterm gets correct dimensions
+  requestAnimationFrame(() => {
+    fitAllPanes({ immediate: true, force: true });
+  });
+}
+
+function renderPaneEmptyState(title, description) {
+  const wrap = document.createElement("div");
+  wrap.className = "pane-empty-state";
+
+  const titleEl = document.createElement("div");
+  titleEl.className = "pane-empty-title";
+  titleEl.textContent = title;
+
+  const descriptionEl = document.createElement("div");
+  descriptionEl.className = "pane-empty-desc";
+  descriptionEl.textContent = description;
+
+  wrap.append(titleEl, descriptionEl);
+  paneSurface.appendChild(wrap);
+}
+
+function refreshPaneBindings() {
+  const runningRows = runningSessions();
+  const runningMap = new Map(runningRows.map((s) => [s.id, s]));
+  const leaves = leafPanes();
+  const leafCount = leaves.length;
+  const unreadCounts = unreadCountsForWorkspacePanes(selectedWorkspace()?.id ?? null);
+  paneDebug("[refreshBindings] called, running sessions:", [...runningMap.keys()].map(s=>s.slice(0,8)), "paneSessions:", Object.entries(state.paneSessions).map(([p,s])=>`${p.slice(0,8)}->${s?.slice(0,8)}`));
+
+  for (const pane of leaves) {
+    const paneId = pane.pane_id;
+    let sessionId = state.paneSessions[paneId] ?? null;
+
+    if (sessionId && !runningMap.has(sessionId)) {
+      // Only clear if the session is not in the DB at all (truly gone),
+      // not merely absent from runningSessions yet (could be newly starting).
+      // runningSessions() reflects state.sessions which may lag behind session.run.
+      // We rely on normalizePaneSessions (which also checks leafIds) for thorough cleanup.
+      const knownToState = state.sessionsById.has(sessionId);
+      if (!knownToState) {
+        delete state.paneSessions[paneId];
+        sessionId = null;
+      }
+    }
+
+    const meta = state.paneMeta.get(paneId);
+    const fontSize = currentPaneFontSize(state.selectedWorkspaceId, paneId);
+    const unreadCount = unreadCountForPane(unreadCounts, paneId, sessionId);
+    const dormant = state.dormantPaneSessions[paneId] ?? null;
+    const view = state.paneViews.get(paneId);
+    const binding = paneBindingState(paneId, sessionId, runningMap, dormant, fontSize, unreadCount, leafCount, view);
+    const card = state.paneCards.get(paneId);
+    const shouldUpdateBinding = meta?._bindingKey !== binding.key;
+    if (meta) {
+      if (shouldUpdateBinding) {
+        meta.statusEl.textContent = binding.statusText;
+        meta.statusEl.title = binding.statusTitle;
+        meta.startBtn.dataset.fullLabel = binding.startLabel;
+        meta.closeBtn.disabled = binding.closeDisabled;
+        meta.fontDownBtn.disabled = fontSize <= PANE_FONT_LIMITS.min;
+        meta.fontUpBtn.disabled = fontSize >= PANE_FONT_LIMITS.max;
+        meta.closePaneBtn.disabled = leafCount <= 1;
+        meta.hidePaneBtn.disabled = leafCount <= 1;
+        meta.unreadBadgeEl.hidden = unreadCount <= 0;
+        meta.unreadBadgeEl.textContent = binding.unreadText;
+      }
+      if (meta.groupBadgeEl) {
+        if (shouldUpdateBinding) {
+          meta.groupBadgeEl.hidden = !binding.group;
+          meta.groupBadgeEl.textContent = binding.groupText;
+          meta.groupBadgeEl.title = binding.groupTitle;
+          meta.groupBadgeEl.setAttribute("aria-label", binding.groupTitle);
+          meta.groupBadgeEl.style.setProperty("--group-color", binding.group?.color ?? "#6b7c93");
+        }
+      }
+      meta._bindingKey = binding.key;
+    }
+    if (card && shouldUpdateBinding) {
+      card.classList.toggle("pane-has-unread", unreadCount > 0);
+      card.classList.toggle("pane-dormant", !sessionId && Boolean(dormant));
+    }
+    if (shouldUpdateBinding) {
+      updatePaneActionLayout(paneId);
+    }
+
+    if (view && shouldUpdateBinding) {
+      applyPaneFontToView(paneId, fontSize);
+      bindViewToSession(view, sessionId);
+    }
+  }
+
+  rebuildPaneSessionLookup();
+  applyPaneSelectionStyles();
+}
+
+async function openSessionPicker(paneId, anchorBtn) {
+  const _loadSessions = typeof globalThis.loadSessions === "function" ? globalThis.loadSessions : async () => {};
+
+  // Close any existing dropdown
+  document.querySelectorAll(".session-picker-dropdown").forEach((el) => el.remove());
+
+  const ws = selectedWorkspace();
+  if (!ws) return;
+  const anchorRect = anchorBtn?.getBoundingClientRect?.() ?? null;
+  closePaneOverflowMenus(null);
+  if (typeof globalThis.closeQuickCommandPanels === "function") {
+    globalThis.closeQuickCommandPanels(null);
+  }
+
+  const workspaceRows = [ws];
+  const sessionResults = await Promise.all(workspaceRows.map((row) =>
+    Promise.all([
+      rpc("session.history", { workspace_id: row.id }).catch(() => null),
+      rpc("ai.sessions", { workspace_id: row.id }).catch(() => null),
+      rpc("pane.session.bindings", { workspace_id: row.id }).catch(() => null)
+    ]).then(([histRes, aiRes, bindRes]) => ({ workspace: row, histRes, aiRes, bindRes }))
+  ));
+  const paneBindings = sessionResults.flatMap((result) =>
+    (result.bindRes?.bindings ?? []).map((binding) => ({
+      ...binding,
+      workspace_id: result.workspace.id,
+      workspace_name: result.workspace.name,
+      workspace_path: result.workspace.path
+    }))
+  );
+  const bindingBySessionId = new Map();
+  for (const binding of paneBindings) {
+    if (binding?.session_id && !bindingBySessionId.has(binding.session_id)) {
+      bindingBySessionId.set(binding.session_id, binding);
+    }
+  }
+  const aiSessions = sessionResults.flatMap((result) =>
+    (result.aiRes?.sessions ?? []).map((session) => ({
+      ...session,
+      workspace_name: result.workspace.name,
+      workspace_path: result.workspace.path,
+      pane_id: bindingBySessionId.get(session.pty_session_id)?.pane_id ?? null
+    }))
+  );
+
+  const dropdown = document.createElement("div");
+  dropdown.className = "session-picker-dropdown";
+
+  const titleBar = document.createElement("div");
+  titleBar.className = "session-picker-titlebar";
+  const titleText = document.createElement("div");
+  titleText.className = "session-picker-title";
+  titleText.textContent = `${ws.name} Sessions`;
+  const subtitleText = document.createElement("div");
+  subtitleText.className = "session-picker-subtitle";
+  subtitleText.textContent = "Manage running, dormant, and previous sessions for this workspace.";
+  titleBar.append(titleText, subtitleText);
+  dropdown.appendChild(titleBar);
+
+  const tools = document.createElement("div");
+  tools.className = "session-picker-tools";
+  const searchInput = document.createElement("input");
+  searchInput.className = "session-picker-search";
+  searchInput.placeholder = "Search command or session id";
+  const filterSelect = document.createElement("select");
+  filterSelect.className = "session-picker-filter";
+  for (const [value, label] of [["all", "All"], ["running", "Running"], ["dormant", "Dormant"], ["history", "History"], ["ai", "AI Resume"]]) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    filterSelect.appendChild(opt);
+  }
+  tools.append(searchInput, filterSelect);
+  dropdown.appendChild(tools);
+
+  const appendSectionHeader = (title, detail = "") => {
+    const header = document.createElement("div");
+    header.className = "session-picker-header";
+    const titleEl = document.createElement("span");
+    titleEl.textContent = title;
+    header.appendChild(titleEl);
+    if (detail) {
+      const detailEl = document.createElement("span");
+      detailEl.className = "session-picker-header-detail";
+      detailEl.textContent = detail;
+      header.appendChild(detailEl);
+    }
+    dropdown.appendChild(header);
+  };
+
+  const commandBaseName = (cmd = "") => String(cmd).split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  const cleanShellCommand = (value = "") => {
+    let text = String(value).trim();
+    text = text.replace(/^\$OutputEncoding=\[Console\]::OutputEncoding=\[TextUTF8Encoding\]::new\(\);\s*/i, "");
+    text = text.replace(/^\$OutputEncoding=\[Console\]::OutputEncoding=\[Text\.UTF8Encoding\]::new\(\);\s*/i, "");
+    text = text.replace(/^\[Console\]::InputEncoding=\[Text\.UTF8Encoding\]::new\(\);\s*/i, "");
+    text = text.replace(/^if \(Get-Variable PSStyle[\s\S]*?\};\s*/i, "");
+    text = text.replace(/^chcp\s+65001\s*>\s*\$null\s*;?\s*/i, "");
+    return text || value;
+  };
+  const sessionLabel = (session) => {
+    const cmd = commandBaseName(session.spawn_cmd);
+    let parsedArgs = [];
+    try {
+      const parsed = JSON.parse(session.spawn_args || "[]");
+      parsedArgs = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      parsedArgs = [];
+    }
+    const commandIndex = parsedArgs.findIndex((arg) => String(arg).toLowerCase() === "-command");
+    if ((cmd === "pwsh.exe" || cmd === "powershell.exe" || cmd === "pwsh" || cmd === "powershell") && commandIndex >= 0) {
+      return cleanShellCommand(parsedArgs.slice(commandIndex + 1).join(" "));
+    }
+    const displayArgs = parsedArgs.filter((arg) => {
+      const value = String(arg);
+      return !value.startsWith("-No") && !value.startsWith("chcp") && !value.startsWith("$Output") && !value.startsWith("[Console]");
+    });
+    return displayArgs.length > 0
+      ? `${session.spawn_cmd} ${displayArgs.join(" ")}`.trim()
+      : session.spawn_cmd;
+  };
+
+  // AI Sessions section (Claude / Codex conversation sessions)
+  if (aiSessions.length > 0) {
+    appendSectionHeader("AI Resume", `${aiSessions.length} saved command${aiSessions.length === 1 ? "" : "s"} in this workspace`);
+
+    for (const ai of aiSessions) {
+      const dateObj = new Date(ai.detected_at);
+      const timeStr = dateObj.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+      const item = document.createElement("div");
+      item.className = "session-picker-item ai-session";
+      item.dataset.status = "ai";
+      item.dataset.search = `${ai.workspace_name ?? ""} ${ai.tool ?? ""} ${ai.resume_cmd ?? ""}`.toLowerCase();
+
+      const dot = document.createElement("span");
+      dot.className = "session-status-dot ai-dot";
+      dot.title = ai.tool;
+
+      const info = document.createElement("div");
+      info.className = "session-item-info";
+
+      const labelEl = document.createElement("span");
+      labelEl.className = "session-label";
+      labelEl.title = ai.resume_cmd;
+      labelEl.textContent = ai.resume_cmd;
+
+      const metaEl = document.createElement("span");
+      metaEl.className = "session-meta";
+      const paneText = ai.pane_id ? ` - pane ${ai.pane_id.slice(0, 8)}` : "";
+      const ptyText = ai.pty_session_id ? ` - pty ${ai.pty_session_id.slice(0, 8)}` : "";
+      metaEl.textContent = `${ai.workspace_name ?? "workspace"} - ${ai.tool}${paneText}${ptyText} - detected ${timeStr}`;
+
+      info.append(labelEl, metaEl);
+
+      const resumeBtn = document.createElement("button");
+      resumeBtn.className = "session-attach-btn";
+      resumeBtn.textContent = "Resume";
+      resumeBtn.dataset.action = "resume";
+      resumeBtn.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        dropdown.remove();
+        try {
+          await startShellCommandForPane(paneId, ai.resume_cmd, {
+            cwd: ai.cwd || undefined,
+            focusTerm: true
+          });
+        } catch (err) {
+          setStatus(String(err?.message ?? err), true);
+        }
+      });
+
+      const deleteBtn = document.createElement("button");
+      deleteBtn.className = "session-delete-btn";
+      deleteBtn.textContent = "×";
+      deleteBtn.title = "Delete this resume record";
+      deleteBtn.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        try {
+          await rpc("ai.session.delete", { ai_session_id: ai.id });
+          item.remove();
+          setStatus("AI resume record deleted");
+        } catch (err) {
+          setStatus(String(err?.message ?? err), true);
+        }
+      });
+
+      item.append(dot, info, resumeBtn, deleteBtn);
+      dropdown.appendChild(item);
+    }
+  }
+
+  // Terminal sessions section
+  const dormantRows = Object.values(state.dormantPaneSessions)
+    .filter((row) => row?.workspace_id === ws.id && row.spawn_cmd)
+    .map((row) => ({
+      id: row.session_id,
+      workspace_id: row.workspace_id,
+      workspace_name: ws.name,
+      pane_id: row.pane_id,
+      status: "dormant",
+      started_at: new Date().toISOString(),
+      spawn_cmd: row.spawn_cmd,
+      spawn_args: row.spawn_args,
+      spawn_cwd: row.spawn_cwd
+    }));
+  const allSessions = sessionResults.flatMap((result) =>
+    (result.histRes?.sessions ?? []).map((session) => ({
+      ...session,
+      workspace_id: result.workspace.id,
+      workspace_name: result.workspace.name,
+      pane_id: bindingBySessionId.get(session.id)?.pane_id ?? null
+    }))
+  );
+  const historySessionIds = new Set(allSessions.map((session) => session.id).filter(Boolean));
+  const stateDormantIds = new Set(dormantRows.map((session) => session.id).filter(Boolean));
+  const boundDormantRows = paneBindings
+    .filter((binding) =>
+      binding?.workspace_id === ws.id
+      && binding.spawn_cmd
+      && binding.session_id
+      && !historySessionIds.has(binding.session_id)
+      && !stateDormantIds.has(binding.session_id)
+    )
+    .map((binding) => ({
+      id: binding.session_id,
+      workspace_id: binding.workspace_id,
+      workspace_name: binding.workspace_name,
+      pane_id: binding.pane_id,
+      status: "dormant",
+      started_at: new Date().toISOString(),
+      spawn_cmd: binding.spawn_cmd,
+      spawn_args: binding.spawn_args,
+      spawn_cwd: binding.spawn_cwd
+    }));
+  const namedSessions = [...dormantRows, ...boundDormantRows, ...allSessions].filter((s) => s.spawn_cmd);
+  const sessionSignature = (session) => {
+    let argsText = "[]";
+    try {
+      const parsed = JSON.parse(session.spawn_args || "[]");
+      argsText = JSON.stringify(Array.isArray(parsed) ? parsed : []);
+    } catch {
+      argsText = String(session.spawn_args || "[]");
+    }
+    return `${session.spawn_cmd || ""}|${argsText}|${session.spawn_cwd || ""}`;
+  };
+
+  // De-duplicate by command signature:
+  // 1) keep running rows
+  // 2) for non-running, keep only latest one per signature
+  // 3) if a signature has running, hide its exited rows
+  const runningSignatures = new Set();
+  for (const session of namedSessions) {
+    if (session.status === "running") {
+      runningSignatures.add(sessionSignature(session));
+    }
+  }
+  const keptExited = new Set();
+  const displaySessions = [];
+  for (const session of namedSessions) {
+    const signature = sessionSignature(session);
+    if (session.status === "running") {
+      displaySessions.push(session);
+      continue;
+    }
+    if (runningSignatures.has(signature)) {
+      continue;
+    }
+    if (keptExited.has(signature)) {
+      continue;
+    }
+    keptExited.add(signature);
+    displaySessions.push(session);
+  }
+
+  if (displaySessions.length > 0 || aiSessions.length === 0) {
+    const currentWorkspaceSessions = displaySessions.filter((s) => (s.workspace_id ?? ws.id) === ws.id);
+    const groupsForPicker = state.paneGroups.length > 0 ? state.paneGroups : [{ id: "default", name: "Default", color: "#6b7c93" }];
+    const sessionGroups = groupsForPicker
+      .map((paneGroup) => ({
+        group: paneGroup,
+        rows: currentWorkspaceSessions
+          .filter((s) => {
+            const groupId = typeof groupIdForSession === "function"
+              ? groupIdForSession(s.id)
+              : null;
+            return (groupId ?? groupsForPicker[0]?.id) === paneGroup.id;
+          })
+          .sort((a, b) => {
+            const order = { running: 0, dormant: 1 };
+            const left = order[a.status] ?? 2;
+            const right = order[b.status] ?? 2;
+            if (left !== right) return left - right;
+            return new Date(b.started_at).getTime() - new Date(a.started_at).getTime();
+          })
+      }))
+      .filter((group) => group.rows.length > 0);
+
+    if (sessionGroups.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "session-picker-empty";
+      empty.textContent = "No reusable sessions yet. Run a command below to create one.";
+      dropdown.appendChild(empty);
+    } else {
+      const attachSessionHere = async (s) => {
+        const isRunning = s.status === "running";
+        const isDormant = s.status === "dormant";
+        if (isDormant) {
+          state.dormantPaneSessions[paneId] = {
+            workspace_id: ws.id,
+            pane_id: paneId,
+            session_id: s.id,
+            spawn_cmd: s.spawn_cmd,
+            spawn_args: s.spawn_args,
+            spawn_cwd: s.spawn_cwd
+          };
+          await paneHandlers.startSessionForPane(paneId, {
+            force: Boolean(state.paneSessions[paneId]),
+            restoreDormant: true,
+            silent: false,
+            groupId: typeof groupIdForSession === "function" ? groupIdForSession(s.id) : undefined
+          });
+          return;
+        }
+        if (isRunning) {
+          const currentSid = state.paneSessions[paneId] ?? null;
+          if (currentSid && currentSid !== s.id) {
+            await rpc("session.close", { session_id: currentSid }).catch(() => {});
+          }
+          state.paneSessions[paneId] = s.id;
+          rpc("pane.session.bind", { workspace_id: ws.id, pane_id: paneId, session_id: s.id }).catch(() => {});
+          await _loadSessions();
+          paneApi.normalizePaneSessions();
+          paneApi.refreshPaneBindings();
+          setStatus(`Attached: ${s.id.slice(0, 8)}`);
+          return;
+        }
+        let parsedArgs = [];
+        try { parsedArgs = JSON.parse(s.spawn_args || "[]"); } catch { /* */ }
+        await paneHandlers.startSessionForPane(paneId, {
+          force: true,
+          cmd: s.spawn_cmd,
+          args: parsedArgs,
+          cwd: s.spawn_cwd || undefined,
+          groupId: typeof groupIdForSession === "function" ? groupIdForSession(s.id) : undefined
+        });
+      };
+
+      const openSessionSide = async (s, direction) => {
+        await paneHandlers.openSessionInSplit(paneId, s, direction);
+      };
+
+      for (const group of sessionGroups) {
+        appendSectionHeader(group.group.name, `${group.rows.length} session${group.rows.length === 1 ? "" : "s"}`);
+        for (const s of group.rows) {
+          const label = sessionLabel(s);
+          const dateObj = new Date(s.started_at);
+          const timeStr = dateObj.toLocaleDateString([], { month: "short", day: "numeric" }) + " " +
+                          dateObj.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+          const isRunning = s.status === "running";
+          const isDormant = s.status === "dormant";
+          const isCurrentWorkspace = (s.workspace_id ?? ws.id) === ws.id;
+
+          const item = document.createElement("div");
+          item.className = `session-picker-item ${s.status}`;
+          item.dataset.status = isRunning ? "running" : (isDormant ? "dormant" : "history");
+          item.dataset.search = `${group.group.name ?? ""} ${s.workspace_name ?? ""} ${label ?? ""} ${s.id ?? ""}`.toLowerCase();
+
+          const dot = document.createElement("span");
+          dot.className = "session-status-dot";
+          dot.title = s.status;
+
+          const info = document.createElement("div");
+          info.className = "session-item-info";
+
+          const labelEl = document.createElement("span");
+          labelEl.className = "session-label";
+          labelEl.title = label;
+          labelEl.textContent = label;
+
+          const metaEl = document.createElement("span");
+          metaEl.className = "session-meta";
+          const paneText = s.pane_id ? ` · pane ${s.pane_id.slice(0, 8)}` : "";
+          metaEl.textContent = `${s.id.slice(0, 8)} · ${isRunning ? "running" : s.status}${paneText} · ${timeStr}`;
+
+          info.append(labelEl, metaEl);
+
+          const attachBtn = document.createElement("button");
+          attachBtn.className = "session-attach-btn";
+          attachBtn.textContent = isCurrentWorkspace ? (isDormant ? "Restore" : (isRunning ? "Attach" : "Re-run")) : "Jump";
+          attachBtn.dataset.action = attachBtn.textContent.toLowerCase();
+          attachBtn.addEventListener("click", async (ev) => {
+            ev.stopPropagation();
+            dropdown.remove();
+            try {
+              if (!isCurrentWorkspace) {
+                await switchWorkspace(s.workspace_id);
+                setStatus(`Jumped to ${s.workspace_name ?? "workspace"}`);
+                return;
+              }
+              await attachSessionHere(s);
+            } catch (err) {
+              setStatus(String(err?.message ?? err), true);
+            }
+          });
+
+          item.append(dot, info, attachBtn);
+
+          if (isCurrentWorkspace) {
+            const rightBtn = document.createElement("button");
+            rightBtn.className = "session-attach-btn session-side-btn";
+            rightBtn.textContent = "Right";
+            rightBtn.title = "Open right";
+            rightBtn.dataset.action = "open-right";
+            rightBtn.addEventListener("click", async (ev) => {
+              ev.stopPropagation();
+              dropdown.remove();
+              try {
+                await openSessionSide(s, "horizontal");
+              } catch (err) {
+                setStatus(String(err?.message ?? err), true);
+              }
+            });
+            const downBtn = document.createElement("button");
+            downBtn.className = "session-attach-btn session-side-btn";
+            downBtn.textContent = "Down";
+            downBtn.title = "Open down";
+            downBtn.dataset.action = "open-down";
+            downBtn.addEventListener("click", async (ev) => {
+              ev.stopPropagation();
+              dropdown.remove();
+              try {
+                await openSessionSide(s, "vertical");
+              } catch (err) {
+                setStatus(String(err?.message ?? err), true);
+              }
+            });
+            item.append(rightBtn, downBtn);
+          }
+
+          if (!isRunning && !isDormant) {
+            const deleteBtn = document.createElement("button");
+            deleteBtn.className = "session-delete-btn";
+            deleteBtn.textContent = "x";
+            deleteBtn.title = "Delete this session record";
+            deleteBtn.addEventListener("click", async (ev) => {
+              ev.stopPropagation();
+              try {
+                await rpc("session.delete", { session_id: s.id });
+                item.remove();
+              } catch (err) {
+                setStatus(String(err?.message ?? err), true);
+              }
+            });
+            item.append(deleteBtn);
+          }
+
+          dropdown.appendChild(item);
+        }
+      }
+    }
+  }
+
+  // New session input row
+  const newRow = document.createElement("div");
+  newRow.className = "session-picker-new";
+
+  const newLabel = document.createElement("span");
+  newLabel.className = "session-picker-new-label";
+  newLabel.textContent = "+ New";
+
+  const cmdInput = document.createElement("input");
+  cmdInput.className = "session-cmd-input";
+  cmdInput.placeholder = "claude / codex / pwsh";
+  cmdInput.addEventListener("keydown", async (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      runNewSession();
+    }
+    ev.stopPropagation();
+  });
+
+  const runBtn = document.createElement("button");
+  runBtn.className = "session-run-btn";
+  runBtn.textContent = "Run";
+
+  async function runNewSession() {
+    const raw = cmdInput.value.trim();
+    if (!raw) return;
+    dropdown.remove();
+    try {
+      await startShellCommandForPane(paneId, raw, {
+        cwd: ws.path,
+        focusTerm: true
+      });
+    } catch (err) {
+      setStatus(String(err?.message ?? err), true);
+    }
+  }
+
+  runBtn.addEventListener("click", runNewSession);
+  newRow.append(newLabel, cmdInput, runBtn);
+  dropdown.appendChild(newRow);
+
+  const applySessionFilter = () => {
+    const query = searchInput.value.trim().toLowerCase();
+    const status = filterSelect.value;
+    for (const item of dropdown.querySelectorAll(".session-picker-item")) {
+      const matchesQuery = !query || (item.dataset.search ?? "").includes(query);
+      const itemStatus = item.dataset.status ?? "all";
+      const matchesStatus = status === "all" || itemStatus === status;
+      item.hidden = !(matchesQuery && matchesStatus);
+    }
+  };
+  searchInput.addEventListener("input", applySessionFilter);
+  filterSelect.addEventListener("change", applySessionFilter);
+
+  // Position: prefer below anchor, flip up if too low
+  ensurePanePortalElement(dropdown);
+  const desiredDropdownSize = clampPanePortalSize(470, 560, PANE_PORTAL_MARGIN);
+  dropdown.style.width = `${Math.round(desiredDropdownSize.width)}px`;
+  dropdown.style.maxWidth = `${Math.round(desiredDropdownSize.width)}px`;
+  dropdown.style.maxHeight = `${Math.round(desiredDropdownSize.height)}px`;
+  const rect = anchorRect ?? anchorBtn.getBoundingClientRect();
+  const dropH = dropdown.offsetHeight || 300;
+  const dropW = dropdown.offsetWidth || 340;
+  let top = rect.bottom + 4;
+  let left = rect.left;
+  if (top + dropH > window.innerHeight - 10) {
+    top = rect.top - dropH - 4;
+  }
+  const position = clampPanePortalPosition(left, top, dropW, dropH, PANE_PORTAL_MARGIN);
+  dropdown.style.top = `${Math.round(position.top)}px`;
+  dropdown.style.left = `${Math.round(position.left)}px`;
+
+  // Close on outside click
+  const closeHandler = (ev) => {
+    if (!dropdown.contains(ev.target)) {
+      dropdown.remove();
+      document.removeEventListener("click", closeHandler, true);
+    }
+  };
+  setTimeout(() => document.addEventListener("click", closeHandler, true), 0);
+
+  cmdInput.focus();
+}
+
+globalThis.setPaneHandlers = setPaneHandlers;
+globalThis.paneForSession = paneForSession;
+globalThis.enqueueStreamOutput = enqueueStreamOutput;
+globalThis.enqueueSessionStreamOutput = enqueueSessionStreamOutput;
+globalThis.normalizePaneSessions = normalizePaneSessions;
+globalThis.renderPaneSurface = renderPaneSurface;
+globalThis.refreshPaneBindings = refreshPaneBindings;
+globalThis.selectPane = selectPane;
+globalThis.selectAdjacentPane = selectAdjacentPane;
+globalThis.selectPaneByDirection = selectPaneByDirection;
+globalThis.togglePaneOverflowMenu = togglePaneOverflowMenu;
+globalThis.closePaneOverflowMenus = closePaneOverflowMenus;
+globalThis.ensurePanePortalElement = ensurePanePortalElement;
+globalThis.clampPanePortalPosition = clampPanePortalPosition;
+globalThis.clampPanePortalSize = clampPanePortalSize;
+globalThis.focusPaneTerm = focusPaneTerm;
+globalThis.fitAllPanes = fitAllPanes;
+globalThis.equalizePaneSizes = equalizePaneSizes;
+globalThis.setGlobalFontScale = setGlobalFontScale;
+globalThis.writeToPane = writeToPane;
+globalThis.markPaneStarting = markPaneStarting;
+globalThis.recordOverlayPaneSession = recordOverlayPaneSession;
+
+bindTerminalPrompt();
+
+if (document.fonts?.ready) {
+  document.fonts.ready
+    .then(() => fitAllPanes({ force: true }))
+    .catch(() => {});
+}
