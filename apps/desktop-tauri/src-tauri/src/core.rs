@@ -583,11 +583,21 @@ mod tests {
             Filter::default(),
             Arc::new(move |event| sender.send(event).is_ok()),
         );
-        let result = core.rpc("session.run",json!({
-            "workspace_id":workspace,"cmd":"powershell.exe","cwd":cwd,
-            "args":["-NoProfile","-NonInteractive","-Command",
-            "[Console]::InputEncoding=[Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); [Console]::WriteLine('RUST_READY'); $line=[Console]::ReadLine(); [Console]::WriteLine('RUST_ECHO:'+$line)"]
-        }))?;
+        // Windows PowerShell's ReadLine can decode cooked console input using the
+        // system code page. ReadKey reads Unicode console key events directly.
+        let echo_script = concat!(
+            "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); ",
+            "$line=[Text.StringBuilder]::new(); [Console]::WriteLine('RUST_READY'); ",
+            "while (($key=[Console]::ReadKey($true)).Key -ne [ConsoleKey]::Enter) { ",
+            "[void]$line.Append($key.KeyChar) }; [Console]::WriteLine('RUST_ECHO:'+$line)"
+        );
+        let result = core.rpc(
+            "session.run",
+            json!({
+                "workspace_id":workspace,"cmd":"powershell.exe","cwd":cwd,
+                "args":["-NoProfile","-NonInteractive","-Command",echo_script]
+            }),
+        )?;
         let sid = &result["session"]["session_id"];
         let mut output = String::new();
         let result = (|| -> Result<()> {
