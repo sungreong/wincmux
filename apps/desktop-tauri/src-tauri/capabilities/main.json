@@ -1,0 +1,6 @@
+{
+  "identifier": "main",
+  "description": "Local WinCMux UI can listen for native context and notification events.",
+  "windows": ["main"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "core:window:allow-close"]
+}
