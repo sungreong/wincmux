@@ -2531,7 +2531,7 @@ function bindTerminalPrompt() {
   const error = $("terminalPromptError");
   const close = $("terminalPromptClose");
   const insert = $("terminalPromptInsert");
-  const insertMultiline = $("terminalPromptMultiline");
+  const insertSingleLine = $("terminalPromptSingleLine");
   const multilineHint = $("terminalPromptMultilineHint");
   let target = null;
   let composing = false;
@@ -2543,8 +2543,8 @@ function bindTerminalPrompt() {
   };
   const updateInsertActions = () => {
     const hasLineBreaks = /[\n\t]/.test(editor.value);
-    insert.textContent = hasLineBreaks ? "한 줄로 삽입" : "터미널에 삽입";
-    insertMultiline.hidden = multilineHint.hidden = !hasLineBreaks;
+    insert.textContent = hasLineBreaks ? "줄바꿈 유지해 삽입" : "터미널에 삽입";
+    insertSingleLine.hidden = multilineHint.hidden = !hasLineBreaks;
   };
   const open = () => {
     if (dialog.open) return;
@@ -2605,9 +2605,10 @@ function bindTerminalPrompt() {
         || state.paneViews.get(view.paneId) !== view || !isPaneViewAttached(view)) {
         throw new Error("대상 세션이 변경되었습니다. 입력창을 다시 열어 주세요.");
       }
-      const data = terminalPromptPayload(editor.value, ev.submitter === insertMultiline, view.term.modes.bracketedPasteMode);
+      const preserveLineBreaks = ev.submitter !== insertSingleLine && /[\n\t]/.test(editor.value);
+      const data = terminalPromptPayload(editor.value, preserveLineBreaks, view.term.modes.bracketedPasteMode);
       writing = true;
-      editor.readOnly = close.disabled = insert.disabled = insertMultiline.disabled = true;
+      editor.readOnly = close.disabled = insert.disabled = insertSingleLine.disabled = true;
       await new Promise((resolve, reject) => {
         view.pendingPromptWrite = { resolve, reject };
         queuePaneInput(view, data);
@@ -2624,7 +2625,7 @@ function bindTerminalPrompt() {
       editor.focus();
     } finally {
       writing = false;
-      editor.readOnly = close.disabled = insert.disabled = insertMultiline.disabled = false;
+      editor.readOnly = close.disabled = insert.disabled = insertSingleLine.disabled = false;
     }
   });
 }

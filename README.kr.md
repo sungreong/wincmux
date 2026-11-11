@@ -15,7 +15,7 @@ WinCMux는 Codex CLI, Claude Code, PowerShell 등을 여러 pane에서 쓰는 Wi
 
 ![한글과 여러 줄 초안을 표시한 WinCMux 입력창](assets/prompt-editor.png)
 
-입력창은 기본적으로 한 줄로 삽입합니다. 실행 중인 CLI가 여러 줄 붙여넣기를 지원하면 **줄바꿈 유지해 삽입**을 선택할 수 있습니다.
+입력창의 기본 버튼과 **Ctrl+Enter**는 줄바꿈을 유지해 삽입합니다. 여러 줄 붙여넣기를 지원하지 않는 세션에서는 **한 줄로 삽입**을 선택할 수 있습니다.
 
 ## 개선 결과
 
