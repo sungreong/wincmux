@@ -227,6 +227,46 @@ async function benchmark(executable, screenshots) {
     assert.equal(imeGuard, true);
     await until(async () => (await recent()).some((text) => text.includes("INPUT_OK:" + input)), "exact Korean prompt with consecutive spaces");
 
+    const multiline = "한글  A\n\n  가가가";
+    assert.equal(await cdp.eval(`terminalPromptPayload(${JSON.stringify(multiline)},true,true)`),
+      "\x1b[200~" + multiline + "\x1b[201~");
+    await cdp.eval("writeToPane(state.selectedPaneId,'#paste-on#')");
+    await until(() => cdp.eval("state.paneViews.get(state.selectedPaneId).term.modes.bracketedPasteMode"), "bracketed paste enabled");
+    for (const shortcut of [true, false]) {
+      await cdp.eval(`(() => {
+        document.getElementById("terminalPromptBtn").click();
+        const editor=document.getElementById("terminalPromptText");
+        editor.value=${JSON.stringify(multiline)};
+        editor.dispatchEvent(new Event("input"));
+        if (${shortcut}) {
+          editor.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",ctrlKey:true,bubbles:true,cancelable:true}));
+        } else {
+          document.getElementById("terminalPromptInsert").click();
+        }
+      })()`);
+      await until(() => cdp.eval('!document.getElementById("terminalPrompt").open'), "multiline prompt inserted");
+    }
+    const pasteMarker = "PASTE_OK:" + Buffer.from(multiline).toString("base64");
+    await until(async () => (await buffers()).join("\n").split(pasteMarker).length === 3,
+      "Ctrl+Enter and default button preserve Korean, blank lines and indentation through ConPTY")
+      .catch(async (error) => { throw new Error(error.message + "\n" + (await buffers()).join("\n")); });
+    await cdp.eval("writeToPane(state.selectedPaneId,'#paste-off#')");
+    await until(async () => !(await cdp.eval("state.paneViews.get(state.selectedPaneId).term.modes.bracketedPasteMode")), "bracketed paste disabled");
+    const unsupported = await cdp.eval(`(async () => {
+      document.getElementById("terminalPromptBtn").click();
+      const editor=document.getElementById("terminalPromptText");
+      editor.value=${JSON.stringify(multiline)};
+      editor.dispatchEvent(new Event("input"));
+      document.getElementById("terminalPromptInsert").click();
+      const preserved=document.getElementById("terminalPrompt").open
+        && editor.value===${JSON.stringify(multiline)} && !document.getElementById("terminalPromptError").hidden;
+      document.getElementById("terminalPromptSingleLine").click();
+      return preserved;
+    })()`);
+    assert.equal(unsupported, true, "unsupported paste retains the draft and allows explicit single-line insertion");
+    await until(() => cdp.eval('!document.getElementById("terminalPrompt").open'), "explicit single-line insertion");
+    await until(async () => (await buffers()).join("\n").split("INPUT_OK:" + input).length === 3, "explicit single-line prompt received");
+
     const copied = await cdp.eval(`(async () => {
       const term=state.paneViews.get(state.selectedPaneId).term;
       const link="https://example.test/authorize?code_challenge="+"A1_b-9%2F".repeat(term.cols)+"&state=test";

@@ -1,4 +1,5 @@
 const input = "한글  A   가가가";
+const multiline = "한글  A\n\n  가가가";
 const output = "응답  A   가나";
 process.stdin.setEncoding("utf8");
 process.stdin.setRawMode(true);
@@ -7,6 +8,16 @@ let pending = "";
 process.stdout.write("FIXTURE_READY\r\n");
 process.stdin.on("data", (data) => {
   pending += data;
+  if (pending === "#paste-on#" || pending === "#paste-off#") {
+    process.stdout.write(pending === "#paste-on#" ? "\x1b[?2004h" : "\x1b[?2004l");
+    pending = "";
+  }
+  // Node's Windows console input consumes the paste delimiters, while exposing
+  // the pasted line feeds and spaces through its raw stdin stream.
+  while (pending.startsWith(multiline)) {
+    process.stdout.write("PASTE_OK:" + Buffer.from(multiline).toString("base64") + "\r\n");
+    pending = pending.slice(multiline.length);
+  }
   if (pending.startsWith(input)) {
     process.stdout.write("INPUT_OK:" + input + "\r\n");
     pending = pending.slice(input.length);

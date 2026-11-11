@@ -15,7 +15,7 @@ WinCMux is a Windows terminal workspace for Codex CLI, Claude Code, PowerShell, 
 
 ![WinCMux Korean prompt editor with a multiline draft](assets/prompt-editor.png)
 
-The editor inserts a single line by default. Use **줄바꿈 유지해 삽입** when the running CLI supports multiline paste.
+The default button and **Ctrl+Enter** preserve line breaks using bracketed paste. Choose **한 줄로 삽입** for sessions that require a single line.
 
 ## What improved
 

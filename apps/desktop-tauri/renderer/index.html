@@ -175,12 +175,12 @@
         <p id="terminalPromptTarget"></p>
         <textarea id="terminalPromptText" aria-label="터미널에 삽입할 글" rows="6" autofocus></textarea>
         <p>Ctrl+Enter로 삽입합니다. CLI 화면에서 내용을 확인한 뒤 Enter로 제출하세요.</p>
-        <p id="terminalPromptMultilineHint" hidden>여러 줄을 붙여넣을 수 있는 CLI에서는 줄바꿈을 유지할 수 있습니다. Windows에서는 CLI에 따라 줄바꿈이 Enter로 처리될 수 있습니다.</p>
+        <p id="terminalPromptMultilineHint" hidden>Ctrl+Enter는 줄바꿈을 유지해 붙여넣습니다. 여러 줄 붙여넣기를 지원하지 않는 세션에서는 한 줄로 삽입을 선택하세요.</p>
         <p id="terminalPromptError" role="alert" hidden></p>
         <div class="terminal-prompt-actions">
           <button id="terminalPromptClose" type="button">닫기</button>
           <button id="terminalPromptInsert" type="submit">터미널에 삽입</button>
-          <button id="terminalPromptMultiline" type="submit" hidden>줄바꿈 유지해 삽입</button>
+          <button id="terminalPromptSingleLine" type="submit" hidden>한 줄로 삽입</button>
         </div>
       </form>
     </dialog>
