@@ -1418,6 +1418,7 @@ function applyPaneSelectionStyles() {
   if (selectedPaneLabel.textContent !== selectedText) {
     selectedPaneLabel.textContent = selectedText;
   }
+  syncTerminalPrompt();
 }
 
 function paneDropPlacement(card, clientX, clientY) {
@@ -2524,13 +2525,19 @@ function terminalPromptPayload(text, preserveLineBreaks, bracketedPasteMode) {
   return `\x1b[200~${value}\x1b[201~`;
 }
 
+let syncTerminalPrompt = () => {};
+
 function bindTerminalPrompt() {
   const dialog = $("terminalPrompt");
+  const composer = $("terminalComposer");
   const form = $("terminalPromptForm");
   const editor = $("terminalPromptText");
+  const targetLabel = $("terminalPromptTarget");
   const error = $("terminalPromptError");
   const close = $("terminalPromptClose");
+  const expand = $("terminalPromptExpand");
   const insert = $("terminalPromptInsert");
+  const send = $("terminalPromptSend");
   const insertSingleLine = $("terminalPromptSingleLine");
   const multilineHint = $("terminalPromptMultilineHint");
   let target = null;
@@ -2543,11 +2550,47 @@ function bindTerminalPrompt() {
   };
   const updateInsertActions = () => {
     const hasLineBreaks = /[\n\t]/.test(editor.value);
-    insert.textContent = hasLineBreaks ? "줄바꿈 유지해 삽입" : "터미널에 삽입";
+    insert.textContent = hasLineBreaks ? "줄바꿈 유지해 삽입만" : "삽입만";
+    send.textContent = editor.value ? "바로 전송" : "터미널 제출";
     insertSingleLine.hidden = multilineHint.hidden = !hasLineBreaks;
+    editor.style.height = "auto";
+    const card = composer.parentElement;
+    const maxHeight = dialog.open ? 320 : Math.max(30, Math.min(120, (card?.clientHeight ?? 400) * 0.25));
+    editor.style.height = `${Math.min(maxHeight, editor.scrollHeight)}px`;
+  };
+  const composerObserver = new ResizeObserver(() => {
+    if (!dialog.open) updateInsertActions();
+  });
+  syncTerminalPrompt = () => {
+    if (dialog.open || writing || (composing && editor.isConnected)) return;
+    const view = state.paneViews.get(state.selectedPaneId);
+    const card = state.paneCards.get(state.selectedPaneId);
+    const changed = target?.view !== view || target?.sessionId !== view?.sessionId;
+    const moved = composer.parentElement !== card || form.parentElement !== composer;
+    if (changed) {
+      target = view ? { view, sessionId: view.sessionId } : null;
+      editor.value = view?.promptDraft ?? "";
+      showError("");
+    }
+    if (card && composer.parentElement !== card) {
+      card.appendChild(composer);
+      composerObserver.disconnect();
+      composerObserver.observe(card);
+    }
+    if (!card) {
+      composerObserver.disconnect();
+      document.body.appendChild(composer);
+    }
+    composer.hidden = !card || !view;
+    const ready = Boolean(view?.sessionId && !view.detached && isPaneViewAttached(view));
+    editor.disabled = insert.disabled = insertSingleLine.disabled = expand.disabled = send.disabled = !ready;
+    targetLabel.textContent = view
+      ? `Pane ${view.paneId.slice(0, 8)} · ${ready ? "Ctrl+Enter로 전송" : "터미널을 먼저 실행하세요"}` : "";
+    if (form.parentElement !== composer) composer.appendChild(form);
+    if (changed || moved) updateInsertActions();
   };
   const open = () => {
-    if (dialog.open) return;
+    if (dialog.open || writing) return;
     const view = state.paneViews.get(state.selectedPaneId);
     if (!view?.sessionId || view.detached || !isPaneViewAttached(view)) {
       setStatus("먼저 실행 중인 터미널을 선택하세요.", true);
@@ -2558,11 +2601,14 @@ function bindTerminalPrompt() {
     updateInsertActions();
     composing = false;
     showError("");
-    $("terminalPromptTarget").textContent = `Pane ${view.paneId.slice(0, 8)} · 세션 ${view.sessionId.slice(0, 8)}`;
+    targetLabel.textContent = `Pane ${view.paneId.slice(0, 8)} · 세션 ${view.sessionId.slice(0, 8)}`;
+    dialog.appendChild(form);
     dialog.showModal();
+    updateInsertActions();
     editor.focus();
   };
 
+  expand.addEventListener("click", open);
   $("terminalPromptBtn").addEventListener("click", open);
   document.addEventListener("keydown", (ev) => {
     if (!ev.defaultPrevented && !ev.isComposing && ev.keyCode !== 229 && isTerminalPromptShortcut(ev)) {
@@ -2571,7 +2617,11 @@ function bindTerminalPrompt() {
     }
   });
   editor.addEventListener("compositionstart", () => { composing = true; });
-  editor.addEventListener("compositionend", () => { composing = false; });
+  editor.addEventListener("compositionend", () => {
+    composing = false;
+    if (target) target.view.promptDraft = editor.value;
+    requestAnimationFrame(() => syncTerminalPrompt());
+  });
   editor.addEventListener("input", () => {
     if (target) target.view.promptDraft = editor.value;
     updateInsertActions();
@@ -2580,7 +2630,7 @@ function bindTerminalPrompt() {
     if (ev.ctrlKey && !ev.altKey && !ev.shiftKey && ev.key === "Enter"
       && !ev.isComposing && ev.keyCode !== 229 && !composing) {
       ev.preventDefault();
-      form.requestSubmit(insert);
+      form.requestSubmit(send);
     }
   });
   close.addEventListener("click", () => dialog.close());
@@ -2588,46 +2638,62 @@ function bindTerminalPrompt() {
     if (composing || writing) ev.preventDefault();
   });
   dialog.addEventListener("close", () => {
-    if (dialog.open || !target) return;
-    const { view, sessionId } = target;
-    target = null;
-    if (view.sessionId === sessionId && state.selectedPaneId === view.paneId && isPaneViewAttached(view)) {
-      focusPaneView(view);
-    }
+    if (dialog.open) return;
+    syncTerminalPrompt();
+    if (target && !editor.disabled) editor.focus();
   });
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
-    if (!target || writing || composing || !editor.value) return;
+    const shouldSubmit = !ev.submitter || ev.submitter === send;
+    if (!target || writing || composing || (!editor.value && !shouldSubmit)) return;
     const { view, sessionId } = target;
+    let pasted = false;
     showError("");
-    try {
+    const validateTarget = () => {
       if (view.sessionId !== sessionId || view.detached
         || state.paneViews.get(view.paneId) !== view || !isPaneViewAttached(view)) {
         throw new Error("대상 세션이 변경되었습니다. 입력창을 다시 열어 주세요.");
       }
+    };
+    const write = (data) => new Promise((resolve, reject) => {
+      view.pendingPromptWrite = { resolve, reject };
+      queuePaneInput(view, data);
+    });
+    try {
+      validateTarget();
       const preserveLineBreaks = ev.submitter !== insertSingleLine && /[\n\t]/.test(editor.value);
       const data = terminalPromptPayload(editor.value, preserveLineBreaks, view.term.modes.bracketedPasteMode);
       writing = true;
-      editor.readOnly = close.disabled = insert.disabled = insertSingleLine.disabled = true;
-      await new Promise((resolve, reject) => {
-        view.pendingPromptWrite = { resolve, reject };
-        queuePaneInput(view, data);
-      });
-      view.promptDraft = "";
-      editor.value = "";
-      dialog.close();
-      setStatus("터미널에 입력을 전달했습니다.");
+      editor.readOnly = close.disabled = insert.disabled = insertSingleLine.disabled = expand.disabled = send.disabled = true;
+      if (data) {
+        await write(data);
+        pasted = true;
+        view.promptDraft = "";
+        editor.value = "";
+        updateInsertActions();
+      }
+      if (shouldSubmit) {
+        // Let the CLI finish processing paste before delivering a separate Enter.
+        if (pasted) await new Promise((resolve) => setTimeout(resolve, 150));
+        validateTarget();
+        await write("\r");
+      }
+      if (dialog.open) dialog.close();
+      setStatus(shouldSubmit ? "터미널에 입력을 제출했습니다." : "내용을 넣었습니다. 터미널 제출을 누르면 실행됩니다.");
     } catch (err) {
       const message = err?.message ?? String(err);
-      showError(/pipe disconnected|RPC timeout/.test(message)
+      const detail = /pipe disconnected|RPC timeout/.test(message)
         ? "전달 여부를 확인할 수 없습니다. 터미널 내용을 확인한 뒤 다시 시도하세요."
-        : message);
+        : message;
+      showError(pasted ? `내용은 터미널에 넣었습니다. 제출 상태를 확인해 주세요. ${detail}` : detail);
       editor.focus();
     } finally {
       writing = false;
-      editor.readOnly = close.disabled = insert.disabled = insertSingleLine.disabled = false;
+      editor.readOnly = close.disabled = insert.disabled = insertSingleLine.disabled = expand.disabled = send.disabled = false;
+      syncTerminalPrompt();
     }
   });
+  composer.appendChild(form);
 }
 
 function bindViewToSession(view, sessionId) {
@@ -3557,6 +3623,7 @@ function renderPaneEmptyState(title, description) {
 
   wrap.append(titleEl, descriptionEl);
   paneSurface.appendChild(wrap);
+  syncTerminalPrompt();
 }
 
 function refreshPaneBindings() {

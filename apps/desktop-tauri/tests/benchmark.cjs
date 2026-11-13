@@ -149,13 +149,13 @@ async function captureScreenshots(cdp, start, firstPane, firstSession, buffers, 
     fs.writeFileSync(file, Buffer.from(data, "base64"));
     return file;
   };
-  const overview = await capture("view.png");
   await cdp.eval(`(() => {
-    document.getElementById("terminalPromptBtn").click();
     const editor = document.getElementById("terminalPromptText");
     editor.value = ${JSON.stringify("한글 입력과  연속 공백을 확인해 줘.\n긴 URL을 복사해도 주소가 이어지는지 테스트해 줘.")};
     editor.dispatchEvent(new Event("input"));
   })()`);
+  const overview = await capture("view.png");
+  await cdp.eval('document.getElementById("terminalPromptExpand").click()');
   return [overview, await capture("prompt-editor.png")];
 }
 
@@ -208,6 +208,9 @@ async function benchmark(executable, screenshots) {
     })`);
     const firstSession = await start(firstPane);
     await until(async () => (await recent()).some((text) => text.includes("FIXTURE_READY")), "PTY fixture startup");
+    assert.equal(await cdp.eval(`document.getElementById("terminalComposer").parentElement.dataset.paneId===state.selectedPaneId
+      && !document.getElementById("terminalComposer").hidden
+      && document.getElementById("terminalPromptForm").parentElement.id==="terminalComposer"`), true);
     if (screenshots) {
       return { screenshots: await captureScreenshots(cdp, start, firstPane, firstSession, buffers, workspace.workspace.id) };
     }
@@ -226,6 +229,8 @@ async function benchmark(executable, screenshots) {
     })()`);
     assert.equal(imeGuard, true);
     await until(async () => (await recent()).some((text) => text.includes("INPUT_OK:" + input)), "exact Korean prompt with consecutive spaces");
+    const submittedInput = "SUBMIT_OK:" + Buffer.from(input).toString("base64") + ":END";
+    await until(async () => (await buffers()).join("\n").includes(submittedInput), "Ctrl+Enter submits Korean input");
 
     const multiline = "한글  A\n\n  가가가";
     assert.equal(await cdp.eval(`terminalPromptPayload(${JSON.stringify(multiline)},true,true)`),
@@ -234,7 +239,7 @@ async function benchmark(executable, screenshots) {
     await until(() => cdp.eval("state.paneViews.get(state.selectedPaneId).term.modes.bracketedPasteMode"), "bracketed paste enabled");
     for (const shortcut of [true, false]) {
       await cdp.eval(`(() => {
-        document.getElementById("terminalPromptBtn").click();
+        if (!${shortcut}) document.getElementById("terminalPromptExpand").click();
         const editor=document.getElementById("terminalPromptText");
         editor.value=${JSON.stringify(multiline)};
         editor.dispatchEvent(new Event("input"));
@@ -244,12 +249,18 @@ async function benchmark(executable, screenshots) {
           document.getElementById("terminalPromptInsert").click();
         }
       })()`);
-      await until(() => cdp.eval('!document.getElementById("terminalPrompt").open'), "multiline prompt inserted");
+      await until(() => cdp.eval('!document.getElementById("terminalPrompt").open && document.getElementById("terminalPromptText").value==="" && !document.getElementById("terminalPromptText").readOnly'), "multiline prompt inserted");
     }
     const pasteMarker = "PASTE_OK:" + Buffer.from(multiline).toString("base64");
     await until(async () => (await buffers()).join("\n").split(pasteMarker).length === 3,
       "Ctrl+Enter and default button preserve Korean, blank lines and indentation through ConPTY")
       .catch(async (error) => { throw new Error(error.message + "\n" + (await buffers()).join("\n")); });
+    const submittedMultiline = "SUBMIT_OK:" + Buffer.from(multiline).toString("base64") + ":END";
+    assert.equal((await buffers()).join("\n").split(submittedMultiline).length, 2, "insert-only does not submit");
+    await cdp.eval('document.getElementById("terminalPromptSend").click()');
+    await until(async () => (await buffers()).join("\n").split(submittedMultiline).length === 3,
+      "empty editor submits the existing terminal draft without pasting it twice");
+    await until(() => cdp.eval('!document.getElementById("terminalPromptText").readOnly'), "submission finished");
     await cdp.eval("writeToPane(state.selectedPaneId,'#paste-off#')");
     await until(async () => !(await cdp.eval("state.paneViews.get(state.selectedPaneId).term.modes.bracketedPasteMode")), "bracketed paste disabled");
     const unsupported = await cdp.eval(`(async () => {
@@ -266,6 +277,18 @@ async function benchmark(executable, screenshots) {
     assert.equal(unsupported, true, "unsupported paste retains the draft and allows explicit single-line insertion");
     await until(() => cdp.eval('!document.getElementById("terminalPrompt").open'), "explicit single-line insertion");
     await until(async () => (await buffers()).join("\n").split("INPUT_OK:" + input).length === 3, "explicit single-line prompt received");
+    await cdp.eval('document.getElementById("terminalPromptSend").click()');
+    await until(async () => (await buffers()).join("\n").split(submittedInput).length === 3, "submit flattened prompt");
+    await until(() => cdp.eval('!document.getElementById("terminalPromptText").readOnly'), "flattened submission finished");
+    await cdp.eval(`(() => {
+      const editor=document.getElementById("terminalPromptText");
+      editor.value=${JSON.stringify(input)};
+      editor.dispatchEvent(new Event("input"));
+      document.getElementById("terminalPromptSend").click();
+      document.getElementById("terminalPromptSend").click();
+    })()`);
+    await until(async () => (await buffers()).join("\n").split(submittedInput).length === 4, "send button submits once despite double click");
+    await until(() => cdp.eval('!document.getElementById("terminalPromptText").readOnly'), "send button finished");
 
     const copied = await cdp.eval(`(async () => {
       const term=state.paneViews.get(state.selectedPaneId).term;
@@ -379,6 +402,48 @@ async function benchmark(executable, screenshots) {
     for (const pane of await cdp.eval("[...state.paneViews.keys()]")) await start(pane);
     await until(async () => (await recent()).filter((text) => text.includes("FIXTURE_READY")).length === 6, "six PTY fixtures");
     const six = await measure(6);
+    const composerChecks = await cdp.eval(`(async () => {
+      const panes=[...state.paneViews.keys()];
+      const editor=document.getElementById("terminalPromptText");
+      const composer=document.getElementById("terminalComposer");
+      for (const [index,pane] of panes.entries()) {
+        await selectPane(pane,{persist:false,focusTerm:false});
+        if (composer.parentElement.dataset.paneId!==pane || composer.hidden) throw new Error("Composer target mismatch");
+        editor.value="초안 "+index+"\\n  한글";
+        editor.dispatchEvent(new Event("input"));
+      }
+      for (const [index,pane] of panes.entries()) {
+        await selectPane(pane,{persist:false,focusTerm:false});
+        if (editor.value!=="초안 "+index+"\\n  한글") throw new Error("Pane draft lost");
+      }
+      document.getElementById("terminalPromptExpand").click();
+      if (!document.getElementById("terminalPrompt").open || editor.value!=="초안 5\\n  한글") throw new Error("Expanded draft lost");
+      await selectPane(panes[0],{persist:false,focusTerm:false});
+      if (editor.value!=="초안 5\\n  한글") throw new Error("Expanded editor changed its target");
+      document.getElementById("terminalPromptClose").click();
+      await new Promise(resolve=>requestAnimationFrame(resolve));
+      if (editor.closest("#terminalComposer")!==composer || editor.value!=="초안 0\\n  한글") throw new Error("Composer did not restore selected draft from dialog");
+      await selectPane(panes[5],{persist:false,focusTerm:false});
+      const split=await splitPaneInternal(state.selectedPaneId,"vertical",{autoStartIfMissing:false});
+      await selectPane(split.first,{persist:false,focusTerm:false});
+      if (editor.value!=="초안 5\\n  한글") throw new Error("Split lost original draft");
+      await selectPane(split.second,{persist:false,focusTerm:false});
+      if (editor.value!=="" || !editor.disabled) throw new Error("New pane inherited draft or permits sending without a session");
+      await onClosePane(split.second);
+      await selectPane(split.first,{persist:false,focusTerm:false});
+      if (editor.value!=="초안 5\\n  한글") throw new Error("Closing sibling lost draft");
+      await switchWorkspace(${JSON.stringify(other.workspace.id)});
+      await switchWorkspace(${JSON.stringify(firstWorkspace)});
+      await selectPane(split.first,{persist:false,focusTerm:false});
+      if (editor.value!=="초안 5\\n  한글") throw new Error("Workspace switch lost draft");
+      const host=state.paneViews.get(split.first).host;
+      const bounds=host.getBoundingClientRect();
+      const composerBounds=composer.getBoundingClientRect();
+      if (bounds.height<=0 || composerBounds.top<bounds.bottom-1) throw new Error("Composer overlaps terminal");
+      return {panes:panes.length,sharedComposer:document.querySelectorAll("#terminalComposer").length,
+        drafts:true,split:true,close:true,expanded:true,workspaces:true};
+    })()`);
+    assert.equal(composerChecks.sharedComposer, 1);
     let cliVersions;
     if (process.env.WINCMUX_TEST_CLI === "1") {
       const run = await cdp.eval(`rpc('session.run',{
@@ -393,7 +458,7 @@ async function benchmark(executable, screenshots) {
         return match && match.slice(1);
       }, "installed Codex and Claude CLI version commands");
     }
-    return { target: "tauri", exactPrompt: input, measurements: [one, six], cliVersions };
+    return { target: "tauri", exactPrompt: input, measurements: [one, six], composerChecks, cliVersions };
   } finally {
     if (cdp) {
       for (const sid of sessions) await close(sid).catch(() => {});

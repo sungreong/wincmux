@@ -5,6 +5,7 @@ process.stdin.setEncoding("utf8");
 process.stdin.setRawMode(true);
 
 let pending = "";
+let draft = "";
 process.stdout.write("FIXTURE_READY\r\n");
 process.stdin.on("data", (data) => {
   pending += data;
@@ -15,12 +16,19 @@ process.stdin.on("data", (data) => {
   // Node's Windows console input consumes the paste delimiters, while exposing
   // the pasted line feeds and spaces through its raw stdin stream.
   while (pending.startsWith(multiline)) {
+    draft += multiline;
     process.stdout.write("PASTE_OK:" + Buffer.from(multiline).toString("base64") + "\r\n");
     pending = pending.slice(multiline.length);
   }
   if (pending.startsWith(input)) {
+    draft += input;
     process.stdout.write("INPUT_OK:" + input + "\r\n");
     pending = pending.slice(input.length);
+  }
+  while (pending.startsWith("\r")) {
+    process.stdout.write("SUBMIT_OK:" + Buffer.from(draft).toString("base64") + ":END\r\n");
+    draft = "";
+    pending = pending.slice(1);
   }
   if (pending === "#burst#") {
     pending = "";

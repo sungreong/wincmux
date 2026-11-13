@@ -17,7 +17,7 @@
 | Shortcut | Action |
 |---|---|
 | Ctrl+Alt+Enter | Open the prompt editor |
-| Ctrl+Enter | Insert the editor draft into the selected terminal |
+| Ctrl+Enter | Paste and submit the editor draft, or submit existing terminal input when the editor is empty |
 | Ctrl+C | Copy selected terminal text or send an interrupt without a selection |
 | Ctrl+Shift+C | Copy selected terminal text |
 | Ctrl+/ | Show keyboard shortcuts |

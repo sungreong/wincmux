@@ -169,18 +169,21 @@
       </section>
     </div>
 
+    <section id="terminalComposer" class="pane-composer" aria-label="선택한 터미널 입력창" hidden></section>
     <dialog id="terminalPrompt" class="terminal-prompt" aria-labelledby="terminalPromptTitle">
       <form id="terminalPromptForm">
         <h2 id="terminalPromptTitle">터미널 입력창</h2>
         <p id="terminalPromptTarget"></p>
-        <textarea id="terminalPromptText" aria-label="터미널에 삽입할 글" rows="6" autofocus></textarea>
-        <p>Ctrl+Enter로 삽입합니다. CLI 화면에서 내용을 확인한 뒤 Enter로 제출하세요.</p>
-        <p id="terminalPromptMultilineHint" hidden>Ctrl+Enter는 줄바꿈을 유지해 붙여넣습니다. 여러 줄 붙여넣기를 지원하지 않는 세션에서는 한 줄로 삽입을 선택하세요.</p>
+        <textarea id="terminalPromptText" aria-label="터미널에 보낼 글" placeholder="메시지 입력… (Ctrl+Enter로 바로 전송)" rows="1" autofocus></textarea>
+        <p class="terminal-prompt-help">Ctrl+Enter는 내용을 넣고 Enter까지 보내 바로 제출합니다. 입력창이 비어 있으면 터미널에 쌓인 현재 입력을 제출합니다. 내용만 넣으려면 삽입만을 선택하세요.</p>
+        <p id="terminalPromptMultilineHint" hidden>줄바꿈을 유지해 전달합니다. 여러 줄 붙여넣기를 지원하지 않는 세션에서는 한 줄로 삽입을 선택한 뒤 터미널 제출을 누르세요.</p>
         <p id="terminalPromptError" role="alert" hidden></p>
         <div class="terminal-prompt-actions">
+          <button id="terminalPromptExpand" type="button" title="큰 입력창으로 열기" aria-label="큰 입력창으로 열기">확장</button>
           <button id="terminalPromptClose" type="button">닫기</button>
-          <button id="terminalPromptInsert" type="submit">터미널에 삽입</button>
+          <button id="terminalPromptInsert" type="submit">삽입만</button>
           <button id="terminalPromptSingleLine" type="submit" hidden>한 줄로 삽입</button>
+          <button id="terminalPromptSend" type="submit" title="내용을 넣고 Enter로 제출합니다. 입력창이 비어 있으면 터미널의 현재 입력을 제출합니다.">바로 전송</button>
         </div>
       </form>
     </dialog>

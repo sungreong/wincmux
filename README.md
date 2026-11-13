@@ -4,18 +4,18 @@
 
 WinCMux is a Windows terminal workspace for Codex CLI, Claude Code, PowerShell, and other CLI tools. It uses Tauri, WebView2, xterm.js, and a Rust core built on Windows ConPTY. The installed app runs its core without Node.js.
 
-![WinCMux Tauri 0.1.1 with two terminal panes](assets/view.png)
+![WinCMux Tauri 0.1.4 with two terminal panes and the bottom prompt editor](assets/view.png)
 
-*WinCMux Tauri 0.1.1 running an isolated demo workspace with sample terminal output.*
+*WinCMux Tauri 0.1.4 running an isolated demo workspace with sample terminal output.*
 
 - Run independent terminals in split panes and organize them into workspaces and groups. Hide and reattach running panes.
-- Open the Korean prompt editor with **Ctrl+Alt+Enter**. Press **Ctrl+Enter** to insert a draft, then review and submit it in the terminal.
+- Write in the editor below the selected pane. Drafts follow each pane through selection and splitting. Press **Ctrl+Enter** or **바로 전송** to paste and submit. Use **확장** or **Ctrl+Alt+Enter** to open the larger editor.
 - Select a wrapped URL and press **Ctrl+C** to copy one address. Ordinary multiline selections retain their line breaks.
 - Reopen recorded sessions, resume Codex and Claude conversations, receive Windows notifications, and manage workspace instructions, text snippets, and images.
 
 ![WinCMux Korean prompt editor with a multiline draft](assets/prompt-editor.png)
 
-The default button and **Ctrl+Enter** preserve line breaks using bracketed paste. Choose **한 줄로 삽입** for sessions that require a single line.
+**바로 전송** and **Ctrl+Enter** preserve line breaks and send a separate Enter to submit. **삽입만** only pastes the draft. With an empty editor, **터미널 제출** submits the terminal's existing input. Choose **한 줄로 삽입** followed by **터미널 제출** for sessions that require a single line.
 
 ## What improved
 

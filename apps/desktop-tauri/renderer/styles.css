@@ -1722,6 +1722,86 @@ li.active .ws-delete-btn {
   gap: 8px;
 }
 
+.pane-leaf:has(> .pane-composer:not([hidden])) {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.pane-composer {
+  min-width: 0;
+  border-top: 1px solid var(--border);
+  padding-top: 5px;
+}
+
+.pane-composer[hidden] {
+  display: none;
+}
+
+.pane-composer form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.pane-composer textarea {
+  width: 100%;
+  min-height: 30px;
+  padding: 5px 8px;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  line-height: 20px;
+}
+
+.pane-composer textarea:focus-visible {
+  outline: 1px solid var(--accent);
+}
+
+.pane-composer #terminalPromptTarget {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.pane-composer #terminalPromptError {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--error);
+  font-size: 12px;
+}
+
+.pane-composer button {
+  padding: 3px 7px;
+  font-size: 12px;
+}
+
+#terminalPromptSend {
+  border-color: var(--accent);
+  background: #17452f;
+  color: #effff5;
+}
+
+.pane-composer .terminal-prompt-actions {
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pane-composer h2,
+.pane-composer .terminal-prompt-help,
+.pane-composer #terminalPromptClose,
+.pane-composer #terminalPromptMultilineHint,
+.terminal-prompt #terminalPromptExpand {
+  display: none;
+}
+
 .pane-terminal-overlay {
   position: absolute;
   inset: 0;

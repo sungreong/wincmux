@@ -1239,6 +1239,7 @@ async function splitPaneInternal(paneId, direction, options = {}) {
   }
   const previousPaneId = paneId;
   const previousSession = state.paneSessions[previousPaneId] ?? null;
+  const previousPromptDraft = state.paneViews.get(previousPaneId)?.promptDraft ?? "";
   const previousGroupId = groupForPane(previousPaneId)?.id ?? state.selectedGroupId ?? defaultPaneGroup()?.id ?? null;
   const inheritedFontSize = currentPaneFontSize(ws.id, previousPaneId);
   const res = await rpc("layout.split", {
@@ -1280,6 +1281,8 @@ async function splitPaneInternal(paneId, direction, options = {}) {
   await loadSessions();
   paneApi.normalizePaneSessions();
   paneApi.renderPaneSurface(true);
+  const firstView = state.paneViews.get(first);
+  if (firstView) firstView.promptDraft = previousPromptDraft;
   paneApi.refreshPaneBindings();
   hiddenRefreshPanesUi();
   if (state.selectedPaneId) {
