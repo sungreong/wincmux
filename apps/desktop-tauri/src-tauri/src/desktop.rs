@@ -15,7 +15,7 @@ use std::{
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem},
-    AppHandle, Emitter, Manager, UserAttentionType,
+    AppHandle, Emitter, Manager,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
@@ -33,26 +33,6 @@ impl Desktop {
             context: Mutex::default(),
             assets: Mutex::default(),
         })
-    }
-
-    pub fn notify(&self, app: &AppHandle, notification: &Value) -> (bool, bool) {
-        let context = self.context.lock().unwrap().clone();
-        let in_app = app
-            .get_webview_window("main")
-            .is_some_and(|window| window.is_focused().unwrap_or(false));
-        let suppressed = in_app
-            && context["workspace_id"] == notification["workspace_id"]
-            && (notification["session_id"].is_null()
-                || context["session_id"] == notification["session_id"]);
-        if suppressed {
-            return (false, true);
-        }
-        if !in_app {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.request_user_attention(Some(UserAttentionType::Informational));
-            }
-        }
-        (toast::show(app, notification.clone()).is_ok(), false)
     }
 
     pub fn action(&self, app: &AppHandle, action: &str, p: Value) -> Result<Value> {

@@ -1546,6 +1546,7 @@ async function selectPane(paneId, options = {}) {
       await rpc("layout.focus", { workspace_id: ws.id, pane_id: paneId });
     }
   }
+  if (focusTerm) await acknowledgePaneAgent(paneId).catch(() => {});
   await paneHandlers.markPaneNotificationsRead(paneId).catch(() => {});
 
   if (focusTerm) {
@@ -1729,7 +1730,7 @@ function schedulePaneFitRetry(view, options = {}) {
 }
 
 function fitPaneView(view, options = {}) {
-  if (!view?.term || !view.fitAddon) {
+  if (view?.restoringSnapshot || !view?.term || !view.fitAddon) {
     return false;
   }
   if (view.fitRaf) {
@@ -2211,7 +2212,7 @@ async function syncPaneSize(paneId) {
     return;
   }
   const view = state.paneViews.get(paneId);
-  if (!view || !view.sessionId) {
+  if (!view || !view.sessionId || view.restoringSnapshot) {
     return;
   }
   if (!isPaneViewAttached(view)) {
@@ -2402,6 +2403,9 @@ function recordPaneInputPerf(view, sessionId, queued, sent, dropped, latency) {
 }
 
 function queuePaneInput(view, data) {
+  if (state.coreDisconnected || view.restoringSnapshot) return;
+  // The core answers terminal device queries even when no renderer is attached.
+  if (/^\x1b\[(?:\??\d+;\d+R|[?>][\d;]*c|0n)$/.test(data)) return;
   if (!view.sessionId || !data) {
     return;
   }
@@ -2550,7 +2554,8 @@ function bindTerminalPrompt() {
   };
   const updateInsertActions = () => {
     const hasLineBreaks = /[\n\t]/.test(editor.value);
-    insert.textContent = hasLineBreaks ? "줄바꿈 유지해 삽입만" : "삽입만";
+    insert.textContent = "삽입만";
+    insert.title = hasLineBreaks ? "줄바꿈과 들여쓰기를 유지해 삽입합니다. 제출하지 않습니다." : "입력 내용을 삽입합니다. 제출하지 않습니다.";
     send.textContent = editor.value ? "바로 전송" : "터미널 제출";
     insertSingleLine.hidden = multilineHint.hidden = !hasLineBreaks;
     editor.style.height = "auto";
@@ -2601,7 +2606,8 @@ function bindTerminalPrompt() {
     updateInsertActions();
     composing = false;
     showError("");
-    targetLabel.textContent = `Pane ${view.paneId.slice(0, 8)} · 세션 ${view.sessionId.slice(0, 8)}`;
+    targetLabel.textContent = `Terminal ${leafPanes().findIndex((p) => p.pane_id === view.paneId) + 1}`;
+    targetLabel.title = "Ctrl+Enter로 전송";
     dialog.appendChild(form);
     dialog.showModal();
     updateInsertActions();
@@ -2924,7 +2930,8 @@ function createPaneLeaf(node, hosts) {
   header.className = "pane-header";
   const idEl = document.createElement("span");
   idEl.className = "pane-id";
-  idEl.textContent = paneId.slice(0, 8);
+  idEl.textContent = `Terminal ${Math.max(0, leafPanes().findIndex((p) => p.pane_id === paneId)) + 1}`;
+  idEl.title = `Pane ${paneId}`;
   const unreadBadgeEl = document.createElement("span");
   unreadBadgeEl.className = "pane-unread-badge";
   unreadBadgeEl.hidden = true;
@@ -3123,7 +3130,8 @@ function createPaneLeaf(node, hosts) {
     }
     const isTerminalClick = target instanceof HTMLElement && Boolean(target.closest(".pane-terminal-host"));
     selectPane(paneId, { persist: true, focusTerm: false })
-      .then(() => {
+      .then(async () => {
+        await acknowledgePaneAgent(paneId);
         if (isTerminalClick) {
           focusPaneTerm(paneId);
         }
@@ -3133,6 +3141,7 @@ function createPaneLeaf(node, hosts) {
   hosts.push({ paneId, host: terminalHost });
   state.paneCards.set(paneId, card);
   state.paneMeta.set(paneId, {
+    idEl,
     actionsPrimary,
     actionsOverflowWrap,
     actionsOverflowBtn,
@@ -3220,8 +3229,9 @@ function createPaneView(paneId, host) {
     scrollOnUserInput: true,
     scrollSensitivity: 1,
     theme: {
-      background: "#060b11",
-      foreground: "#e8edf7"
+      background: getComputedStyle(document.documentElement).getPropertyValue("--surface-terminal").trim(),
+      foreground: getComputedStyle(document.documentElement).getPropertyValue("--text-primary").trim(),
+      selectionBackground: getComputedStyle(document.documentElement).getPropertyValue("--surface-selected").trim()
     }
   });
 
@@ -3659,6 +3669,7 @@ function refreshPaneBindings() {
     const card = state.paneCards.get(paneId);
     const shouldUpdateBinding = meta?._bindingKey !== binding.key;
     if (meta) {
+      if (meta.idEl) meta.idEl.textContent = `Terminal ${leaves.findIndex((p) => p.pane_id === paneId) + 1}`;
       if (shouldUpdateBinding) {
         meta.statusEl.textContent = binding.statusText;
         meta.statusEl.title = binding.statusTitle;
@@ -3698,6 +3709,7 @@ function refreshPaneBindings() {
 
   rebuildPaneSessionLookup();
   applyPaneSelectionStyles();
+  renderAgentPaneStates();
 }
 
 async function openSessionPicker(paneId, anchorBtn) {

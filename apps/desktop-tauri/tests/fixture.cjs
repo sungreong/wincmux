@@ -36,6 +36,20 @@ process.stdin.on("data", (data) => {
       process.stdout.write("\x1b[36m" + String(i).padStart(4, "0") + "|" + output + "\x1b[0m\r\n");
     }
   }
+  const status = /^#status:(working|blocked|done|idle|error)#$/.exec(pending);
+  if (status) {
+    pending = "";
+    process.stdout.write("\x1b]7501;state=" + status[1] + ":app=fixture\x1b\\");
+  }
+  if (pending === "#tui-on#") {
+    pending = "";
+    process.stdout.write("\x1b[?1049l\x1b[0m\x1b[2J\x1b[HMAIN 한글  A\x1b[?1049h\x1b[2J\x1b[H\x1b[36mALT 한글  A\x1b[?2004h\x1b[?25l");
+  }
+  if (pending === "#tui-off#") { pending = ""; process.stdout.write("\x1b[?1049l"); }
+  if (pending === "#overflow#") {
+    pending = "";
+    process.stdout.write("x".repeat(850000) + "\x1b[2J\x1b[H\x1b[36mALT 한글  A\x1b[?25l");
+  }
   const demo = /^#demo:(chat|test)#$/.exec(pending);
   if (demo) {
     pending = "";

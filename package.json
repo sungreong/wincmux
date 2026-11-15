@@ -1,17 +1,19 @@
 {
   "name": "wincmux",
-  "version": "0.1.4",
+  "version": "0.2.1",
   "private": true,
   "description": "WinCMux Windows terminal workspace powered by Tauri and Rust",
   "scripts": {
     "dev": "cd apps/desktop-tauri && tauri dev",
     "build:ui": "node apps/desktop-tauri/scripts/build-ui.mjs",
     "build": "cd apps/desktop-tauri && tauri build --no-bundle",
-    "pretest": "npm run build:ui",
-    "test": "node --test apps/desktop-tauri/tests/adapter.test.cjs && cargo test --locked --release --manifest-path apps/desktop-tauri/src-tauri/Cargo.toml",
-    "lint": "node apps/desktop-tauri/scripts/check-renderer-syntax.mjs && cargo fmt --check --manifest-path apps/desktop-tauri/src-tauri/Cargo.toml",
+    "pretest": "node apps/desktop-tauri/scripts/build-runtime.mjs",
+    "test": "node --test apps/desktop-tauri/tests/adapter.test.cjs && cargo test --locked --offline --release --workspace --manifest-path apps/desktop-tauri/src-tauri/Cargo.toml",
+    "lint": "node apps/desktop-tauri/scripts/check-renderer-syntax.mjs && cargo fmt --all --check --manifest-path apps/desktop-tauri/src-tauri/Cargo.toml",
     "test:ui": "node --experimental-websocket apps/desktop-tauri/tests/benchmark.cjs",
-    "package:win": "cd apps/desktop-tauri && tauri build --bundles nsis"
+    "package:win": "cd apps/desktop-tauri && tauri build --bundles nsis",
+    "test:runtime": "node --test apps/desktop-tauri/tests/runtime.test.cjs",
+    "test:lifecycle": "node --experimental-websocket apps/desktop-tauri/tests/lifecycle.cjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.12.4",

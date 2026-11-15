@@ -5,9 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>WinCMux</title>
     <link rel="stylesheet" href="./vendor/xterm.css" />
+    <link rel="stylesheet" href="./design-tokens.css" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
+    <div id="coreDisconnected" hidden role="alert">코어 연결 끊김 — 다시 연결 중입니다.</div>
     <div id="appGrid" class="app-grid">
       <aside class="panel panel-left">
         <h2>Workspaces</h2>
@@ -18,8 +20,8 @@
             <span class="workspace-toggle-icon">▾</span>
           </button>
           <div class="workspace-view-toggle" aria-label="Workspace list density">
-            <button id="workspaceCompactBtn" type="button">Brief</button>
-            <button id="workspaceDetailBtn" type="button">Detail</button>
+            <button id="workspaceCompactBtn" type="button" aria-label="Compact workspace list">Brief</button>
+            <button id="workspaceDetailBtn" type="button" aria-label="Detailed workspace list">Detail</button>
           </div>
         </div>
 
@@ -39,9 +41,8 @@
         <div class="workspace-notepad">
           <div class="notepad-header">
             <span class="notepad-title">Notes</span>
-            <span class="notepad-hint">per workspace · auto-saved</span>
           </div>
-          <textarea id="workspaceNotepad" class="notepad-textarea" placeholder="메모 입력… (한글 OK)"></textarea>
+          <textarea id="workspaceNotepad" class="notepad-textarea" placeholder="프로젝트 메모" title="워크스페이스별 자동 저장"></textarea>
         </div>
       </aside>
 
@@ -110,6 +111,7 @@
               </svg>
             </button>
           </div>
+          <button id="shutdownAllBtn" class="toolbar-btn" title="모든 작업을 종료하고 앱을 완전히 종료합니다">완전히 종료</button>
           <span id="selectedPaneLabel" class="muted toolbar-pane-label">Selected Pane: -</span>
           <div id="hiddenPanesPopover" class="hidden-panes-popover"></div>
         </div>
@@ -121,11 +123,11 @@
       <div id="rightResizeHandle" class="resize-handle" title="Resize right panel"></div>
 
       <aside class="panel panel-right">
-        <h2 id="notifTitle">Notifications (0 unread)</h2>
+        <h2 id="notifTitle">Notifications</h2>
           <div class="notif-actions">
-            <button id="refreshUnreadBtn">Refresh</button>
-            <button id="markLatestReadBtn" title="Mark unread notifications in the selected workspace as read">Mark WS</button>
-            <button id="clearUnreadBtn">Clear</button>
+            <button id="refreshUnreadBtn" title="Refresh notifications" aria-label="Refresh notifications"><svg class="control-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 7a5 5 0 1 0-1 5M13 2v5H8"/></svg></button>
+            <button id="markLatestReadBtn" title="Mark unread notifications in the selected workspace as read">Read workspace</button>
+            <button id="clearUnreadBtn">Read all</button>
           </div>
         <ul id="notificationList"></ul>
       </aside>
@@ -138,7 +140,7 @@
           <button id="wsInfoCloseBtn" class="ws-info-close" title="Close">✕</button>
         </div>
         <div id="wsQuickActions" class="ws-quick-actions"></div>
-        <textarea id="wsDescInput" class="ws-desc-input" placeholder="Description… (auto-saved)"></textarea>
+        <textarea id="wsDescInput" class="ws-desc-input" placeholder="Project description" title="Saved automatically"></textarea>
         <div id="wsGitSummary" class="ws-git-summary" style="display:none"></div>
         <div id="wsAgentAssets" class="ws-agent-assets" style="display:none"></div>
         <div id="wsInputAssets" class="ws-input-assets" style="display:none"></div>
@@ -175,8 +177,11 @@
         <h2 id="terminalPromptTitle">터미널 입력창</h2>
         <p id="terminalPromptTarget"></p>
         <textarea id="terminalPromptText" aria-label="터미널에 보낼 글" placeholder="메시지 입력… (Ctrl+Enter로 바로 전송)" rows="1" autofocus></textarea>
-        <p class="terminal-prompt-help">Ctrl+Enter는 내용을 넣고 Enter까지 보내 바로 제출합니다. 입력창이 비어 있으면 터미널에 쌓인 현재 입력을 제출합니다. 내용만 넣으려면 삽입만을 선택하세요.</p>
-        <p id="terminalPromptMultilineHint" hidden>줄바꿈을 유지해 전달합니다. 여러 줄 붙여넣기를 지원하지 않는 세션에서는 한 줄로 삽입을 선택한 뒤 터미널 제출을 누르세요.</p>
+        <details class="terminal-prompt-help">
+          <summary>입력 도움말</summary>
+          <p>Ctrl+Enter로 전송합니다. ‘삽입만’은 Enter를 보내지 않습니다.</p>
+          <p id="terminalPromptMultilineHint" hidden>여러 줄 붙여넣기를 지원하지 않는 세션에서는 ‘한 줄로 삽입’을 사용하세요.</p>
+        </details>
         <p id="terminalPromptError" role="alert" hidden></p>
         <div class="terminal-prompt-actions">
           <button id="terminalPromptExpand" type="button" title="큰 입력창으로 열기" aria-label="큰 입력창으로 열기">확장</button>

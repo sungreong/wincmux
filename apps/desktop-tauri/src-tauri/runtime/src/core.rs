@@ -17,7 +17,7 @@ use std::{
 type Sink = Arc<dyn Fn(Value) -> bool + Send + Sync>;
 type HistoryHandle = Arc<Mutex<History>>;
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, serde::Serialize, Clone)]
 pub struct Filter {
     workspace_id: Option<String>,
     session_id: Option<String>,
@@ -53,7 +53,7 @@ struct LiveSession {
 #[derive(Default)]
 struct Sessions {
     running: HashMap<String, LiveSession>,
-    recent: VecDeque<(String, HistoryHandle)>,
+    recent: VecDeque<(String, HistoryHandle, Instant)>,
 }
 
 #[derive(Default)]
@@ -63,7 +63,20 @@ struct GitSchedule {
     terminal_activity: Option<Instant>,
 }
 
+#[derive(Default)]
+struct Runtime {
+    clients: HashMap<String, Value>,
+    idle_since: Option<Instant>,
+    prepare_until: Option<Instant>,
+    stopping: bool,
+    stop_at: Option<Instant>,
+    activation: Option<Value>,
+}
+
 pub struct Core {
+    runtime: Mutex<Runtime>,
+    instance: String,
+    data_directory: String,
     db: Mutex<Connection>,
     sessions: Mutex<Sessions>,
     changes: Mutex<()>,
@@ -74,6 +87,13 @@ pub struct Core {
 impl Core {
     pub fn new(path: &Path) -> Result<Arc<Self>> {
         let core = Arc::new(Self {
+            runtime: Mutex::default(),
+            instance: id(),
+            data_directory: path
+                .parent()
+                .and_then(|p| p.canonicalize().ok())
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             db: Mutex::new(store::open(path)?),
             sessions: Mutex::default(),
             changes: Mutex::default(),
@@ -95,6 +115,52 @@ impl Core {
         Ok(core)
     }
 
+    pub fn flush(&self) {
+        let _ = self
+            .db
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+    }
+    pub fn runtime_info(&self) -> Value {
+        let terminals = self.sessions.lock().unwrap().running.len();
+        let runtime = self.runtime.lock().unwrap();
+        json!({"version":env!("CARGO_PKG_VERSION"),"protocol_version":1,"instance_id":self.instance,"data_directory":self.data_directory,"pid":std::process::id(),"terminal_count":terminals,"client_count":runtime.clients.len(),"preparing_update":runtime.prepare_until.is_some(),"stopping":runtime.stopping,"subscriber_count":self.subscribers.lock().unwrap().len()})
+    }
+    pub fn detach_client(&self, id: &str) {
+        self.runtime.lock().unwrap().clients.remove(id);
+    }
+    pub fn suppress_notification(&self, n: &Value) -> bool {
+        self.runtime.lock().unwrap().clients.values().any(|c| {
+            c["app_focused"] == true
+                && c["workspace_id"] == n["workspace_id"]
+                && (n["session_id"].is_null() || c["session_id"] == n["session_id"])
+        })
+    }
+    pub fn activate(&self, activation: Value) {
+        self.runtime.lock().unwrap().activation = Some(activation.clone());
+        self.emit("runtime.activation", activation);
+    }
+    pub fn should_exit(&self) -> bool {
+        let empty = self.sessions.lock().unwrap().running.is_empty();
+        let mut r = self.runtime.lock().unwrap();
+        if r.prepare_until.is_some_and(|t| t <= Instant::now()) {
+            r.prepare_until = None;
+        }
+        if r.stopping {
+            return r.stop_at.is_some_and(|time| time <= Instant::now());
+        }
+        if empty && r.clients.is_empty() {
+            if r.prepare_until.is_some() {
+                return r.stop_at.is_some_and(|time| time <= Instant::now());
+            }
+            return r.idle_since.get_or_insert_with(Instant::now).elapsed()
+                >= Duration::from_secs(30);
+        }
+        r.idle_since = None;
+        false
+    }
+
     pub fn subscribe(&self, filter: Filter, sink: Sink) -> String {
         let subscription = id();
         self.subscribers
@@ -108,7 +174,7 @@ impl Core {
         self.subscribers.lock().unwrap().remove(id);
     }
 
-    fn emit(&self, method: &str, params: Value) {
+    pub fn emit(&self, method: &str, params: Value) {
         let listeners: Vec<_> = self
             .subscribers
             .lock()
@@ -128,6 +194,105 @@ impl Core {
     pub fn rpc(self: &Arc<Self>, method: &str, p: Value) -> Result<Value> {
         let ok = json!({"ok":true});
         match method {
+            "runtime.info" => Ok(self.runtime_info()),
+            "client.attach" => {
+                let client = text(&p, "client_id")?;
+                let mut runtime = self.runtime.lock().unwrap();
+                if runtime.prepare_until.is_some() || runtime.stopping {
+                    return Err("runtime is preparing to stop".into());
+                }
+                runtime.clients.insert(client.into(), json!({}));
+                runtime.idle_since = None;
+                Ok(json!({"runtime":self.instance,"activation":runtime.activation.clone()}))
+            }
+            "client.context" => {
+                let mut runtime = self.runtime.lock().unwrap();
+                let context = runtime
+                    .clients
+                    .get_mut(text(&p, "client_id")?)
+                    .ok_or("client is not attached")?;
+                *context = p["context"].clone();
+                Ok(ok)
+            }
+            "client.detach" => {
+                self.detach_client(text(&p, "client_id")?);
+                Ok(ok)
+            }
+            "client.activation_ack" => {
+                self.runtime.lock().unwrap().activation = None;
+                Ok(ok)
+            }
+            "runtime.cancel_update" => {
+                self.runtime.lock().unwrap().prepare_until = None;
+                Ok(ok)
+            }
+            "runtime.prepare_update" | "runtime.shutdown" | "runtime.shutdown_all" => {
+                let _change = self.changes.lock().unwrap();
+                let count = self.sessions.lock().unwrap().running.len();
+                if method != "runtime.shutdown_all" && count != 0 {
+                    return Err(format!("{count} terminals are still running; finish them before updating or removing WinCMux").into());
+                }
+                if method == "runtime.shutdown_all" && p["confirmed"] != true {
+                    return Err("explicit confirmation is required".into());
+                }
+                {
+                    let mut runtime = self.runtime.lock().unwrap();
+                    runtime.prepare_until = Some(Instant::now() + Duration::from_secs(60));
+                    runtime.stopping = method != "runtime.prepare_update";
+                }
+                if method == "runtime.shutdown_all" {
+                    self.close_all();
+                }
+                // Do not exit while close_all is still terminating children. Leave
+                // a short response-drain window after publishing the shutdown event.
+                self.runtime.lock().unwrap().stop_at =
+                    Some(Instant::now() + Duration::from_millis(500));
+                self.emit("runtime.stopping", json!({"reason":method}));
+                Ok(ok)
+            }
+            "session.snapshot" => {
+                let terminal = self.terminal(text(&p, "session_id")?)?;
+                let snapshot = terminal.history.lock().unwrap().snapshot();
+                Ok(snapshot)
+            }
+            "runtime.activate" => {
+                self.activate(p);
+                Ok(ok)
+            }
+
+            "agent.list" => {
+                let sessions = self.sessions.lock().unwrap();
+                let items: Vec<_> = sessions
+                    .running
+                    .iter()
+                    .map(|(sid, live)| {
+                        let mut state = live.detector.snapshot();
+                        state["session_id"] = json!(sid);
+                        state["workspace_id"] = json!(live.terminal.workspace);
+                        state
+                    })
+                    .collect();
+                Ok(json!({"items":items}))
+            }
+            "agent.acknowledge" => {
+                let sid = text(&p, "session_id")?;
+                let revision = p["revision"].as_u64().ok_or("revision is required")?;
+                {
+                    let mut sessions = self.sessions.lock().unwrap();
+                    let live = sessions
+                        .running
+                        .get_mut(sid)
+                        .ok_or("PTY session not attached")?;
+                    live.detector.acknowledge(revision);
+                }
+                self.publish_agent(sid);
+                let sessions = self.sessions.lock().unwrap();
+                let agent = sessions
+                    .running
+                    .get(sid)
+                    .map(|live| live.detector.snapshot());
+                Ok(json!({"agent":agent}))
+            }
             "session.run" => self.start_session(&p),
             "session.write" => {
                 let session = text(&p, "session_id")?;
@@ -145,6 +310,7 @@ impl Core {
                     Arc::clone(&current.terminal)
                 };
                 terminal.write(input)?;
+                self.publish_agent(session);
                 self.git.lock().unwrap().terminal_activity = Some(Instant::now());
                 Ok(ok)
             }
@@ -168,8 +334,8 @@ impl Core {
                             sessions
                                 .recent
                                 .iter()
-                                .find(|(key, _)| key == sid)
-                                .map(|(_, h)| Arc::clone(h))
+                                .find(|(key, _, _)| key == sid)
+                                .map(|(_, h, _)| Arc::clone(h))
                         })
                 };
                 let (output, end, available) = if let Some(history) = history {
@@ -241,6 +407,12 @@ impl Core {
 
     fn start_session(self: &Arc<Self>, p: &Value) -> Result<Value> {
         let _change = self.changes.lock().unwrap();
+        {
+            let r = self.runtime.lock().unwrap();
+            if r.stopping || r.prepare_until.is_some() {
+                return Err("runtime is preparing to stop".into());
+            }
+        }
         let workspace = text(p, "workspace_id")?;
         let cmd = text(p, "cmd")?;
         let args: Vec<String> = match p.get("args") {
@@ -305,6 +477,7 @@ impl Core {
             .running
             .get_mut(sid)
             .map(|session| session.detector.output(&output));
+        self.publish_agent(sid);
         if let Some((notice, resume)) = result {
             if let Some(resume) = resume {
                 let _ = self.record_resume(sid, workspace, resume);
@@ -334,6 +507,9 @@ impl Core {
     }
 
     fn refresh_git(&self) -> Result<()> {
+        if self.runtime.lock().unwrap().clients.is_empty() {
+            return Ok(());
+        }
         let now = Instant::now();
         let active = {
             let git = self.git.lock().unwrap();
@@ -393,14 +569,21 @@ impl Core {
             let Some(session) = sessions.running.remove(sid) else {
                 return;
             };
-            sessions
-                .recent
-                .push_back((sid.into(), Arc::clone(&session.terminal.history)));
+            sessions.recent.push_back((
+                sid.into(),
+                Arc::clone(&session.terminal.history),
+                Instant::now(),
+            ));
             if sessions.recent.len() > 8 {
                 sessions.recent.pop_front();
             }
             session
         };
+        let _ = self
+            .db
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM hidden_sessions WHERE session_id=?", [sid]);
         let status = if code == 0 { "exited" } else { "failed" };
         let _ = self.db.lock().unwrap().execute(
             &format!("UPDATE sessions SET status=?,exit_code=?,ended_at={NOW} WHERE id=?"),
@@ -413,7 +596,7 @@ impl Core {
     fn close_session(&self, sid: &str) -> Result<()> {
         let session = {
             let mut sessions = self.sessions.lock().unwrap();
-            sessions.recent.retain(|(key, _)| key != sid);
+            sessions.recent.retain(|(key, _, _)| key != sid);
             sessions.running.remove(sid)
         };
         if let Some(session) = &session {
@@ -422,6 +605,7 @@ impl Core {
         {
             let db = self.db.lock().unwrap();
             let tx = db.unchecked_transaction()?;
+            tx.execute("DELETE FROM hidden_sessions WHERE session_id=?", [sid])?;
             tx.execute(
                 &format!(
                     "UPDATE sessions SET status='exited',exit_code=0,ended_at={NOW} WHERE id=?"
@@ -477,7 +661,28 @@ impl Core {
         Ok(())
     }
 
+    fn publish_agent(&self, sid: &str) {
+        let update = {
+            let mut sessions = self.sessions.lock().unwrap();
+            sessions.running.get_mut(sid).and_then(|live| {
+                live.detector.take_update().map(|mut state| {
+                    state["session_id"] = json!(sid);
+                    state["workspace_id"] = json!(live.terminal.workspace);
+                    state
+                })
+            })
+        };
+        if let Some(update) = update {
+            self.emit("session.agent_changed", update);
+        }
+    }
+
     fn check_idle(&self) {
+        self.sessions
+            .lock()
+            .unwrap()
+            .recent
+            .retain(|(_, _, time)| time.elapsed() < Duration::from_secs(30));
         let notices: Vec<_> = self
             .sessions
             .lock()
@@ -491,6 +696,17 @@ impl Core {
                     .map(|notice| (sid.clone(), session.terminal.workspace.clone(), notice))
             })
             .collect();
+        let ids: Vec<_> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .running
+            .keys()
+            .cloned()
+            .collect();
+        for sid in ids {
+            self.publish_agent(&sid);
+        }
         for (sid, workspace, notice) in notices {
             let _ = self.announce(&sid, &workspace, notice);
         }
@@ -498,7 +714,7 @@ impl Core {
 
     fn announce(&self, sid: &str, workspace: &str, notice: Notice) -> Result<Value> {
         self.notify(json!({"workspace_id":workspace,"session_id":sid,"title":notice.title,"body":notice.body,
-            "kind":notice.kind,"source_kind":"pattern","source":"core-pattern-detector",
+            "kind":notice.kind,"source_kind":notice.source,"source":format!("core-{}",notice.source),
             "level":if notice.kind == "task_done" {"success"} else {"info"},
             "dedup_key":format!("{sid}|{}|{}",notice.kind,notice.key)}))
     }
@@ -568,6 +784,28 @@ pub fn git_info(path: &Path) -> Value {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn lifecycle_guards_prevent_start_during_updates_and_clear_stale_focus() -> Result<()> {
+        let core = Core::new(Path::new(":memory:"))?;
+        core.rpc("client.attach", json!({"client_id":"ui"}))?;
+        core.rpc("client.context",json!({"client_id":"ui","context":{"app_focused":true,"workspace_id":"ws","session_id":"s"}}))?;
+        let notification = json!({"workspace_id":"ws","session_id":"s"});
+        assert!(core.suppress_notification(&notification));
+        core.detach_client("ui");
+        assert!(!core.suppress_notification(&notification));
+        core.rpc("runtime.prepare_update", json!({}))?;
+        assert!(core
+            .rpc("session.run", json!({}))
+            .unwrap_err()
+            .to_string()
+            .contains("preparing"));
+        core.rpc("runtime.cancel_update", json!({}))?;
+        assert!(!core.should_exit());
+        core.runtime.lock().unwrap().idle_since = Some(Instant::now() - Duration::from_secs(31));
+        assert!(core.should_exit());
+        Ok(())
+    }
 
     #[test]
     fn conpty_round_trips_korean_spaces_and_reports_natural_exit() -> Result<()> {

@@ -1,0 +1,10 @@
+import { execFileSync } from "node:child_process";
+import { copyFileSync, mkdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+await import("./build-ui.mjs");
+const root = fileURLToPath(new URL("../src-tauri/", import.meta.url));
+const debug = process.argv.includes("--debug");
+execFileSync("cargo", ["build", "--locked", "--manifest-path", `${root}/Cargo.toml`, "-p", "wincmux-runtime", "--bin", "wincmux-core", ...(debug ? [] : ["--release"])], { stdio: "inherit", windowsHide: true });
+const target = execFileSync("rustc", ["--print", "host-tuple"], { encoding: "utf8", windowsHide: true }).trim();
+mkdirSync(`${root}/binaries`, { recursive: true });
+copyFileSync(`${root}/target/${debug ? "debug" : "release"}/wincmux-core.exe`, `${root}/binaries/wincmux-core-${target}.exe`);

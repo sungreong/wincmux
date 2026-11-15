@@ -18,10 +18,13 @@ pub struct History {
     start: usize,
     end: usize,
     read_at: usize,
+    screen: crate::screen::Screen,
+    replies: String,
 }
 
 impl History {
     pub fn append(&mut self, chunk: &str) -> usize {
+        self.replies.push_str(&self.screen.process(chunk));
         self.end += chunk.len();
         self.chunks.push_back(chunk.into());
         let keep_from = self.end.saturating_sub(HISTORY_BYTES);
@@ -73,6 +76,10 @@ impl History {
             from,
             self.end.min(from.saturating_add(limit)).max(self.start),
         )
+    }
+
+    pub fn snapshot(&self) -> serde_json::Value {
+        self.screen.snapshot(self.end)
     }
 
     pub fn end_offset(&self) -> usize {
@@ -197,7 +204,6 @@ impl Spawned {
         let output = thread::spawn(move || {
             let mut buffer = [0; 16 * 1024];
             let mut decoder = Utf8Decoder::default();
-            let mut startup = Some(String::new());
             loop {
                 let count = match reader.read(&mut buffer) {
                     Ok(0) => break,
@@ -205,23 +211,16 @@ impl Spawned {
                     Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 };
-                let mut text = decoder.push(&buffer[..count]);
-                if let Some(mut prefix) = startup.take() {
-                    const CURSOR_QUERY: &str = "\x1b[6n";
-                    prefix.push_str(&text);
-                    if prefix.len() < CURSOR_QUERY.len() && CURSOR_QUERY.starts_with(&prefix) {
-                        startup = Some(prefix);
-                        continue;
-                    }
-                    // portable-pty enables PSEUDOCONSOLE_INHERIT_CURSOR. Answer the
-                    // startup query even if this pane has no attached WebView yet.
-                    if prefix.starts_with(CURSOR_QUERY) && input.write("\x1b[1;1R").is_ok() {
-                        prefix.drain(..CURSOR_QUERY.len());
-                    }
-                    text = prefix;
-                }
+                let text = decoder.push(&buffer[..count]);
                 if !text.is_empty() {
-                    let end = history.lock().unwrap().append(&text);
+                    let (end, replies) = {
+                        let mut h = history.lock().unwrap();
+                        let end = h.append(&text);
+                        (end, std::mem::take(&mut h.replies))
+                    };
+                    if !replies.is_empty() {
+                        let _ = input.write(&replies);
+                    }
                     on_output(text, end);
                 }
             }
@@ -250,13 +249,26 @@ impl Terminal {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), String> {
-        self.master
-            .lock()
-            .unwrap()
-            .as_ref()
-            .ok_or("PTY session not attached")?
-            .resize(size(cols, rows))
-            .map_err(string_error)
+        crate::screen::Screen::validate_size(cols, rows)?;
+        let master = self.master.lock().unwrap();
+        let master = master.as_ref().ok_or("PTY session not attached")?;
+        // Never hold the history lock during ResizePseudoConsole: Windows may
+        // repaint more than a pipe buffer and need the reader to keep draining.
+        let previous = {
+            let mut history = self.history.lock().unwrap();
+            let previous = history.screen.size();
+            history.screen.resize(cols, rows);
+            previous
+        };
+        let result = master.resize(size(cols, rows)).map_err(string_error);
+        if result.is_err() {
+            self.history
+                .lock()
+                .unwrap()
+                .screen
+                .resize(previous.0, previous.1);
+        }
+        result
     }
 
     pub fn close(&self) {

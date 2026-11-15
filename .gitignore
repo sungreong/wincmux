@@ -29,3 +29,6 @@ logs/
 upstream/cmux/
 legacy-dotnet
 .claude
+
+/artifacts/background-core/
+/apps/desktop-tauri/src-tauri/binaries/

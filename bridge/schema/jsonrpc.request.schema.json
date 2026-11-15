@@ -1,9 +1,13 @@
-﻿{
+{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://wincmux.dev/schemas/jsonrpc.request.schema.json",
   "title": "WinCMux JSON-RPC Request",
   "type": "object",
-  "required": ["jsonrpc", "id", "method"],
+  "required": [
+    "jsonrpc",
+    "id",
+    "method"
+  ],
   "properties": {
     "jsonrpc": {
       "type": "string",
@@ -11,10 +15,18 @@
     },
     "id": {
       "oneOf": [
-        { "type": "string" },
-        { "type": "integer" },
-        { "type": "number" },
-        { "type": "null" }
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "method": {
@@ -39,11 +51,35 @@
         "notify.clear",
         "layout.split",
         "layout.focus",
-        "layout.list"
+        "layout.list",
+        "runtime.info",
+        "runtime.shutdown",
+        "runtime.shutdown_all",
+        "runtime.prepare_update",
+        "runtime.cancel_update",
+        "runtime.activate",
+        "client.attach",
+        "client.context",
+        "client.detach",
+        "client.activation_ack",
+        "session.snapshot",
+        "session.tail",
+        "session.stream.subscribe",
+        "session.stream.unsubscribe",
+        "agent.list",
+        "agent.acknowledge",
+        "hidden.list",
+        "hidden.add",
+        "hidden.remove",
+        "notify.get"
       ]
     },
     "params": {
-      "type": ["object", "array", "null"]
+      "type": [
+        "object",
+        "array",
+        "null"
+      ]
     }
   },
   "additionalProperties": true

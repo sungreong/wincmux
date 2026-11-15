@@ -218,6 +218,7 @@ const state = {
   runningSessionsByWorkspace: new Map(),
   sessionsById: new Map(),
   notifications: [],
+  agentStates: new Map(),
   panes: [],
   selectedWorkspaceId: localStorage.getItem(STORAGE_KEYS.selectedWorkspaceId) ?? null,
   selectedPaneId: null,
@@ -233,7 +234,7 @@ const state = {
   paneMeta: new Map(),
   layoutHash: "",
   leftWidth: Number(localStorage.getItem(STORAGE_KEYS.leftWidth) ?? 260),
-  rightWidth: Number(localStorage.getItem(STORAGE_KEYS.rightWidth) ?? 300),
+  rightWidth: Number(localStorage.getItem(STORAGE_KEYS.rightWidth) ?? 280),
   leftCollapsed: localStorage.getItem(STORAGE_KEYS.leftCollapsed) === "1",
   rightCollapsed: localStorage.getItem(STORAGE_KEYS.rightCollapsed) === "1",
   shellCommand: localStorage.getItem(STORAGE_KEYS.terminalDefaultShell) ?? "powershell.exe",
@@ -355,7 +356,9 @@ function setStatus(message, isError = false, options = {}) {
     priority: nextPriority,
     expiresAt: now + holdMs
   };
-  statusBar.textContent = message;
+  const routine = !isError && String(message).match(/^Session (started|closed): /);
+  statusBar.textContent = routine ? (routine[1] === "started" ? "터미널 시작됨" : "터미널 종료됨") : message;
+  statusBar.title = String(message);
   statusBar.classList.toggle("error", isError);
 }
 
@@ -507,6 +510,7 @@ function renderGroupBar() {
   const allBtn = document.createElement("button");
   allBtn.className = `group-chip${!state.selectedGroupId ? " active" : ""}`;
   allBtn.type = "button";
+  allBtn.setAttribute("aria-pressed", String(!state.selectedGroupId));
   allBtn.textContent = "All";
   allBtn.addEventListener("click", () => {
     setWorkspaceSelectedGroup(null);
@@ -521,6 +525,7 @@ function renderGroupBar() {
   for (const group of state.paneGroups) {
     const btn = document.createElement("button");
     btn.className = `group-chip${state.selectedGroupId === group.id ? " active" : ""}`;
+    btn.setAttribute("aria-pressed", String(state.selectedGroupId === group.id));
     btn.type = "button";
     const count = counts.get(group.id) ?? { panes: 0, running: 0 };
     btn.title = group.name === "Default"
@@ -1109,6 +1114,15 @@ function applyPanelWidths() {
 
 function setToolbarBtnLabel(btn, text) {
   if (!btn) return;
+  if (btn.id === "toggleWorkspacePanelBtn") {
+    text = "Workspaces";
+    btn.setAttribute("aria-pressed", String(!state.leftCollapsed));
+    btn.title = "Toggle workspaces (Ctrl+B)";
+  } else if (btn.id === "toggleNotificationPanelBtn") {
+    text = state.notifications.length ? `Notifications ${state.notifications.length}` : "Notifications";
+    btn.setAttribute("aria-pressed", String(!state.rightCollapsed));
+    btn.title = "Toggle notifications (Ctrl+Shift+N)";
+  }
   const span = btn.querySelector(".toolbar-btn-label") ?? btn;
   span.textContent = text;
 }
@@ -1399,6 +1413,54 @@ function setWorkspaceListMode(mode) {
   renderWorkspaces();
 }
 
+const AGENT_LABELS = {
+  blocked: "입력 필요", working: "작업 중", done: "완료 · 미확인",
+  idle: "확인 완료", unknown: "상태 미확인", error: "오류"
+};
+
+function applyAgentState(row) {
+  if (!row?.session_id) return;
+  const old = state.agentStates.get(row.session_id);
+  if (!old || row.revision >= old.revision) state.agentStates.set(row.session_id, row);
+}
+
+function renderAgentPaneStates() {
+  for (const [paneId, meta] of state.paneMeta) {
+    const row = state.agentStates.get(state.paneSessions[paneId]);
+    let badge = meta.statusEl.parentElement.querySelector(".agent-status");
+    const isAction = row?.state === "done";
+    if (!badge || badge.tagName !== (isAction ? "BUTTON" : "SPAN")) {
+      const replacement = document.createElement(isAction ? "button" : "span");
+      if (isAction) {
+        replacement.type = "button";
+        replacement.addEventListener("click", (event) => {
+          event.stopPropagation();
+          void acknowledgePaneAgent(paneId).catch((err) => setStatus(String(err), true));
+        });
+      }
+      if (badge) badge.replaceWith(replacement);
+      else meta.statusEl.parentElement.appendChild(replacement);
+      badge = replacement;
+    }
+    badge.className = `agent-status agent-${row?.state ?? "unknown"}`;
+    badge.hidden = !row || row.source === "none";
+    badge.textContent = row?.state === "idle" && row.reason !== "Result acknowledged"
+      ? "○ 대기" : (AGENT_LABELS[row?.state] ?? AGENT_LABELS.unknown);
+    badge.title = `${row?.source ?? "none"}: ${row?.reason ?? ""}${row?.state === "done" ? " · 클릭하여 확인" : ""}`;
+    if (isAction) badge.disabled = false;
+    badge.setAttribute("aria-label", isAction ? `${badge.textContent} · 결과 확인` : badge.textContent);
+  }
+}
+
+function agentWorkspaceSummary(workspaceId) {
+  const counts = {};
+  for (const row of state.agentStates.values()) {
+    if (row.workspace_id === workspaceId && row.source !== "none") counts[row.state] = (counts[row.state] ?? 0) + 1;
+  }
+  return [ ["blocked", "입력 필요"], ["done", "미확인 완료"], ["working", "작업 중"], ["error", "오류"] ]
+    .filter(([key]) => counts[key]).map(([key, label]) => `${label} ${counts[key]}`).join(" · ");
+}
+
 function renderWorkspaces() {
   const unreadByWorkspace = unreadCountsByWorkspace();
   const compact = state.workspaceListMode === "compact";
@@ -1424,8 +1486,14 @@ function renderWorkspaces() {
     indexEl.textContent = String(index + 1);
     titleRow.appendChild(indexEl);
 
-    const nameEl = document.createElement("div");
+    const nameEl = document.createElement("button");
+    nameEl.type = "button";
     nameEl.className = "ws-title";
+    nameEl.title = ws.name;
+    nameEl.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      switchWorkspace(ws.id).catch((err) => setStatus(String(err), true));
+    });
     nameEl.textContent = ws.name;
 
     const editBtn = document.createElement("button");
@@ -1491,6 +1559,10 @@ function renderWorkspaces() {
       }
     });
     titleRow.appendChild(deleteBtn);
+    const actions = document.createElement("div");
+    actions.className = "ws-actions";
+    actions.append(editBtn, infoBtn, deleteBtn);
+    titleRow.appendChild(actions);
 
     if (unread > 0) {
       const badge = document.createElement("span");
@@ -1507,9 +1579,15 @@ function renderWorkspaces() {
 
     const branchEl = document.createElement("div");
     branchEl.className = "muted ws-branch";
-    branchEl.textContent = `${ws.branch ?? "-"} ${ws.dirty ? "(dirty)" : ""}`;
+    branchEl.textContent = `${ws.branch ?? ""} ${ws.dirty ? "(dirty)" : ""}`;
+    branchEl.hidden = !ws.branch;
 
     li.append(titleRow, pathEl, branchEl);
+    const summary = document.createElement("div");
+    summary.className = "ws-agent-summary";
+    summary.textContent = agentWorkspaceSummary(ws.id);
+    summary.hidden = !summary.textContent;
+    li.appendChild(summary);
     li.addEventListener("click", () => {
       switchWorkspace(ws.id).catch((err) => setStatus(String(err), true));
     });
@@ -1529,7 +1607,7 @@ function renderNotifications() {
     empty.className = "notif-empty";
     empty.textContent = "No unread notifications";
     notificationList.appendChild(empty);
-    notifTitle.textContent = "Notifications (0 unread)";
+    notifTitle.textContent = "Notifications";
     setToolbarBtnLabel(toggleNotificationPanelBtn, state.rightCollapsed ? "Show Notifications (0)" : "Hide Notifications");
     return;
   }
@@ -1549,7 +1627,7 @@ function renderNotifications() {
     markBtn.className = "notif-group-mark";
     markBtn.type = "button";
     markBtn.dataset.workspaceId = workspaceId;
-    markBtn.textContent = "Mark";
+    markBtn.textContent = "Read all";
     markBtn.title = "Mark this workspace notifications as read";
 
     header.append(label, markBtn);
@@ -1558,29 +1636,35 @@ function renderNotifications() {
     for (const { row: n, target } of entries) {
       const li = document.createElement("li");
       li.dataset.notificationId = n.id;
-      const paneLabel = target.paneId
-        ? `pane ${target.paneId.slice(0, 8)}`
-        : (target.sessionId ? `session ${target.sessionId.slice(0, 8)}` : "pane -");
-      const metaText = `${paneLabel} | ${n.level}`;
+      const index = target.paneId ? leafPanes().findIndex((p) => p.pane_id === target.paneId) : -1;
+      const paneLabel = index >= 0 ? `Terminal ${index + 1}` : (target.sessionId ? "Terminal" : workspaceNameById(workspaceId));
+      const metaText = paneLabel;
+      const openBtn = document.createElement("button");
+      openBtn.type = "button";
+      openBtn.className = "notif-open";
+      openBtn.title = target.sessionId ? `Open terminal · ${target.sessionId}` : "Open workspace";
 
-      const titleEl = document.createElement("div");
+      const titleEl = document.createElement("span");
       titleEl.className = "notif-title";
-      titleEl.textContent = n.title;
+      titleEl.textContent = n.kind === "task_done" ? "작업 완료" : n.kind === "assistant_prompt" ? "입력 필요" : n.title;
 
-      const metaEl = document.createElement("div");
+      const metaEl = document.createElement("span");
       metaEl.className = "notif-meta muted";
       metaEl.textContent = metaText;
 
-      const bodyEl = document.createElement("div");
+      const bodyEl = document.createElement("span");
       bodyEl.className = "notif-body muted";
-      bodyEl.textContent = n.body;
+      const internalStatus = n.source_kind === "osc7501" || /^Program reported status/.test(n.body ?? "");
+      bodyEl.textContent = internalStatus ? "" : n.body;
+      bodyEl.hidden = !bodyEl.textContent;
 
-      li.append(titleEl, metaEl, bodyEl);
+      openBtn.append(titleEl, metaEl, bodyEl);
+      li.appendChild(openBtn);
       notificationList.appendChild(li);
     }
   }
 
-  notifTitle.textContent = `Notifications (${state.notifications.length} unread)`;
+  notifTitle.textContent = `Notifications · ${state.notifications.length}`;
   setToolbarBtnLabel(toggleNotificationPanelBtn, state.rightCollapsed
     ? `Show Notifications (${state.notifications.length})`
     : "Hide Notifications");

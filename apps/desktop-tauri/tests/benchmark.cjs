@@ -80,14 +80,14 @@ async function connect(port, child) {
   };
 }
 
-function privateMemory(pid, fixtureIds) {
+function privateMemory(pid, fixtureIds, corePid = null) {
   const powershell = path.join(process.env.SystemRoot, "System32/WindowsPowerShell/v1.0/powershell.exe");
   const script = `
     $hostProcess = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=${pid}"
     if (!$hostProcess) { throw "WinCMux benchmark process exited" }
-    $rows = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='wincmux-tauri.exe' OR Name='msedgewebview2.exe'" |
+    $rows = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='wincmux-tauri.exe' OR Name='wincmux-core.exe' OR Name='msedgewebview2.exe'" |
       Where-Object { $_.CreationDate -ge $hostProcess.CreationDate })
-    $ids = @(${pid})
+    $ids = @(${pid}${corePid ? "," + corePid : ""})
     do {
       $children = @($rows | Where-Object { $_.ParentProcessId -in $ids -and $_.ProcessId -notin $ids } | ForEach-Object ProcessId)
       $ids += $children
@@ -124,9 +124,6 @@ async function pipeHealth(pipe) {
 async function captureScreenshots(cdp, start, firstPane, firstSession, buffers, workspaceId) {
   await cdp.request("Emulation.setDeviceMetricsOverride", { width: 1440, height: 860, deviceScaleFactor: 1, mobile: false });
   await cdp.eval(`(async () => {
-    for (const workspace of state.workspaces.filter(item => item.id !== ${JSON.stringify(workspaceId)})) {
-      await rpc("workspace.delete", { id: workspace.id });
-    }
     await loadWorkspaces();
     if (state.leftCollapsed) toggleWorkspacePanel();
     if (!state.rightCollapsed) toggleNotificationPanel();
@@ -140,7 +137,9 @@ async function captureScreenshots(cdp, start, firstPane, firstSession, buffers, 
     const output = (await buffers()).join("\n");
     return output.includes("WinCMux Terminal Demo") && output.includes("18,000 rows verified");
   }, "demo terminal output");
-  await cdp.eval(`selectPane(${JSON.stringify(split.first)}, { persist: false, focusTerm: true })`);
+  await cdp.eval("rpc('session.write'," + JSON.stringify({session_id:firstSession,data:"#status:done#"}) + ")");
+  await cdp.eval("rpc('session.write'," + JSON.stringify({session_id:second,data:"#status:working#"}) + ")");
+  await cdp.eval(`selectPane(${JSON.stringify(split.second)}, { persist: false, focusTerm: false })`);
 
   const capture = async (name) => {
     await sleep(250);
@@ -155,8 +154,31 @@ async function captureScreenshots(cdp, start, firstPane, firstSession, buffers, 
     editor.dispatchEvent(new Event("input"));
   })()`);
   const overview = await capture("view.png");
+  const design = await cdp.eval(`(() => {
+    const name=document.querySelector(".ws-title");
+    const help=document.querySelector("details.terminal-prompt-help");
+    const status=[...document.querySelectorAll(".agent-working")];
+    return {workspaceButton:name?.tagName, titleFits:name.scrollWidth<=name.clientWidth,
+      helpCollapsed:!!help&&!help.open,
+      statusReadOnly:status.length>0&&status.every(el=>el.tagName!=="BUTTON"),
+      filterPressed:[...document.querySelectorAll(".group-chip:not(.group-add)")].every(el=>el.hasAttribute("aria-pressed"))};
+  })()`);
+  assert.equal(design.workspaceButton,"BUTTON");
+  assert.equal(design.titleFits,true,JSON.stringify(design));
+  assert.equal(design.helpCollapsed,true);
+  assert.equal(design.statusReadOnly,true);
+  assert.equal(design.filterPressed,true);
+  await cdp.request("Emulation.setDeviceMetricsOverride", {width:1100,height:760,deviceScaleFactor:1,mobile:false});
+  const compact=await capture("view-compact.png");
+  assert.equal(await cdp.eval("document.documentElement.scrollWidth<=window.innerWidth"),true);
+  assert.equal(await cdp.eval(`([...document.querySelectorAll(".pane-header")].every(header=>{
+    const status=header.querySelector(".pane-status-wrap").getBoundingClientRect();
+    const actions=header.querySelector(".pane-actions").getBoundingClientRect();
+    return status.right<=actions.left;
+  }))`),true,"compact pane status overlaps actions");
+  await cdp.request("Emulation.setDeviceMetricsOverride", {width:1440,height:860,deviceScaleFactor:1,mobile:false});
   await cdp.eval('document.getElementById("terminalPromptExpand").click()');
-  return [overview, await capture("prompt-editor.png")];
+  return [overview, compact, await capture("prompt-editor.png")];
 }
 
 async function benchmark(executable, screenshots) {
@@ -180,11 +202,16 @@ async function benchmark(executable, screenshots) {
       }
     });
     cdp = await connect(port, child);
+    if (process.env.WINCMUX_PREVIEW_SOURCE === "1") {
+      const css=["design-tokens.css","styles.css"].map(name=>fs.readFileSync(path.join(root,"apps/desktop-tauri/renderer",name),"utf8")).join("\n");
+      await cdp.eval(`(() => {const style=document.createElement('style');style.textContent=${JSON.stringify(css)};document.head.appendChild(style);})()`);
+    }
     await until(async () => {
       if (child.exitCode !== null) throw new Error("Application exited before bridge startup: " + child.exitCode);
       return pipeHealth(pipe).then((status) => status === "ok", () => false);
     }, "JSON-RPC bridge startup");
     await until(() => cdp.eval("typeof state !== 'undefined' && Boolean(window.wincmux)"), "renderer scripts");
+    if (await cdp.eval("typeof window.wincmux.takeActivation === 'function'")) await until(() => cdp.eval("state.bootstrapReady === true"), "app bootstrap");
     const workspace = await cdp.eval("rpc('workspace.create'," + JSON.stringify({
       name: screenshots ? "WinCMux Demo" : "Benchmark", path: screenshots ? root : temp, backend: "codex"
     }) + ")");
@@ -208,12 +235,14 @@ async function benchmark(executable, screenshots) {
     })`);
     const firstSession = await start(firstPane);
     await until(async () => (await recent()).some((text) => text.includes("FIXTURE_READY")), "PTY fixture startup");
+    await sleep(700);
     assert.equal(await cdp.eval(`document.getElementById("terminalComposer").parentElement.dataset.paneId===state.selectedPaneId
       && !document.getElementById("terminalComposer").hidden
       && document.getElementById("terminalPromptForm").parentElement.id==="terminalComposer"`), true);
     if (screenshots) {
       return { screenshots: await captureScreenshots(cdp, start, firstPane, firstSession, buffers, workspace.workspace.id) };
     }
+    if (process.env.WINCMUX_PERF_ONLY !== "1") {
     const imeGuard = await cdp.eval(`(() => {
       document.getElementById("terminalPromptBtn").click();
       const editor=document.getElementById("terminalPromptText");
@@ -344,6 +373,7 @@ async function benchmark(executable, screenshots) {
     })()`);
     assert.equal(verifyAssets, true);
 
+    }
     async function measure(panes) {
       const start = Date.now();
       await cdp.eval("[...state.paneViews.values()].forEach(v=>writeToPane(v.paneId,'#burst#'))");
@@ -352,7 +382,7 @@ async function benchmark(executable, screenshots) {
       const burstMs = Date.now() - start;
       for (const buffer of await buffers()) {
         const rows = buffer.split("\n").filter((line) => /^\d{4}\|/.test(line));
-        assert.equal(rows.length, 3000);
+        assert.equal(rows.length, 3000, JSON.stringify({paneRows:rows.length,first:rows.slice(0,5),last:rows.slice(-5)}));
         for (let i = 0; i < rows.length; i++) assert.equal(rows[i], String(i).padStart(4, "0") + "|" + output);
       }
       const latency = await cdp.eval(`(async () => {
@@ -377,8 +407,9 @@ async function benchmark(executable, screenshots) {
       await sleep(2500);
       const rows = await cdp.eval("rpc('session.list',{workspace_id:state.selectedWorkspaceId})");
       const fixtureIds = rows.sessions.filter((item) => sessions.has(item.id)).map((item) => item.pid);
+      const coreInfo = await cdp.eval("rpc('runtime.info',{})").catch(() => null);
       return { panes, exactOutputRows: panes * 3000, burstMs, roundTripP95Ms: Math.round(latency[28] * 10) / 10,
-        ...privateMemory(child.pid, fixtureIds) };
+        ...privateMemory(child.pid, fixtureIds, coreInfo?.pid) };
     }
     const one = await measure(1);
     const firstWorkspace = await cdp.eval("state.selectedWorkspaceId");
@@ -401,7 +432,9 @@ async function benchmark(executable, screenshots) {
     }
     for (const pane of await cdp.eval("[...state.paneViews.keys()]")) await start(pane);
     await until(async () => (await recent()).filter((text) => text.includes("FIXTURE_READY")).length === 6, "six PTY fixtures");
+    await sleep(700);
     const six = await measure(6);
+    if (process.env.WINCMUX_PERF_ONLY === "1") return { target: "tauri", measurements: [one, six] };
     const composerChecks = await cdp.eval(`(async () => {
       const panes=[...state.paneViews.keys()];
       const editor=document.getElementById("terminalPromptText");
@@ -444,6 +477,47 @@ async function benchmark(executable, screenshots) {
         drafts:true,split:true,close:true,expanded:true,workspaces:true};
     })()`);
     assert.equal(composerChecks.sharedComposer, 1);
+    const agentChecks = await (async () => {
+      const sid = await cdp.eval("state.paneSessions[state.selectedPaneId]");
+      const sendStatus = async (status) => {
+        await cdp.eval("rpc('session.write'," + JSON.stringify({session_id:sid,data:`#status:${status}#`}) + ")");
+        await until(() => cdp.eval(`state.agentStates.get(${JSON.stringify(sid)})?.state === ${JSON.stringify(status)}`), "agent status " + status);
+      };
+      await sendStatus("working");
+      await cdp.eval("switchWorkspace(" + JSON.stringify(other.workspace.id) + ")");
+      await sendStatus("blocked");
+      assert.equal(await cdp.eval(`state.paneMeta.size ? [...state.paneMeta.values()].some(m=>m.statusEl.parentElement.querySelector('button.agent-blocked')) : false`), false);
+      assert.ok((await cdp.eval("document.querySelector('.ws-agent-summary:not([hidden])')?.textContent")).includes("입력 필요 1"));
+      await cdp.eval(`rpc('agent.acknowledge',{session_id:${JSON.stringify(sid)},revision:state.agentStates.get(${JSON.stringify(sid)}).revision})`);
+      assert.equal(await cdp.eval(`state.agentStates.get(${JSON.stringify(sid)}).state`), "blocked");
+      await cdp.eval("switchWorkspace(" + JSON.stringify(firstWorkspace) + ")");
+      await cdp.eval(`selectPane(Object.keys(state.paneSessions).find(p=>state.paneSessions[p]===${JSON.stringify(sid)}),{persist:false,focusTerm:false})`);
+      await sendStatus("done");
+      const { data: statusImage } = await cdp.request("Page.captureScreenshot", { format: "png", fromSurface: true });
+      fs.writeFileSync(path.join(os.tmpdir(), "wincmux-agent-status.png"), Buffer.from(statusImage, "base64"));
+      const badge = await cdp.eval(`(() => { const m=state.paneMeta.get(state.selectedPaneId); const b=m.statusEl.parentElement.querySelector('.agent-status'); return {text:b.textContent,hidden:b.hidden,disabled:b.disabled}; })()`);
+      assert.equal(badge.hidden, false);
+      assert.equal(badge.disabled, false);
+      assert.equal(await cdp.eval("state.paneMeta.get(state.selectedPaneId).statusEl.parentElement.querySelector('.agent-status').tagName"), "BUTTON");
+      assert.ok(badge.text.includes("미확인"));
+      const revision = await cdp.eval(`state.agentStates.get(${JSON.stringify(sid)}).revision`);
+      await sendStatus("working");
+      await sendStatus("done");
+      await cdp.eval(`rpc('agent.acknowledge',{session_id:${JSON.stringify(sid)},revision:${revision}})`);
+      assert.equal(await cdp.eval(`state.agentStates.get(${JSON.stringify(sid)}).state`), "done");
+      // The test window is hidden; simulate focus only while exercising the user's badge action.
+      await cdp.eval(`(() => {
+        Object.defineProperty(document,'hidden',{configurable:true,get:()=>false});
+        Object.defineProperty(document,'hasFocus',{configurable:true,value:()=>true});
+        state.paneMeta.get(state.selectedPaneId).statusEl.parentElement.querySelector('.agent-status').click();
+      })()`);
+      await until(() => cdp.eval(`state.agentStates.get(${JSON.stringify(sid)}).state === 'idle'`), "badge acknowledges result");
+      await cdp.eval("delete document.hidden; delete document.hasFocus");
+      assert.ok((await cdp.eval("state.paneMeta.get(state.selectedPaneId).statusEl.parentElement.querySelector('.agent-status').textContent")).includes("확인 완료"));
+      await cdp.eval("loadAgentStates()");
+      assert.equal(await cdp.eval(`state.agentStates.get(${JSON.stringify(sid)}).state`), "idle");
+      return {osc:true,workspaceSummary:true,paneBadge:true,blockedPreserved:true,staleAcknowledgement:true,snapshot:true};
+    })();
     let cliVersions;
     if (process.env.WINCMUX_TEST_CLI === "1") {
       const run = await cdp.eval(`rpc('session.run',{
@@ -458,10 +532,11 @@ async function benchmark(executable, screenshots) {
         return match && match.slice(1);
       }, "installed Codex and Claude CLI version commands");
     }
-    return { target: "tauri", exactPrompt: input, measurements: [one, six], composerChecks, cliVersions };
+    return { target: "tauri", exactPrompt: input, measurements: [one, six], composerChecks, agentChecks, cliVersions };
   } finally {
     if (cdp) {
       for (const sid of sessions) await close(sid).catch(() => {});
+      await cdp.eval("rpc('runtime.shutdown_all',{confirmed:true})").catch(() => {});
       await cdp.eval("window.__TAURI__.window.getCurrentWindow().close()").catch(() => {});
       cdp.close();
     }
@@ -478,6 +553,8 @@ async function benchmark(executable, screenshots) {
   }
 }
 
+module.exports = { until, portNumber, connect, privateMemory, pipeHealth };
+if (require.main === module) {
 const args = process.argv.slice(2);
 const screenshots = args.includes("--screenshots");
 const executable = args.find((arg) => arg !== "--screenshots")
@@ -490,3 +567,5 @@ benchmark(path.resolve(executable), screenshots).then(
   (result) => { console.log(JSON.stringify(result, null, 2)); process.exit(0); },
   (error) => { console.error(error); process.exit(1); }
 );
+
+}

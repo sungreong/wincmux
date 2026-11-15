@@ -25,7 +25,7 @@ mod windows_pipe {
 
     const MAX_REQUEST: u64 = 12 * 1024 * 1024;
 
-    fn current_user_sid() -> io::Result<String> {
+    pub fn current_user_sid() -> io::Result<String> {
         let windows_error = |err: windows::core::Error| io::Error::other(err.to_string());
         // The pipe can launch terminals, so only the current Windows user and SYSTEM may access it.
         unsafe {
@@ -83,8 +83,8 @@ mod windows_pipe {
 
     pub fn serve(core: Arc<Core>, pipe: String) -> io::Result<()> {
         let acl = HSTRING::from(format!("D:P(A;;GA;;;{})(A;;GA;;;SY)", current_user_sid()?));
-        let server = tauri::async_runtime::block_on(async { open(&pipe, &acl, true) })?;
-        tauri::async_runtime::spawn(async move {
+        let server = open(&pipe, &acl, true)?;
+        tokio::spawn(async move {
             let mut server = server;
             while server.connect().await.is_ok() {
                 let Ok(next) = open(&pipe, &acl, false) else {
@@ -92,7 +92,7 @@ mod windows_pipe {
                 };
                 let client = std::mem::replace(&mut server, next);
                 let core = Arc::clone(&core);
-                tauri::async_runtime::spawn(async move {
+                tokio::spawn(async move {
                     let _ = handle(core, client).await;
                 });
             }
@@ -106,6 +106,7 @@ mod windows_pipe {
         let (tx, mut rx) = mpsc::channel::<Value>(64);
         let (overflow, mut closed) = watch::channel(false);
         let mut subscriptions = HashSet::new();
+        let mut clients = HashSet::new();
         let mut line = Vec::new();
         let result = loop {
             let mut limited = (&mut read).take(MAX_REQUEST + 1 - line.len() as u64);
@@ -125,12 +126,14 @@ mod windows_pipe {
                                 error(id, -32600, "invalid request")
                             } else if method == "session.stream.subscribe" {
                                 let params = if req["params"].is_null() { json!({}) } else { req["params"].clone() };
-                                match serde_json::from_value::<Filter>(params) {
+                                match serde_json::from_value::<Filter>(params.clone()) {
                                     Err(_) => error(id, -32602, "invalid stream filter"),
                                     Ok(filter) => {
+                                        let availability = params["output_mode"] == "ready";
                                         let tx = tx.clone();
                                         let overflow = overflow.clone();
-                                        let subscription = core.subscribe(filter, Arc::new(move |event| {
+                                        let subscription = core.subscribe(filter, Arc::new(move |mut event| {
+                                            if availability && event["method"]=="session.output" { event["method"]=json!("session.output_ready"); event["params"].as_object_mut().unwrap().remove("output"); }
                                             if tx.try_send(event).is_err() {
                                                 let _ = overflow.send(true);
                                                 false
@@ -146,10 +149,11 @@ mod windows_pipe {
                                 }
                                 success(id, json!({"ok":true}))
                             } else {
+                                if method=="client.attach" { if let Some(id)=req["params"]["client_id"].as_str() { clients.insert(id.to_owned()); } }
                                 let core = Arc::clone(&core);
                                 let method = method.to_owned();
                                 let params = req["params"].clone();
-                                match tauri::async_runtime::spawn_blocking(move || core.rpc(&method, params)).await {
+                                match tokio::task::spawn_blocking(move || core.rpc(&method, params)).await {
                                     Ok(Ok(value)) => success(id, value),
                                     Ok(Err(err)) => {
                                         let message = err.to_string();
@@ -169,6 +173,9 @@ mod windows_pipe {
                 },
             }
         };
+        for client in clients {
+            core.detach_client(&client);
+        }
         for sub in subscriptions {
             core.unsubscribe(&sub);
         }
@@ -178,7 +185,9 @@ mod windows_pipe {
     async fn send(write: &mut (impl AsyncWriteExt + Unpin), value: Value) -> io::Result<()> {
         let mut data = serde_json::to_vec(&value).map_err(io::Error::other)?;
         data.push(b'\n');
-        write.write_all(&data).await
+        tokio::time::timeout(std::time::Duration::from_secs(3), write.write_all(&data))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "slow client disconnected"))?
     }
 
     fn error(id: Value, code: i32, message: &str) -> Value {
@@ -191,4 +200,4 @@ mod windows_pipe {
 }
 
 #[cfg(windows)]
-pub use windows_pipe::serve;
+pub use windows_pipe::{current_user_sid, serve};

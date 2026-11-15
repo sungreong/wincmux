@@ -309,7 +309,6 @@ async function subscribeWorkspaceStream(workspaceId) {
     await unsubscribeStream();
   }
   state.streamSubscriptionId = await window.wincmux.streamSubscribe({
-    workspace_id: workspaceId,
     topics: ["session"],
   });
 }
@@ -341,6 +340,34 @@ function scheduleNotificationUiRefresh() {
   });
 }
 
+async function loadAgentStates() {
+  const before = JSON.stringify([...state.agentStates]);
+  const result = await rpc("agent.list", {});
+  const live = new Set((result.items ?? []).map((row) => row.session_id));
+  for (const sid of state.agentStates.keys()) if (!live.has(sid)) state.agentStates.delete(sid);
+  for (const row of result.items ?? []) applyAgentState(row);
+  if (before !== JSON.stringify([...state.agentStates])) {
+    renderAgentPaneStates();
+    renderWorkspaces();
+  }
+}
+
+async function acknowledgePaneAgent(paneId) {
+  if (document.hidden || !document.hasFocus()) return;
+  const row = state.agentStates.get(state.paneSessions[paneId]);
+  if (row?.state !== "done") return;
+  const notices = state.notifications.filter((n) => n.session_id === row.session_id && n.kind === "task_done");
+  const result = await rpc("agent.acknowledge", { session_id: row.session_id, revision: row.revision });
+  if (result.agent?.state === "idle" && result.agent.revision === row.revision + 1) {
+    await Promise.all(notices.map((n) => rpc("notify.mark_read", { notification_id: n.id })));
+    if (notices.length) {
+      await dismissNativeNotifications({ ids: notices.map((n) => n.id) });
+      await loadUnread();
+    }
+  }
+  await loadAgentStates();
+}
+
 function handleStreamEvent(event) {
   if (!event?.method) {
     return;
@@ -348,6 +375,17 @@ function handleStreamEvent(event) {
   const params = event.params ?? {};
   if (RENDERER_DEBUG_LOGS && event.method !== "session.output") {
     console.debug("[stream]", event.method, JSON.stringify(params).slice(0, 120));
+  }
+  if (event.method === "session.agent_changed") {
+    applyAgentState(params);
+    renderAgentPaneStates();
+    renderWorkspaces();
+    return;
+  }
+  if (event.method === "session.exit") {
+    state.agentStates.delete(params.session_id);
+    renderAgentPaneStates();
+    renderWorkspaces();
   }
   if (event.method === "notify.created") {
     const row = params.notification;
@@ -479,6 +517,13 @@ async function openNotificationById(notificationId, notificationHint = null) {
   let targetPaneId = target.paneId;
   if ((!targetPaneId || !leafPanes().some((pane) => pane.pane_id === targetPaneId)) && target.sessionId) {
     targetPaneId = paneApi.paneForSession(target.sessionId);
+  }
+  if (!targetPaneId && target.sessionId && workspaceId) {
+    const hidden = (state.hiddenPanesByWorkspace[workspaceId] ?? []).find((item) => item.session_id === target.sessionId);
+    if (hidden) {
+      await onRestoreHiddenPane(hidden.id, "horizontal");
+      targetPaneId = paneApi.paneForSession(target.sessionId);
+    }
   }
   if (targetPaneId && leafPanes().some((pane) => pane.pane_id === targetPaneId)) {
     await paneApi.selectPane(targetPaneId, { persist: true, focusTerm: true });
@@ -791,7 +836,7 @@ async function startSessionForPane(paneId, options = {}) {
     await setSessionGroup(workspaceId, sid, newGroupId).catch(() => {});
   }
   setPaneGroupHint(paneId, null);
-  rpc("pane.session.bind", {
+  await rpc("pane.session.bind", {
     workspace_id: workspaceId,
     pane_id: paneId,
     session_id: sid,
@@ -938,6 +983,10 @@ async function tryRestorePaneSessions(workspaceId, transitionSeq = null) {
     }
   }
 }
+async function loadHiddenSessions(workspaceId) {
+  const result = await rpc("hidden.list", { workspace_id: workspaceId });
+  state.hiddenPanesByWorkspace[workspaceId] = result.items ?? [];
+}
 async function refreshWorkspaceState(workspaceId, options = {}, transitionSeq = null) {
   if (!workspaceId) {
     return;
@@ -951,7 +1000,7 @@ async function refreshWorkspaceState(workspaceId, options = {}, transitionSeq = 
       setStatus(`Unread refresh failed: ${String(err?.message ?? err)}`, true);
     }
   });
-  await Promise.all([loadSessions(workspaceId, transitionSeq), loadPanes(workspaceId, transitionSeq), loadPaneGroups(workspaceId, transitionSeq)]);
+  await Promise.all([loadSessions(workspaceId, transitionSeq), loadPanes(workspaceId, transitionSeq), loadPaneGroups(workspaceId, transitionSeq), loadHiddenSessions(workspaceId)]);
   if (isTransitionStale(transitionSeq, workspaceId)) {
     return;
   }
@@ -975,6 +1024,7 @@ async function refreshWorkspaceState(workspaceId, options = {}, transitionSeq = 
     renderNotifications();
     renderWorkspaces();
   }
+  paneApi.normalizePaneSessions();
   paneApi.renderPaneSurface(forceLayout);
   paneApi.refreshPaneBindings();
   hiddenRefreshPanesUi();
@@ -1274,6 +1324,7 @@ async function splitPaneInternal(paneId, direction, options = {}) {
   }
   if (newPaneSessionId && second) {
     state.paneSessions[second] = newPaneSessionId;
+    await rpc("pane.session.bind", { workspace_id: ws.id, pane_id: second, session_id: newPaneSessionId });
     clearDormantPaneSession(second);
   }
   state.selectedPaneId = second ?? first;
@@ -1322,7 +1373,7 @@ async function onHidePane(paneId) {
     const label = session
       ? `pane ${paneId.slice(0, 8)} - pid ${session.pid}`
       : `pane ${paneId.slice(0, 8)}`;
-    hiddenPushPaneItem({
+    const hiddenItem = {
       id: crypto.randomUUID(),
       workspace_id: ws.id,
       session_id: sessionId,
@@ -1330,7 +1381,9 @@ async function onHidePane(paneId) {
       hidden_at: new Date().toISOString(),
       group_id: groupId,
       label,
-    });
+    };
+    await rpc("hidden.add", hiddenItem);
+    hiddenPushPaneItem(hiddenItem);
   }
   delete state.paneSessions[paneId];
   setPaneGroupHint(paneId, null);
@@ -1529,6 +1582,7 @@ async function onRestoreHiddenPane(hiddenId, direction) {
       persist: true,
       focusTerm: true,
     });
+    await rpc("hidden.remove", { workspace_id: ws.id, id: hidden.id });
     closeHiddenPanesPopover();
     setStatus(`Hidden pane restored: ${hidden.session_id.slice(0, 8)}`);
     await syncActiveContext();
@@ -3372,17 +3426,22 @@ async function bootstrap() {
     state.contextUnbind = window.wincmux.onContextAction(handleContextAction);
     if (typeof window.wincmux?.onNotificationOpen === "function") {
       state.notificationOpenUnbind = window.wincmux.onNotificationOpen(({ notification_id, notification }) => {
-        void openNotificationById(notification_id, notification).catch((err) => setStatus(String(err), true));
+        void openNotificationById(notification_id, notification).then(() => window.wincmux.takeActivation()).catch((err) => setStatus(String(err), true));
       });
     }
     if (typeof window.wincmux?.onCoreStatus === "function") {
-      window.wincmux.onCoreStatus(({ status, error }) => {
+      window.wincmux.onCoreStatus(({ status, error, new_runtime }) => {
+        state.coreDisconnected = status !== "ready";
+        document.getElementById("appGrid").inert = state.coreDisconnected;
+        document.getElementById("coreDisconnected").hidden = !state.coreDisconnected;
         if (status === "respawning") {
           setStatus("Core restarting...", false);
         } else if (status === "ready") {
           setStatus("Core reconnected", false);
           if (state.selectedWorkspaceId) {
-            void runWorkspaceTransition(state.selectedWorkspaceId, { reason: "core_ready", forceLayout: false, autoSession: true });
+            for (const view of state.paneViews.values()) { view.tauriOutput = null; view.pendingInput = ""; }
+            void runWorkspaceTransition(state.selectedWorkspaceId, { reason: "core_ready", forceLayout: true, autoSession: false });
+            if (new_runtime) setStatus("코어가 다시 시작되어 이전 작업이 종료되었습니다. 세션 기록에서 직접 재개하세요.", true);
           }
         } else if (status === "dead") {
           setStatus(`Core failed: ${error ?? "unknown"}`, true);
@@ -3407,20 +3466,30 @@ async function bootstrap() {
       void syncActiveContext();
     });
     await syncActiveContext();
+    await loadAgentStates();
+    state.agentRefreshTimer = setInterval(() => {
+      void loadAgentStates().catch(console.error);
+    }, 3000);
+    const activation = await window.wincmux.takeActivation();
+    if (activation?.notification_id) await openNotificationById(activation.notification_id, activation.notification);
+    document.getElementById("shutdownAllBtn").addEventListener("click", async () => {
+      try {
+        const info = await rpc("runtime.info");
+        if (window.confirm(`실행 중인 터미널 ${info.terminal_count}개와 모든 하위 작업을 종료할까요?`)) {
+          await rpc("runtime.shutdown_all", { confirmed: true });
+        }
+      } catch (err) { setStatus(String(err), true); }
+    });
+    state.bootstrapReady = true;
     setStatus("Ready");
   } catch (err) {
     setStatus(`Error: ${err.message ?? err}`, true);
   }
 }
 window.addEventListener("beforeunload", () => {
+  clearInterval(state.agentRefreshTimer);
   state.refreshUnreadHook = null;
   void updateUnreadBadge(0);
-  for (const workspaceId of Object.keys(state.hiddenPanesByWorkspace)) {
-    const hiddenRows = hiddenListPanesForWorkspace(workspaceId);
-    for (const row of hiddenRows) {
-      void rpc("session.close", { session_id: row.session_id }).catch(() => {});
-    }
-  }
   clearPromptDetectorAll();
   if (state.streamUnbind) {
     state.streamUnbind();

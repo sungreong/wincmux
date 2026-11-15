@@ -37,4 +37,10 @@ npm run test:ui
 npm run test:ui -- --screenshots
 ```
 
-마지막 명령은 실제 앱에 격리된 예제 워크스페이스를 열고 `assets/view.png`와 `assets/prompt-editor.png`를 갱신합니다.
+마지막 명령은 실제 앱에 격리된 예제 워크스페이스를 열고 `assets/view.png`, `assets/view-compact.png`, `assets/prompt-editor.png`를 갱신합니다.
+
+## Background runtime 0.2.0
+
+See [the background-core evaluation](background-core-evaluation.md) for process-lifecycle checks, three-run memory/latency comparison, and native tray idle measurements. CLI process memory is reported separately.
+
+프런트 0.2.1 변경과 실제 화면 검증은 [디자인 점검](ui-design.md)에 정리했다.

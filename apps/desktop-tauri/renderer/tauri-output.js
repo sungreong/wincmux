@@ -5,12 +5,13 @@ function wincmuxTauriRestoreOutput(view) {
   if (view.tauriOutput?.session !== view.sessionId) {
     view.tauriOutput = {
       session: view.sessionId, cursor: 0, wanted: 0, force: true,
-      loading: false, queued: null, waiters: []
+      loading: false, queued: null, waiters: [], snapshotNeeded: true
     };
   } else {
     view.tauriOutput.force = true;
     if (!view.outputQueueLength) view.tauriOutput.queued = null;
   }
+  if (view.tauriOutput.snapshotNeeded) view.restoringSnapshot = true;
   void pumpTauriOutput(view);
 }
 
@@ -29,6 +30,22 @@ async function pumpTauriOutput(view) {
   const wantedAtStart = flow.wanted;
   let retry = false;
   try {
+    if (flow.snapshotNeeded) {
+      const snapshot = await rpc("session.snapshot", { session_id: flow.session });
+      if (!activeTauriOutput(view, flow)) return;
+      view.restoringSnapshot = true;
+      view.term.reset();
+      view.term.resize(snapshot.cols, snapshot.rows);
+      await new Promise((resolve) => view.term.write((snapshot.history ?? "") + snapshot.screen, resolve));
+      if (!activeTauriOutput(view, flow)) return;
+      view.hasOutput = true;
+      hidePaneOverlay(view);
+      flow.cursor = snapshot.end_offset;
+      flow.wanted = Math.max(flow.wanted, snapshot.end_offset);
+      flow.snapshotNeeded = false;
+      view.restoringSnapshot = false;
+      schedulePaneFit(view);
+    }
     const result = await rpc("session.tail", {
       session_id: flow.session,
       after_offset: flow.cursor,
@@ -45,15 +62,19 @@ async function pumpTauriOutput(view) {
     }
     let output = result.output;
     if (result.start_offset > flow.cursor) {
-      view.term.reset();
-      output = "\r\n[WinCMux] 출력 일부가 보관 한도를 넘어 생략되었습니다.\r\n" + output;
-      state.metrics.dropped_frames += 1;
+      flow.snapshotNeeded = true;
+      flow.force = true;
+      return;
     }
     flow.queued = result.end_offset;
     enqueueStreamOutput(view.paneId, output, { sessionId: flow.session, source: "tail" });
   } catch (err) {
-    if (activeTauriOutput(view, flow)) setStatus(`Terminal read error: ${err?.message ?? err}`, true);
+    if (activeTauriOutput(view, flow)) {
+      if (String(err).includes("PTY session not attached")) { flow.snapshotNeeded = false; flow.force = true; }
+      else setStatus(`Terminal read error: ${err?.message ?? err}`, true);
+    }
   } finally {
+    view.restoringSnapshot = false;
     flow.loading = false;
     if (retry || flow.force) void pumpTauriOutput(view);
   }

@@ -24,6 +24,7 @@
   subscribeEvent("wincmux-notify", dispatch);
 
   window.wincmux = {
+    takeActivation: () => invoke("take_activation"),
     rpc: ({ method, params = {} }) => invoke("rpc", { method, params }),
     async streamSubscribe(filter) {
       const stream = new Channel();

@@ -22,6 +22,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
+    let existed = path.is_file();
     let mut db = Connection::open(path)?;
     db.busy_timeout(Duration::from_secs(3))?;
     db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
@@ -29,8 +30,12 @@ pub fn open(path: &Path) -> Result<Connection> {
     db.execute_batch(&schema.base)?;
     let current: u32 =
         db.query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))?;
-    if current > 7 {
+    if current > 8 {
         return Err(format!("unsupported database schema version: {current}").into());
+    }
+    if current < 8 && existed && path.to_string_lossy() != ":memory:" {
+        let backup = path.with_extension(format!("pre-v8-{}.bak", id()));
+        db.backup(rusqlite::DatabaseName::Main, &backup, None)?;
     }
     for (version, statements) in schema.migrations {
         if version <= current {
@@ -50,6 +55,7 @@ pub fn open(path: &Path) -> Result<Connection> {
         &format!("UPDATE sessions SET status='exited', ended_at={NOW} WHERE status='running'"),
         [],
     )?;
+    db.execute("DELETE FROM hidden_sessions WHERE session_id IN (SELECT id FROM sessions WHERE status!='running')", [])?;
     Ok(db)
 }
 
@@ -135,6 +141,7 @@ pub fn prune_history(db: &Connection, workspace: &str) -> Result<()> {
     )?;
     for row in duplicates {
         let id = text(&row, "id")?;
+        tx.execute("DELETE FROM hidden_sessions WHERE session_id=?", [id])?;
         tx.execute("DELETE FROM pane_session_bindings WHERE session_id=?", [id])?;
         tx.execute(
             "DELETE FROM session_group_bindings WHERE session_id=?",
@@ -194,6 +201,20 @@ fn default_group(db: &Connection, workspace: &str) -> Result<String> {
 pub fn dispatch(db: &Connection, method: &str, p: &Value) -> Result<Value> {
     let ok = json!({"ok": true});
     match method {
+        "hidden.list" => Ok(
+            json!({"items":rows(db,"SELECT * FROM hidden_sessions WHERE workspace_id=? ORDER BY sort_order,hidden_at DESC",[text(p,"workspace_id")?])?}),
+        ),
+        "hidden.add" => {
+            db.execute("INSERT INTO hidden_sessions(id,workspace_id,session_id,source_pane_id,group_id,label,hidden_at) SELECT ?,workspace_id,id,?,?,?,? FROM sessions WHERE id=? AND workspace_id=? AND status='running' ON CONFLICT(session_id) DO UPDATE SET label=excluded.label,group_id=excluded.group_id",params![text(p,"id")?,p["source_pane_id"].as_str(),p["group_id"].as_str(),text(p,"label")?,text(p,"hidden_at")?,text(p,"session_id")?,text(p,"workspace_id")?])?;
+            Ok(ok)
+        }
+        "hidden.remove" => {
+            db.execute(
+                "DELETE FROM hidden_sessions WHERE id=? AND workspace_id=?",
+                params![text(p, "id")?, text(p, "workspace_id")?],
+            )?;
+            Ok(ok)
+        }
         "health.check" => Ok(json!({"status":"ok"})),
         "workspace.list" => Ok(
             json!({"workspaces":rows(db,"SELECT * FROM workspaces ORDER BY pinned DESC, sort_order, last_active DESC",[])?}),
@@ -251,6 +272,7 @@ pub fn dispatch(db: &Connection, method: &str, p: &Value) -> Result<Value> {
             let id = text(p, "id")?;
             let tx = db.unchecked_transaction()?;
             for table in [
+                "hidden_sessions",
                 "pane_session_bindings",
                 "session_group_bindings",
                 "pane_groups",
@@ -397,6 +419,9 @@ pub fn dispatch(db: &Connection, method: &str, p: &Value) -> Result<Value> {
         "ai.session.delete" => Ok(
             json!({"ok":true,"deleted":db.execute("DELETE FROM ai_sessions WHERE id=?",[text(p,"ai_session_id")?])?}),
         ),
+        "notify.get" => Ok(
+            json!({"notification":row(db,"SELECT * FROM notifications WHERE id=?",[text(p,"notification_id")?])?}),
+        ),
         "notify.unread" => {
             let items = rows(db,"SELECT * FROM notifications WHERE read_at IS NULL AND (?1 IS NULL OR workspace_id=?1) ORDER BY created_at DESC",[p["workspace_id"].as_str()])?;
             Ok(json!({"count":items.len(),"items":items}))
@@ -428,12 +453,28 @@ pub fn dispatch(db: &Connection, method: &str, p: &Value) -> Result<Value> {
         method if method.starts_with("layout.") => {
             let ws = text(p, "workspace_id")?;
             let mut layout = load_layout(db, ws)?;
+            let tx = db.unchecked_transaction()?;
             let result = match method {
                 "layout.list" => return Ok(json!({"panes":layout.panes().collect::<Vec<_>>()})),
                 "layout.split" => {
-                    json!({"pane_ids":layout.split(text(p,"pane_id")?,text(p,"direction")?)?})
+                    let old = text(p, "pane_id")?;
+                    let panes = layout.split(old, text(p, "direction")?)?;
+                    tx.execute("UPDATE pane_session_bindings SET pane_id=? WHERE workspace_id=? AND pane_id=?",params![panes[0],ws,old])?;
+                    tx.execute(
+                        "UPDATE notifications SET pane_id=? WHERE workspace_id=? AND pane_id=?",
+                        params![panes[0], ws, old],
+                    )?;
+                    json!({"pane_ids":panes})
                 }
-                "layout.close" => json!({"focus_pane_id":layout.close(text(p,"pane_id")?)?}),
+                "layout.close" => {
+                    let pane = text(p, "pane_id")?;
+                    let focus = layout.close(pane)?;
+                    tx.execute(
+                        "DELETE FROM pane_session_bindings WHERE workspace_id=? AND pane_id=?",
+                        params![ws, pane],
+                    )?;
+                    json!({"focus_pane_id":focus})
+                }
                 "layout.focus" => {
                     layout.focus(text(p, "pane_id")?)?;
                     ok
@@ -452,7 +493,8 @@ pub fn dispatch(db: &Connection, method: &str, p: &Value) -> Result<Value> {
                 }
                 _ => return Err(format!("method not found: {method}").into()),
             };
-            save_layout(db, ws, &layout)?;
+            save_layout(&tx, ws, &layout)?;
+            tx.commit()?;
             Ok(result)
         }
         _ => Err(format!("method not found: {method}").into()),
@@ -493,6 +535,56 @@ pub fn add_notification(db: &Connection, p: &Value) -> Result<(Value, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_moves_session_binding_to_the_new_leaf_atomically() -> Result<()> {
+        let db = open(Path::new(":memory:"))?;
+        let created = dispatch(
+            &db,
+            "workspace.create",
+            &json!({"name":"Binding","path":std::env::current_dir()?,"backend":"custom"}),
+        )?;
+        let ws = text(&created["workspace"], "id")?;
+        let pane = text(&created, "root_pane_id")?;
+        db.execute("INSERT INTO sessions(id,workspace_id,pid,status,started_at) VALUES('s',?,1,'running','now')",[ws])?;
+        dispatch(
+            &db,
+            "pane.session.bind",
+            &json!({"workspace_id":ws,"pane_id":pane,"session_id":"s"}),
+        )?;
+        let split = dispatch(
+            &db,
+            "layout.split",
+            &json!({"workspace_id":ws,"pane_id":pane,"direction":"horizontal"}),
+        )?;
+        let bindings = dispatch(&db, "pane.session.bindings", &json!({"workspace_id":ws}))?;
+        assert_eq!(bindings["bindings"][0]["pane_id"], split["pane_ids"][0]);
+        assert_eq!(bindings["bindings"][0]["session_id"], "s");
+        Ok(())
+    }
+
+    #[test]
+    fn schema_eight_backs_up_existing_database_before_migration() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("wincmux-schema-{}", id()));
+        std::fs::create_dir_all(&root)?;
+        let path = root.join("wincmux.db");
+        {
+            let db = open(&path)?;
+            db.execute_batch(
+                "DROP TABLE hidden_sessions; DELETE FROM schema_versions WHERE version=8;",
+            )?;
+        }
+        let db = open(&path)?;
+        assert_eq!(
+            db.query_row("SELECT MAX(version) FROM schema_versions", [], |r| r
+                .get::<_, u32>(0))?,
+            8
+        );
+        assert!(std::fs::read_dir(&root)?
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains("pre-v8")));
+        Ok(())
+    }
 
     #[test]
     fn workspace_layout_and_notifications_use_the_existing_schema() -> Result<()> {
