@@ -39,6 +39,7 @@ const SETTINGS: &[&str] = &[
 const PROVIDERS: &[(&str, &str)] = &[
     (".claude/", "claude"),
     (".agents/", "codex"),
+    (".codex/", "codex"),
     (".gemini/", "gemini"),
     (".cursor/", "cursor"),
     (".kiro/", "kiro"),

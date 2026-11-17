@@ -30,11 +30,11 @@ pub fn open(path: &Path) -> Result<Connection> {
     db.execute_batch(&schema.base)?;
     let current: u32 =
         db.query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))?;
-    if current > 8 {
+    if current > 15 {
         return Err(format!("unsupported database schema version: {current}").into());
     }
-    if current < 8 && existed && path.to_string_lossy() != ":memory:" {
-        let backup = path.with_extension(format!("pre-v8-{}.bak", id()));
+    if current < 15 && existed && path.to_string_lossy() != ":memory:" {
+        let backup = path.with_extension(format!("pre-v15-{}.bak", id()));
         db.backup(rusqlite::DatabaseName::Main, &backup, None)?;
     }
     for (version, statements) in schema.migrations {
@@ -51,6 +51,8 @@ pub fn open(path: &Path) -> Result<Connection> {
         }
         tx.commit()?;
     }
+    db.execute("UPDATE agent_followups SET status='failed',result='delivery interrupted before confirmation',updated_at=strftime('%s','now') WHERE status='claimed'", [])?;
+    db.execute("UPDATE agent_followups SET status='failed',result='target session ended when core restarted',updated_at=strftime('%s','now') WHERE status IN ('pending','paused')", [])?;
     db.execute(
         &format!("UPDATE sessions SET status='exited', ended_at={NOW} WHERE status='running'"),
         [],
@@ -564,25 +566,85 @@ mod tests {
     }
 
     #[test]
-    fn schema_eight_backs_up_existing_database_before_migration() -> Result<()> {
+    fn schema_twelve_backs_up_existing_database_before_migration() -> Result<()> {
         let root = std::env::temp_dir().join(format!("wincmux-schema-{}", id()));
+        std::fs::create_dir_all(&root)?;
+        let path = root.join("wincmux.db");
+        let reminder_id;
+        {
+            let db = open(&path)?;
+            let ws = dispatch(
+                &db,
+                "workspace.create",
+                &json!({"name":"Retained reminders","path":std::env::temp_dir(),"backend":"custom"}),
+            )?;
+            let reminder = crate::reminders::save(
+                &db,
+                &json!({"workspace_id":ws["workspace"]["id"],"title":"Keep this schedule","timezone":"Asia/Seoul","due_at":chrono::Utc::now().timestamp()+3600}),
+                chrono::Utc::now().timestamp(),
+            )?;
+            reminder_id = reminder["id"].as_str().unwrap().to_owned();
+            db.execute_batch(
+                "DELETE FROM schema_versions WHERE version=15; DROP TABLE mcp_activity; DELETE FROM schema_versions WHERE version=14; DROP TABLE mcp_settings; DELETE FROM schema_versions WHERE version=13; DELETE FROM schema_versions WHERE version=12; DROP INDEX idx_agent_followups_due; DROP TABLE agent_followups; DELETE FROM schema_versions WHERE version=11; DROP INDEX idx_notifications_scheduled_delivery; ALTER TABLE reminders DROP COLUMN observed_at; DELETE FROM schema_versions WHERE version=10;",
+            )?;
+        }
+        let db = open(&path)?;
+        let retained = row(
+            &db,
+            "SELECT status,observed_at FROM reminders WHERE id=?",
+            [reminder_id],
+        )?;
+        assert_eq!(retained["status"], "pending");
+        assert!(retained["observed_at"].is_null());
+        assert_eq!(
+            db.query_row("SELECT MAX(version) FROM schema_versions", [], |r| r
+                .get::<_, u32>(0))?,
+            15
+        );
+        assert!(std::fs::read_dir(&root)?
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains("pre-v15")));
+        Ok(())
+    }
+
+    #[test]
+    fn schema_twelve_preserves_followups_from_schema_eleven() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("wincmux-followup-upgrade-{}", id()));
         std::fs::create_dir_all(&root)?;
         let path = root.join("wincmux.db");
         {
             let db = open(&path)?;
-            db.execute_batch(
-                "DROP TABLE hidden_sessions; DELETE FROM schema_versions WHERE version=8;",
-            )?;
+            db.execute("INSERT INTO agent_followups(id,workspace_id,session_id,provider,agent_id,anchor_pid,anchor_started,prompt,due_at,status,created_at,updated_at) VALUES('old','ws','session','codex','agent',1,1,'Retained prompt',1,'pending',1,1)", [])?;
+            db.execute_batch("ALTER TABLE agent_followups DROP COLUMN completion_after; ALTER TABLE agent_followups DROP COLUMN delivery_mode; DELETE FROM schema_versions WHERE version=15; DROP TABLE mcp_activity; DELETE FROM schema_versions WHERE version=14; DROP TABLE mcp_settings; DELETE FROM schema_versions WHERE version=13; DELETE FROM schema_versions WHERE version=12;")?;
         }
         let db = open(&path)?;
-        assert_eq!(
-            db.query_row("SELECT MAX(version) FROM schema_versions", [], |r| r
-                .get::<_, u32>(0))?,
-            8
-        );
-        assert!(std::fs::read_dir(&root)?
-            .filter_map(|e| e.ok())
-            .any(|e| e.file_name().to_string_lossy().contains("pre-v8")));
+        let row = row(&db, "SELECT prompt,status,delivery_mode,completion_after FROM agent_followups WHERE id='old'", [])?;
+        assert_eq!(row["prompt"], "Retained prompt");
+        assert_eq!(row["status"], "failed");
+        assert_eq!(row["delivery_mode"], "at_time");
+        assert_eq!(row["completion_after"], 0);
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_off_setting_survives_database_reopen() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("wincmux-mcp-settings-{}", id()));
+        std::fs::create_dir_all(&root)?;
+        let path = root.join("wincmux.db");
+        {
+            let db = open(&path)?;
+            db.execute("UPDATE mcp_settings SET enabled=0 WHERE id=1", [])?;
+        }
+        let db = open(&path)?;
+        let enabled: bool =
+            db.query_row("SELECT enabled FROM mcp_settings WHERE id=1", [], |row| {
+                row.get(0)
+            })?;
+        assert!(!enabled);
+        drop(db);
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 

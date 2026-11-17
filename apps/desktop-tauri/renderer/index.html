@@ -79,6 +79,7 @@
             </svg>
             <span class="toolbar-btn-label">Equalize</span>
           </button>
+          <button id="workspaceViewerBtn" class="toolbar-btn" type="button" title="워크스페이스 폴더와 Git 상태 보기" aria-expanded="false" aria-controls="workspaceViewer">▤ <span class="toolbar-btn-label">파일 보기</span></button>
           <button id="shortcutHelpBtn" class="toolbar-btn shortcut-help-btn" title="Show keyboard shortcuts (Ctrl+/)">
             <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
               <rect x="1.5" y="3" width="13" height="10" rx="1.6"/>
@@ -87,9 +88,13 @@
             <span class="toolbar-btn-label">Keys</span>
           </button>
           <div class="toolbar-divider"></div>
-          <button id="terminalPromptBtn" class="toolbar-btn" title="선택한 터미널의 입력창 (Ctrl+Alt+Enter)" aria-haspopup="dialog">
-            입력창
+          <button id="launchSettingsBtn" class="toolbar-btn" title="실행 도구 목록과 기본 명령어 관리" aria-haspopup="dialog">
+            <svg class="toolbar-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m8 5-6 7 6 7m8-14 6 7-6 7M14 3l-4 18"/></svg>
+            <span class="toolbar-btn-label">실행 설정</span>
           </button>
+          <button id="mcpSettingsBtn" class="toolbar-btn" type="button" title="MCP 사용 설정과 도구 목록" aria-haspopup="dialog"><span class="toolbar-btn-label">MCP</span><span id="mcpToolbarState" class="mcp-toolbar-state">…</span></button>
+          <button id="reminderBtn" class="toolbar-btn" title="수동 알림과 사용 한도 초기화 예약" aria-haspopup="dialog"><svg class="toolbar-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg><span class="toolbar-btn-label">예약 알림<span id="reminderCount"></span></span></button>
+          <button id="conversationBtn" class="toolbar-btn" title="프로젝트의 Claude·Codex 저장 대화 조회 및 재개" aria-haspopup="dialog"><svg class="toolbar-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v12H9l-5 4V5Z"/><path d="M8 9h8m-8 4h5"/></svg><span class="toolbar-btn-label">대화 이력</span></button>
           <div class="font-scale-group" title="Global terminal font size">
             <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
               <text x="1" y="11" font-size="9" font-family="sans-serif" stroke="none" fill="currentColor" font-weight="bold">A</text>
@@ -117,7 +122,31 @@
         </div>
 
         <div id="groupBar" class="group-bar" aria-label="Pane groups"></div>
-        <div id="paneSurface" class="pane-surface"></div>
+        <div id="workspaceContent" class="workspace-content">
+          <div id="paneSurface" class="pane-surface"></div>
+          <div id="workspaceViewerResize" class="workspace-viewer-resize" hidden></div>
+          <section id="workspaceViewer" class="workspace-viewer" aria-label="워크스페이스 파일 뷰어" hidden>
+            <header class="workspace-viewer-header"><strong>파일 보기</strong><span id="viewerRootName"></span><button id="viewerRefresh" type="button" title="새로고침">↻</button><button id="viewerClose" type="button" title="닫기">×</button></header>
+            <div class="workspace-viewer-tabs"><button id="viewerFilesTab" type="button" class="active">파일</button><button id="viewerGitTab" type="button">Git</button><button id="viewerAgentsTab" type="button">Agent</button></div>
+            <div id="viewerMain" class="workspace-viewer-main">
+              <div class="workspace-viewer-sidebar">
+                <form id="viewerSearchForm" class="workspace-viewer-search" role="search">
+                  <div class="workspace-viewer-search-line"><input id="viewerSearchInput" aria-label="파일 이름 또는 경로 패턴" placeholder="*.py · **/test_*.py" spellcheck="false" /><button type="submit">검색</button><button id="viewerSearchClear" type="button" title="검색 지우기">×</button></div>
+                  <div class="workspace-viewer-search-line"><input id="viewerContentInput" aria-label="파일 내용 검색" placeholder="내용 검색 (최대 256KB/파일)" spellcheck="false" /></div>
+                  <label><input id="viewerSearchScope" type="checkbox" disabled /> 선택 폴더에서 검색 <span id="viewerScopeName"></span></label>
+                  <label><input id="viewerSearchIncludeExcluded" type="checkbox" /> 빌드·의존성 폴더 포함</label>
+                </form>
+                <div id="viewerTree" class="workspace-viewer-tree" role="tree"></div>
+                <div id="viewerGitList" class="workspace-viewer-tree" hidden></div>
+                <div id="viewerAgentList" class="workspace-viewer-tree" hidden></div>
+              </div>
+              <div id="viewerInnerResize" class="workspace-viewer-inner-resize" title="목록 너비 조절"></div>
+              <div class="workspace-viewer-preview"><div class="workspace-viewer-preview-bar"><div id="viewerPreviewTitle" class="workspace-viewer-preview-title">파일을 선택하세요</div><button id="viewerPrevious" type="button" title="이전 파일 (Alt+↑)">↑</button><button id="viewerNext" type="button" title="다음 파일 (Alt+↓)">↓</button></div><div id="viewerPreview" class="workspace-viewer-preview-body"></div></div>
+            </div>
+            <div class="workspace-viewer-actions"><button id="viewerCopyPath" type="button" disabled>경로 복사</button><button id="viewerCopyContent" type="button" disabled>내용 복사</button><button id="viewerCopyFile" type="button" disabled>파일 복사</button><button id="viewerPasteFile" type="button" disabled>여기에 붙여넣기</button></div>
+            <div id="viewerMessage" class="workspace-viewer-message" role="status"></div>
+          </section>
+        </div>
       </main>
 
       <div id="rightResizeHandle" class="resize-handle" title="Resize right panel"></div>
@@ -125,6 +154,7 @@
       <aside class="panel panel-right">
         <h2 id="notifTitle">Notifications</h2>
           <div class="notif-actions">
+            <button id="reminderPanelBtn" title="예약 알림 등록 및 관리">＋ 예약</button>
             <button id="refreshUnreadBtn" title="Refresh notifications" aria-label="Refresh notifications"><svg class="control-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 7a5 5 0 1 0-1 5M13 2v5H8"/></svg></button>
             <button id="markLatestReadBtn" title="Mark unread notifications in the selected workspace as read">Read workspace</button>
             <button id="clearUnreadBtn">Read all</button>
@@ -171,15 +201,15 @@
       </section>
     </div>
 
-    <section id="terminalComposer" class="pane-composer" aria-label="선택한 터미널 입력창" hidden></section>
+    <section id="terminalComposer" class="pane-composer" aria-label="선택한 터미널 입력창" hidden><div id="terminalFollowupQueue" class="pane-followup-queue" aria-label="이 터미널의 대기열" hidden></div></section>
     <dialog id="terminalPrompt" class="terminal-prompt" aria-labelledby="terminalPromptTitle">
       <form id="terminalPromptForm">
         <h2 id="terminalPromptTitle">터미널 입력창</h2>
         <p id="terminalPromptTarget"></p>
-        <textarea id="terminalPromptText" aria-label="터미널에 보낼 글" placeholder="메시지 입력… (Ctrl+Enter로 바로 전송)" rows="1" autofocus></textarea>
+        <textarea id="terminalPromptText" aria-label="터미널에 보낼 글" placeholder="메시지 입력… (Ctrl+Enter로 전송 또는 대기열 추가)" rows="1" autofocus></textarea>
         <details class="terminal-prompt-help">
           <summary>입력 도움말</summary>
-          <p>Ctrl+Enter로 전송합니다. ‘삽입만’은 Enter를 보내지 않습니다.</p>
+          <p>Ctrl+Enter로 에이전트 입력 대기열에 추가합니다. 입력 가능하면 곧바로 전송합니다. ‘삽입만’은 Enter를 보내지 않습니다.</p>
           <p id="terminalPromptMultilineHint" hidden>여러 줄 붙여넣기를 지원하지 않는 세션에서는 ‘한 줄로 삽입’을 사용하세요.</p>
         </details>
         <p id="terminalPromptError" role="alert" hidden></p>
@@ -188,9 +218,26 @@
           <button id="terminalPromptClose" type="button">닫기</button>
           <button id="terminalPromptInsert" type="submit">삽입만</button>
           <button id="terminalPromptSingleLine" type="submit" hidden>한 줄로 삽입</button>
+          <button id="terminalPromptFollowup" type="button" title="이 터미널에 후속 입력 예약">후속 입력 예약</button>
           <button id="terminalPromptSend" type="submit" title="내용을 넣고 Enter로 제출합니다. 입력창이 비어 있으면 터미널의 현재 입력을 제출합니다.">바로 전송</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="mcpSettingsDialog" class="mcp-settings-dialog" aria-labelledby="mcpSettingsTitle">
+      <header><div><h2 id="mcpSettingsTitle">MCP 설정</h2><p id="mcpSettingsState" role="status">상태 확인 중…</p></div><button id="mcpSettingsClose" type="button" aria-label="닫기">✕</button></header>
+      <div class="mcp-settings-body">
+        <div class="mcp-settings-main">
+          <label class="mcp-settings-toggle"><span><strong>WinCMux MCP 사용 <b id="mcpSwitchText">…</b></strong><small>끄면 등록된 MCP 클라이언트의 도구 요청을 차단합니다.</small></span><input id="mcpSettingsEnabled" type="checkbox" role="switch"></label>
+          <section><h3>연결 방법</h3><p>로컬 stdio 서버를 MCP 클라이언트에 등록하세요. TCP 포트는 사용하지 않습니다.</p><code id="mcpSettingsCommand"></code><div class="mcp-settings-actions"><button id="mcpSettingsCopy" type="button">Codex 명령 복사</button><button id="mcpSettingsInfoCopy" type="button">MCP 정보 복사</button></div></section>
+          <section><h3>에이전트 등록 프롬프트</h3><p>아래 내용을 Codex·Claude·Gemini 등 사용하는 에이전트에게 전달할 수 있습니다.</p><pre id="mcpAgentPrompt"></pre><button id="mcpSettingsPromptCopy" type="button">등록 프롬프트 복사</button></section>
+        </div>
+        <div class="mcp-settings-side">
+          <section><div class="mcp-activity-head"><h3>최근 MCP 요청</h3><button id="mcpActivityRefresh" type="button">새로고침</button></div><p>도구 이름, 실행 시각, 결과만 기록합니다. 입력 내용은 저장하지 않습니다.</p><ol id="mcpActivityList" aria-label="최근 MCP 도구 호출"></ol></section>
+          <section><h3>지원 도구</h3><ul id="mcpSettingsTools"></ul></section>
+        </div>
+        <p id="mcpSettingsError" role="alert" hidden></p>
+      </div>
     </dialog>
 
     <div id="shortcutOverlay" class="shortcut-overlay" hidden>
@@ -253,11 +300,17 @@
     <script src="./vendor/addon-unicode11.js"></script>
     <script src="./tauri-adapter.js"></script>
     <script src="./renderer.shared.js"></script>
+    <script src="./renderer.launchers.js"></script>
     <script src="./renderer.layout.js"></script>
     <script src="./renderer.panes.js"></script>
+    <script src="./renderer.workspace-viewer.js"></script>
     <script src="./tauri-output.js"></script>
+    <script src="./renderer.reminders.js"></script>
+    <script src="./renderer.followups.js"></script>
+    <script src="./renderer.conversations.js"></script>
     <script src="./renderer.quickcmd.js"></script>
     <script src="./renderer.hidden.js"></script>
+    <script src="./renderer.mcp.js"></script>
     <script src="./renderer.js"></script>
   </body>
 </html>

@@ -244,7 +244,7 @@ async function benchmark(executable, screenshots) {
     }
     if (process.env.WINCMUX_PERF_ONLY !== "1") {
     const imeGuard = await cdp.eval(`(() => {
-      document.getElementById("terminalPromptBtn").click();
+      document.getElementById("terminalPromptExpand").click();
       const editor=document.getElementById("terminalPromptText");
       const form=document.getElementById("terminalPromptForm");
       editor.value=${JSON.stringify(input)};
@@ -293,7 +293,7 @@ async function benchmark(executable, screenshots) {
     await cdp.eval("writeToPane(state.selectedPaneId,'#paste-off#')");
     await until(async () => !(await cdp.eval("state.paneViews.get(state.selectedPaneId).term.modes.bracketedPasteMode")), "bracketed paste disabled");
     const unsupported = await cdp.eval(`(async () => {
-      document.getElementById("terminalPromptBtn").click();
+      document.getElementById("terminalPromptExpand").click();
       const editor=document.getElementById("terminalPromptText");
       editor.value=${JSON.stringify(multiline)};
       editor.dispatchEvent(new Event("input"));
@@ -472,7 +472,7 @@ async function benchmark(executable, screenshots) {
       const host=state.paneViews.get(split.first).host;
       const bounds=host.getBoundingClientRect();
       const composerBounds=composer.getBoundingClientRect();
-      if (bounds.height<=0 || composerBounds.top<bounds.bottom-1) throw new Error("Composer overlaps terminal");
+      if (bounds.height<=0 || (composerBounds.height>0 && composerBounds.top<bounds.bottom-1)) throw new Error("Composer overlaps terminal");
       return {panes:panes.length,sharedComposer:document.querySelectorAll("#terminalComposer").length,
         drafts:true,split:true,close:true,expanded:true,workspaces:true};
     })()`);

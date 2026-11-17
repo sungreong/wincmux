@@ -1,6 +1,7 @@
 use crate::{core::Core, store::Result, terminal::hidden_command};
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     hash::{Hash, Hasher},
     mem::size_of,
     path::{Path, PathBuf},
@@ -14,6 +15,10 @@ use windows::{
         },
         System::{
             Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED},
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+                TH32CS_SNAPPROCESS,
+            },
             JobObjects::{
                 AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
                 SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -21,7 +26,8 @@ use windows::{
             },
             LibraryLoader::GetModuleHandleW,
             Threading::{
-                CreateMutexW, GetCurrentProcess, CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW,
+                CreateMutexW, GetCurrentProcess, GetProcessTimes, OpenProcess,
+                CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, PROCESS_QUERY_LIMITED_INFORMATION,
             },
         },
         UI::{
@@ -35,6 +41,249 @@ use windows::{
 };
 
 static LOG_ROOT: OnceLock<PathBuf> = OnceLock::new();
+#[derive(Clone)]
+pub struct ProcessIdentity {
+    pub parent: u32,
+    pub started: u64,
+    pub image: String,
+}
+
+pub fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+    use windows::Win32::Foundation::FILETIME;
+    if pid == 0 {
+        return None;
+    }
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+        let mut entry = PROCESSENTRY32W {
+            dwSize: size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut found = None;
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                if entry.th32ProcessID == pid {
+                    let len = entry
+                        .szExeFile
+                        .iter()
+                        .position(|ch| *ch == 0)
+                        .unwrap_or(entry.szExeFile.len());
+                    found = Some((
+                        entry.th32ParentProcessID,
+                        String::from_utf16_lossy(&entry.szExeFile[..len]),
+                    ));
+                    break;
+                }
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+        let (parent, image) = found?;
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let (mut created, mut exited, mut kernel, mut user) = (
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+        );
+        let ok =
+            GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user).is_ok();
+        let _ = CloseHandle(process);
+        ok.then_some(ProcessIdentity {
+            parent,
+            started: ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64,
+            image,
+        })
+    }
+}
+
+pub fn process_descends_from(mut pid: u32, ancestor: u32) -> bool {
+    let mut child_started = u64::MAX;
+    for _ in 0..24 {
+        let Some(identity) = process_identity(pid) else {
+            return false;
+        };
+        if identity.started > child_started {
+            return false;
+        }
+        if pid == ancestor {
+            return true;
+        }
+        if identity.parent == 0 || identity.parent == pid {
+            return false;
+        }
+        child_started = identity.started;
+        pid = identity.parent;
+    }
+    false
+}
+
+pub fn terminal_agent_anchor(root: u32) -> Option<(u32, u64)> {
+    let root_identity = process_identity(root)?;
+    let root_image = root_identity.image.to_ascii_lowercase();
+    if matches!(
+        root_image.as_str(),
+        "codex.exe" | "claude.exe" | "gemini.exe"
+    ) || (root_image.starts_with("codex-") && root_image.ends_with(".exe"))
+    {
+        return Some((root, root_identity.started));
+    }
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+        let mut entry = PROCESSENTRY32W {
+            dwSize: size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut native = Vec::new();
+        let mut script_runners = Vec::new();
+        let mut parents = HashMap::new();
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                let len = entry
+                    .szExeFile
+                    .iter()
+                    .position(|ch| *ch == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let image = String::from_utf16_lossy(&entry.szExeFile[..len]).to_ascii_lowercase();
+                parents.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+                if entry.th32ProcessID != root {
+                    if matches!(image.as_str(), "codex.exe" | "claude.exe" | "gemini.exe")
+                        || (image.starts_with("codex-") && image.ends_with(".exe"))
+                    {
+                        native.push(entry.th32ProcessID);
+                    } else if matches!(image.as_str(), "node.exe" | "bun.exe") {
+                        script_runners.push(entry.th32ProcessID);
+                    }
+                }
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+        let descends_in_snapshot = |mut pid: u32| -> bool {
+            for _ in 0..24 {
+                if pid == root {
+                    return true;
+                }
+                let Some(parent) = parents.get(&pid).copied() else {
+                    return false;
+                };
+                if parent == 0 || parent == pid {
+                    return false;
+                }
+                pid = parent;
+            }
+            false
+        };
+        let anchors = |pids: Vec<u32>| -> Vec<(u32, u64)> {
+            pids.into_iter()
+                .filter(|pid| descends_in_snapshot(*pid))
+                .filter(|pid| process_descends_from(*pid, root))
+                .filter_map(|pid| process_identity(pid).map(|identity| (pid, identity.started)))
+                .collect()
+        };
+        let native = anchors(native);
+        if native.len() == 1 {
+            return native.into_iter().next();
+        }
+        if !native.is_empty() {
+            return None;
+        }
+        // npm-installed agents run under Node. Their MCP servers may start other
+        // Node processes below them, so bind to the unique nearest runner.
+        let mut nearest = anchors(script_runners)
+            .into_iter()
+            .filter_map(|(pid, started)| {
+                let mut cursor = pid;
+                let mut depth = 0;
+                while cursor != root && depth < 24 {
+                    cursor = *parents.get(&cursor)?;
+                    depth += 1;
+                }
+                (cursor == root).then_some((pid, started, depth))
+            })
+            .collect::<Vec<_>>();
+        nearest.sort_by_key(|(_, _, depth)| *depth);
+        let first = nearest.first()?;
+        if nearest.get(1).is_some_and(|second| second.2 == first.2) {
+            return None;
+        }
+        Some((first.0, first.1))
+    }
+}
+pub fn process_anchor(
+    hook_pid: u32,
+    hook_started: u64,
+    root: u32,
+    provider: &str,
+) -> Option<(u32, u64)> {
+    let first = process_identity(hook_pid)?;
+    if first.started != hook_started || hook_pid == root {
+        return None;
+    }
+    let mut child_started = first.started;
+    let mut cursor = first.parent;
+    let mut anchor = None;
+    for _ in 0..24 {
+        if cursor == 0 || cursor == hook_pid {
+            return None;
+        }
+        let current = process_identity(cursor)?;
+        if current.started > child_started {
+            return None;
+        }
+        let image = current.image.to_ascii_lowercase();
+        let recognized =
+            image.contains(provider) || matches!(image.as_str(), "node.exe" | "bun.exe");
+        if anchor.is_none() && recognized {
+            anchor = Some((cursor, current.started));
+        }
+        if cursor == root {
+            return anchor;
+        }
+        if current.parent == cursor {
+            return None;
+        }
+        child_started = current.started;
+        cursor = current.parent;
+    }
+    None
+}
+// RtlGetVersion reports the host build without application manifest version lies.
+pub fn windows_pty() -> Value {
+    #[repr(C)]
+    struct Version {
+        size: u32,
+        major: u32,
+        minor: u32,
+        build: u32,
+        platform: u32,
+        service_pack: [u16; 128],
+    }
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn RtlGetVersion(version: *mut Version) -> i32;
+    }
+    static BUILD: OnceLock<Option<u32>> = OnceLock::new();
+    let build = BUILD.get_or_init(|| {
+        let mut version = Version {
+            size: size_of::<Version>() as u32,
+            major: 0,
+            minor: 0,
+            build: 0,
+            platform: 0,
+            service_pack: [0; 128],
+        };
+        (unsafe { RtlGetVersion(&mut version) } == 0).then_some(version.build)
+    });
+    match build {
+        Some(build) => json!({"backend":"conpty","buildNumber":build}),
+        None => json!({"backend":"conpty"}),
+    }
+}
 static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub fn set_log_root(path: PathBuf) {
     let _ = LOG_ROOT.set(path);
@@ -189,8 +438,8 @@ unsafe fn update_tray(hwnd: HWND, action: windows::Win32::UI::Shell::NOTIFY_ICON
             })
             .unwrap_or(0);
         format!(
-            "WinCMux · 터미널 {} · 입력 대기 {count}",
-            info["terminal_count"]
+            "WinCMux · 터미널 {} · 입력 대기 {count} · 예약 {}",
+            info["terminal_count"], info["pending_reminders"]
         )
     } else {
         "WinCMux".into()

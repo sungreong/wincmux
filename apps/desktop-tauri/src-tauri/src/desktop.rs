@@ -2,7 +2,7 @@ use crate::{
     assets, core,
     store::{self, text, Result},
     terminal::hidden_command,
-    toast,
+    toast, workspace_viewer,
 };
 use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder};
 use serde_json::{json, Value};
@@ -129,6 +129,10 @@ impl Desktop {
             _ => {
                 let path = store::path(text(&p, "path")?)?;
                 match action {
+                    "viewer-list" | "viewer-search" | "viewer-preview" | "viewer-copy"
+                    | "viewer-git-status" | "viewer-git-diff" => {
+                        workspace_viewer::action(action, &path, &p)
+                    }
                     "open-in-explorer" => assets::reveal(&path),
                     "open-in-vscode" => open_vscode(&path),
                     "git-info" => Ok(core::git_info(&path)),

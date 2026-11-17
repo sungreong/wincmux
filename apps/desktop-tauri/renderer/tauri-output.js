@@ -24,6 +24,7 @@ function activeTauriOutput(view, flow) {
 async function pumpTauriOutput(view) {
   const flow = view.tauriOutput;
   if (!activeTauriOutput(view, flow) || flow.loading || flow.queued || view.outputWriteInFlight
+    || flow.resizePaused || (!flow.snapshotNeeded && flow.resizeLimit != null && flow.cursor >= flow.resizeLimit)
     || (!flow.force && flow.cursor >= flow.wanted)) return;
   flow.force = false;
   flow.loading = true;
@@ -34,6 +35,7 @@ async function pumpTauriOutput(view) {
       const snapshot = await rpc("session.snapshot", { session_id: flow.session });
       if (!activeTauriOutput(view, flow)) return;
       view.restoringSnapshot = true;
+      view.term.options.windowsPty = snapshot.windows_pty ?? { backend: "conpty" };
       view.term.reset();
       view.term.resize(snapshot.cols, snapshot.rows);
       await new Promise((resolve) => view.term.write((snapshot.history ?? "") + snapshot.screen, resolve));
@@ -44,12 +46,16 @@ async function pumpTauriOutput(view) {
       flow.wanted = Math.max(flow.wanted, snapshot.end_offset);
       flow.snapshotNeeded = false;
       view.restoringSnapshot = false;
-      schedulePaneFit(view);
+      // A snapshot can have different dimensions even when its host did not move.
+      schedulePaneFit(view, { force: true });
+      completeTauriOutputWaiters(view, flow);
     }
+    if (flow.resizeLimit != null && flow.cursor >= flow.resizeLimit) return;
     const result = await rpc("session.tail", {
       session_id: flow.session,
       after_offset: flow.cursor,
-      max_bytes: TAURI_OUTPUT_BATCH_BYTES
+      max_bytes: flow.resizeLimit == null ? TAURI_OUTPUT_BATCH_BYTES
+        : Math.min(TAURI_OUTPUT_BATCH_BYTES, flow.resizeLimit - flow.cursor)
     });
     if (!activeTauriOutput(view, flow)) return;
     flow.wanted = Math.max(flow.wanted, result.available_end_offset);
@@ -77,6 +83,60 @@ async function pumpTauriOutput(view) {
     view.restoringSnapshot = false;
     flow.loading = false;
     if (retry || flow.force) void pumpTauriOutput(view);
+  }
+}
+
+// Keep pre-resize bytes at the old dimensions, then switch before the repaint.
+async function wincmuxTauriResizeOutput(view, cols, rows) {
+  const flow = view.tauriOutput;
+  if (!activeTauriOutput(view, flow)) return false;
+  flow.resizePaused = true;
+  let resized = false;
+  try {
+    const deadline = performance.now() + 5000;
+    // A tail response already in flight must finish before we obtain a boundary.
+    while (flow.loading || flow.queued || view.outputWriteInFlight || view.outputQueueLength) {
+      if (!activeTauriOutput(view, flow)) return false;
+      if (performance.now() > deadline) throw new Error("Terminal resize drain timed out");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const result = await rpc("session.resize", { session_id: flow.session, cols, rows });
+    resized = true;
+    if (!activeTauriOutput(view, flow)) return false;
+    if (!Number.isSafeInteger(result.before_offset)) {
+      // Older background cores cannot supply a boundary. Restore their current
+      // screen instead of interpreting buffered bytes at the wrong dimensions.
+      flow.snapshotNeeded = true;
+    } else {
+      flow.resizeLimit = result.before_offset;
+      flow.wanted = Math.max(flow.wanted, flow.resizeLimit);
+      if (flow.cursor < flow.resizeLimit) {
+        await new Promise((resolve, reject) => {
+          const waiter = { end: flow.resizeLimit, finish() { clearTimeout(timer); resolve(); } };
+          const timer = setTimeout(() => {
+            flow.waiters = flow.waiters.filter((item) => item !== waiter);
+            reject(new Error("Terminal resize boundary timed out"));
+          }, 5000);
+          flow.waiters.push(waiter);
+          flow.resizePaused = false;
+          flow.force = true;
+          void pumpTauriOutput(view);
+        });
+      }
+    }
+    if (!activeTauriOutput(view, flow)) return false;
+    view.term.resize(cols, rows);
+    return true;
+  } catch (err) {
+    if (resized) flow.snapshotNeeded = true;
+    throw err;
+  } finally {
+    flow.resizePaused = false;
+    flow.resizeLimit = null;
+    if (activeTauriOutput(view, flow)) {
+      flow.force = true;
+      void pumpTauriOutput(view);
+    }
   }
 }
 

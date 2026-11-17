@@ -73,6 +73,7 @@
     inputAssetDelete: withAsset("input-asset-delete"),
     inputAssetReveal: withAsset("input-asset-reveal"),
     openInExplorer: withPath("open-in-explorer"),
+    viewerAction: (action, path, payload = {}) => native(action, { path, ...payload }),
     gitInfo: withPath("git-info")
   };
 })();

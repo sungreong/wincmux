@@ -173,7 +173,7 @@ impl Remote {
                 *self.activation.lock().unwrap() = Some(event["params"].clone());
                 let _ = self.app.emit("wincmux-notification-open", &event["params"]);
             }
-            "notify.created" => {
+            "notify.created" | "notify.reminders_changed" => {
                 let _ = self.app.emit("wincmux-notify", event);
             }
             _ => {

@@ -3,6 +3,7 @@
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
 
@@ -36,3 +37,26 @@ jobs:
           name: WinCMux-Windows-x64
           path: apps/desktop-tauri/src-tauri/target/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: tauri-build-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: WinCMux-Windows-x64
+          path: release-assets
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="docs/releases/${GITHUB_REF_NAME#v}.md"
+          if [ -f "$notes" ]; then
+            gh release create "$GITHUB_REF_NAME" release-assets/*-setup.exe --title "WinCMux ${GITHUB_REF_NAME#v}" --notes-file "$notes" --verify-tag
+          else
+            gh release create "$GITHUB_REF_NAME" release-assets/*-setup.exe --title "WinCMux ${GITHUB_REF_NAME#v}" --generate-notes --verify-tag
+          fi

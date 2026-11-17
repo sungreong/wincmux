@@ -19,6 +19,7 @@ test('detached runtime retains sessions, snapshots and acknowledgements; protect
   assert.equal((await c.rpc('hidden.list',{workspace_id:ws})).items[0].session_id,sid);
   assert.equal((await c.rpc('agent.list')).items.find(s=>s.session_id===sid).state,'done');
   const snap=await c.rpc('session.snapshot',{session_id:sid});assert.ok(snap.screen.includes('FIXTURE_READY'));assert.ok(snap.end_offset>0);
+  const textScreen=await c.rpc('session.screen_text',{session_id:sid});assert.ok(textScreen.lines.some(line=>line.includes('FIXTURE_READY')));assert.equal(typeof textScreen.bracketed_paste,'boolean');
   await assert.rejects(c.rpc('session.resize',{session_id:sid,cols:32767,rows:32767}),/budget/);
   await assert.rejects(c.rpc('runtime.prepare_update'),/still running/);
   await assert.rejects(c.rpc('runtime.shutdown_all'),/confirmation/);

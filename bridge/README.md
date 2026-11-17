@@ -7,3 +7,5 @@ The Rust core exposes JSON-RPC 2.0 to the local Windows user running WinCMux and
 - Events: subscribe with `session.stream.subscribe` for session output, lifecycle events, and notifications.
 
 See [method documentation](API.md) and the [request schema](schema/jsonrpc.request.schema.json).
+
+The [local MCP server](mcp/README.md) exposes workspace and terminal inspection, input, follow-up scheduling, and Base64 PNG window capture to Codex and other stdio MCP clients.

@@ -624,6 +624,12 @@ function ensurePaneOverlay(view) {
       ev.preventDefault();
       ev.stopPropagation();
       const mode = overlay.dataset.mode ?? "empty";
+      if (mode === "empty" && window.wincmuxLaunchProfiles) {
+        void window.wincmuxLaunchProfiles.launch(view).catch((err) => {
+          setPaneOverlay(view, "empty", "실행하지 못했습니다", String(err?.message ?? err));
+        });
+        return;
+      }
       setPaneOverlay(view, "starting", "Starting session...", "Launching terminal process");
       paneHandlers.startSessionForPane(view.paneId, {
         force: mode !== "dormant" && Boolean(view.sessionId),
@@ -644,7 +650,10 @@ function ensurePaneOverlay(view) {
     const recent = document.createElement("div");
     recent.className = "pane-terminal-overlay-recent";
 
-    overlay.append(title, detail, action, recent);
+    const launchers = document.createElement("div");
+    launchers.className = "pane-launch-profiles";
+    view.overlayLaunchEl = launchers;
+    overlay.append(title, detail, action, launchers, recent);
     view.overlayEl = overlay;
     view.overlayTitleEl = title;
     view.overlayDetailEl = detail;
@@ -672,6 +681,14 @@ function parseSessionArgsForOverlay(spawnArgs = "[]") {
 
 function cleanShellCommandForOverlay(value = "") {
   let text = String(value).trim();
+  // Older launchers placed several encoding statements in a different order.
+  let previous;
+  do {
+    previous = text;
+    text = text.replace(/^chcp(?:\.com)?\s+65001\s*>\s*(?:\$null|nul)\s*;?\s*/i, "")
+      .replace(/^(?:\$OutputEncoding\s*=\s*)?\[Console\]::(?:Input|Output)Encoding\s*=\s*\[Text\.?UTF8Encoding\]::new\([^)]*\)\s*;\s*/i, "")
+      .replace(/^if \(Get-Variable PSStyle[\s\S]*?\};\s*/i, "");
+  } while (text !== previous);
   text = text.replace(/^\$OutputEncoding=\[Console\]::OutputEncoding=\[TextUTF8Encoding\]::new\(\);\s*/i, "");
   text = text.replace(/^\$OutputEncoding=\[Console\]::OutputEncoding=\[Text\.UTF8Encoding\]::new\(\);\s*/i, "");
   text = text.replace(/^\[Console\]::InputEncoding=\[Text\.UTF8Encoding\]::new\(\);\s*/i, "");
@@ -722,17 +739,19 @@ function overlayShellArgs(shellCmd, commandText) {
 
 async function startShellCommandForPane(paneId, commandText, options = {}) {
   const ws = selectedWorkspace();
-  const cwdCandidates = uniqueOverlayStrings([options.cwd, ws?.path]);
+  const cwdCandidates = uniqueOverlayStrings(options.strictCwd ? [options.cwd] : [options.cwd, ws?.path]);
   const shells = overlayShellCommands();
   let lastErr = null;
   for (const cwd of cwdCandidates.length > 0 ? cwdCandidates : [undefined]) {
     for (const shell of shells) {
+      if (options.workspaceId && state.selectedWorkspaceId !== options.workspaceId) throw new Error("프로젝트가 변경되었습니다.");
       try {
         return await paneHandlers.startSessionForPane(paneId, {
           force: options.force !== false,
           cmd: shell,
           args: overlayShellArgs(shell, commandText),
           cwd,
+          workspaceId: options.workspaceId ?? ws?.id,
           focusTerm: options.focusTerm !== false
         });
       } catch (err) {
@@ -1070,7 +1089,13 @@ function setPaneOverlay(view, mode, title, detail = "", actionLabel = "") {
   view.overlayDetailEl.hidden = !detail;
   view.overlayActionEl.textContent = actionLabel;
   view.overlayActionEl.hidden = !actionLabel;
+  if (mode === "empty") {
+    view.overlayTitleEl.textContent = "어떤 도구로 시작할까요?";
+    view.overlayDetailEl.textContent = detail && detail !== "Start a terminal in this pane" ? detail : "프로젝트 폴더에서 바로 실행합니다.";
+    view.overlayActionEl.hidden = true;
+  }
   view.overlayEl.hidden = false;
+  window.wincmuxLaunchProfiles?.render(view);
   renderPaneOverlayRecentSessions(view, mode);
 }
 
@@ -1747,28 +1772,37 @@ function fitPaneView(view, options = {}) {
     return false;
   }
   clearPaneFitRetry(view);
-  if (!options?.force && view.lastFitWidth === size.width && view.lastFitHeight === size.height) {
+  if (!options?.force && view.lastFitWidth === size.width && view.lastFitHeight === size.height
+    && view.pendingDimensions?.cols === view.term.cols && view.pendingDimensions?.rows === view.term.rows
+    && (!view.sessionId || (view.lastSyncedCols === view.term.cols && view.lastSyncedRows === view.term.rows))) {
     return false;
   }
   const beforeCols = view.term.cols;
   const beforeRows = view.term.rows;
   updatePaneActionLayout(view.paneId);
-  view.fitAddon.fit();
+  const dimensions = view.fitAddon.proposeDimensions();
+  if (!dimensions || !Number.isFinite(dimensions.cols) || !Number.isFinite(dimensions.rows)) return false;
+  const cols = Math.max(2, dimensions.cols);
+  const rows = Math.max(1, dimensions.rows);
+  view.pendingDimensions = { cols, rows };
+  if (!view.sessionId || !state.useStream) {
+    view.term.resize(cols, rows);
+  }
   view.lastFitWidth = size.width;
   view.lastFitHeight = size.height;
-  if (view.term.cols !== beforeCols || view.term.rows !== beforeRows) {
+  if (cols !== beforeCols || rows !== beforeRows
+    || view.lastSyncedCols !== cols || view.lastSyncedRows !== rows) {
     schedulePaneResize(view);
   }
   return true;
 }
 
 function schedulePaneFit(view, options = {}) {
-  if (!view || view.fitRaf) {
-    return;
-  }
+  if (!view) return;
   if (options?.force) {
     view.forceNextFit = true;
   }
+  if (view.fitRaf) return;
   view.fitRaf = window.requestAnimationFrame(() => {
     view.fitRaf = null;
     try {
@@ -1870,7 +1904,7 @@ function equalizePaneSizes() {
 }
 
 function schedulePaneResize(view) {
-  if (!view?.paneId || state.paneAutoResize === false) {
+  if (!view?.paneId) {
     return;
   }
   paneResizeSyncQueue.add(view.paneId);
@@ -1899,7 +1933,13 @@ function flushQueuedPaneResizes() {
     if (!view) {
       continue;
     }
-    void syncPaneSize(paneId).catch(() => {});
+    void syncPaneSize(paneId).catch((err) => {
+      setStatus(`Terminal resize error: ${err?.message ?? err}`, true);
+      if (!view.disposed && (view.resizeRetryCount ?? 0) < 3) {
+        view.resizeRetryCount = (view.resizeRetryCount ?? 0) + 1;
+        schedulePaneFitRetry(view, { force: true });
+      }
+    });
     processed += 1;
     if (processed >= PANE_RESIZE_SYNC_MAX_PANES_PER_FRAME) {
       break;
@@ -2052,7 +2092,9 @@ function updatePaneActionLayout(paneId) {
   const autoEnabled = state.paneAutoResize !== false;
   const width = card.clientWidth || 0;
   let level = 0;
-  if (width <= 0) {
+  if (!autoEnabled) {
+    level = 0;
+  } else if (width <= 0) {
     level = 2;
   } else {
     if (width <= PANE_ACTION_TIGHT_BREAKPOINT) {
@@ -2117,7 +2159,7 @@ function updatePaneActionLayout(paneId) {
   }
 
   if (meta.autoResizeBtn) {
-    const autoLabel = autoEnabled ? "Auto On" : "Auto Off";
+    const autoLabel = autoEnabled ? "Compact On" : "Compact Off";
     const shortcut = meta.autoResizeBtn.dataset.shortcut ?? "";
     meta.autoResizeBtn.innerHTML = `<span class="pane-btn-icon-svg" aria-hidden="true">${paneIcon.auto}</span><span class="pane-btn-label">${autoLabel}</span>${shortcut ? `<span class="pane-btn-shortcut">${shortcut}</span>` : ""}`;
     meta.autoResizeBtn.dataset.hasIcon = "1";
@@ -2208,9 +2250,8 @@ function setGlobalFontScale(scale, { resetPerPane = false } = {}) {
 }
 
 async function syncPaneSize(paneId) {
-  if (state.paneAutoResize === false) {
-    return;
-  }
+  // Header compaction is a presentation preference. PTY geometry must always
+  // follow the visible terminal, including when that preference is disabled.
   const view = state.paneViews.get(paneId);
   if (!view || !view.sessionId || view.restoringSnapshot) {
     return;
@@ -2218,9 +2259,10 @@ async function syncPaneSize(paneId) {
   if (!isPaneViewAttached(view)) {
     return;
   }
-  const cols = Math.max(2, view.term.cols || 120);
-  const rows = Math.max(1, view.term.rows || 24);
-  if (view.lastSyncedCols === cols && view.lastSyncedRows === rows) {
+  const cols = Math.max(2, view.pendingDimensions?.cols ?? view.term.cols ?? 120);
+  const rows = Math.max(1, view.pendingDimensions?.rows ?? view.term.rows ?? 24);
+  if (view.lastSyncedCols === cols && view.lastSyncedRows === rows
+    && view.term.cols === cols && view.term.rows === rows) {
     return;
   }
   if (view.resizeInFlight) {
@@ -2230,10 +2272,15 @@ async function syncPaneSize(paneId) {
   const sessionId = view.sessionId;
   view.resizeInFlight = true;
   try {
-    await rpc("session.resize", { session_id: sessionId, cols, rows });
+    if (state.useStream) {
+      if (!await wincmuxTauriResizeOutput(view, cols, rows)) return;
+    } else {
+      await rpc("session.resize", { session_id: sessionId, cols, rows });
+    }
     if (view.sessionId === sessionId) {
       view.lastSyncedCols = cols;
       view.lastSyncedRows = rows;
+      view.resizeRetryCount = 0;
     }
   } catch (err) {
     if (isDetachedInputError(err)) {
@@ -2541,6 +2588,7 @@ function bindTerminalPrompt() {
   const close = $("terminalPromptClose");
   const expand = $("terminalPromptExpand");
   const insert = $("terminalPromptInsert");
+  const followup = $("terminalPromptFollowup");
   const send = $("terminalPromptSend");
   const insertSingleLine = $("terminalPromptSingleLine");
   const multilineHint = $("terminalPromptMultilineHint");
@@ -2556,7 +2604,7 @@ function bindTerminalPrompt() {
     const hasLineBreaks = /[\n\t]/.test(editor.value);
     insert.textContent = "삽입만";
     insert.title = hasLineBreaks ? "줄바꿈과 들여쓰기를 유지해 삽입합니다. 제출하지 않습니다." : "입력 내용을 삽입합니다. 제출하지 않습니다.";
-    send.textContent = editor.value ? "바로 전송" : "터미널 제출";
+    send.textContent = editor.value ? "전송 / 대기열" : "터미널 제출";
     insertSingleLine.hidden = multilineHint.hidden = !hasLineBreaks;
     editor.style.height = "auto";
     const card = composer.parentElement;
@@ -2565,6 +2613,7 @@ function bindTerminalPrompt() {
   };
   const composerObserver = new ResizeObserver(() => {
     if (!dialog.open) updateInsertActions();
+    window.wincmuxFollowups?.reposition();
   });
   syncTerminalPrompt = () => {
     if (dialog.open || writing || (composing && editor.isConnected)) return;
@@ -2588,11 +2637,13 @@ function bindTerminalPrompt() {
     }
     composer.hidden = !card || !view;
     const ready = Boolean(view?.sessionId && !view.detached && isPaneViewAttached(view));
-    editor.disabled = insert.disabled = insertSingleLine.disabled = expand.disabled = send.disabled = !ready;
+    editor.disabled = insert.disabled = insertSingleLine.disabled = expand.disabled = send.disabled = followup.disabled = !ready;
     targetLabel.textContent = view
-      ? `Pane ${view.paneId.slice(0, 8)} · ${ready ? "Ctrl+Enter로 전송" : "터미널을 먼저 실행하세요"}` : "";
+      ? `Pane ${view.paneId.slice(0, 8)} · ${ready ? "Ctrl+Enter로 전송 / 대기열" : "터미널을 먼저 실행하세요"}` : "";
     if (form.parentElement !== composer) composer.appendChild(form);
+    window.wincmuxFollowups?.bindComposer(view?.paneId, view?.sessionId);
     if (changed || moved) updateInsertActions();
+    window.wincmuxFollowups?.reposition();
   };
   const open = () => {
     if (dialog.open || writing) return;
@@ -2607,7 +2658,7 @@ function bindTerminalPrompt() {
     composing = false;
     showError("");
     targetLabel.textContent = `Terminal ${leafPanes().findIndex((p) => p.pane_id === view.paneId) + 1}`;
-    targetLabel.title = "Ctrl+Enter로 전송";
+    targetLabel.title = "Ctrl+Enter로 전송 / 대기열";
     dialog.appendChild(form);
     dialog.showModal();
     updateInsertActions();
@@ -2615,7 +2666,12 @@ function bindTerminalPrompt() {
   };
 
   expand.addEventListener("click", open);
-  $("terminalPromptBtn").addEventListener("click", open);
+  followup.addEventListener("click", () => {
+    const view = state.paneViews.get(state.selectedPaneId);
+    if (!view?.sessionId || view.detached || !isPaneViewAttached(view)) return;
+    if (dialog.open) dialog.close();
+    void window.wincmuxFollowups?.open(view.paneId);
+  });
   document.addEventListener("keydown", (ev) => {
     if (!ev.defaultPrevented && !ev.isComposing && ev.keyCode !== 229 && isTerminalPromptShortcut(ev)) {
       ev.preventDefault();
@@ -2670,7 +2726,21 @@ function bindTerminalPrompt() {
       const preserveLineBreaks = ev.submitter !== insertSingleLine && /[\n\t]/.test(editor.value);
       const data = terminalPromptPayload(editor.value, preserveLineBreaks, view.term.modes.bracketedPasteMode);
       writing = true;
-      editor.readOnly = close.disabled = insert.disabled = insertSingleLine.disabled = expand.disabled = send.disabled = true;
+      editor.readOnly = close.disabled = insert.disabled = insertSingleLine.disabled = expand.disabled = send.disabled = followup.disabled = true;
+      if (shouldSubmit && editor.value.trim()) {
+        try {
+          await rpc("followup.schedule", { session_id: sessionId, prompt: editor.value, delivery_mode: "when_ready" });
+          view.promptDraft = "";
+          editor.value = "";
+          updateInsertActions();
+          if (dialog.open) dialog.close();
+          await window.wincmuxFollowups?.refresh();
+          setStatus("이 터미널의 대기열에 추가했습니다. 입력 가능하면 자동으로 전송합니다.");
+          return;
+        } catch (err) {
+          if (!/no running Codex, Claude, or Gemini process was found/.test(err?.message ?? String(err))) throw err;
+        }
+      }
       if (data) {
         await write(data);
         pasted = true;
@@ -2695,7 +2765,7 @@ function bindTerminalPrompt() {
       editor.focus();
     } finally {
       writing = false;
-      editor.readOnly = close.disabled = insert.disabled = insertSingleLine.disabled = expand.disabled = send.disabled = false;
+      editor.readOnly = close.disabled = insert.disabled = insertSingleLine.disabled = expand.disabled = send.disabled = followup.disabled = false;
       syncTerminalPrompt();
     }
   });
@@ -3049,7 +3119,7 @@ function createPaneLeaf(node, hosts) {
     ev.preventDefault();
     ev.stopPropagation();
     setPaneAutoResizeEnabled(!(state.paneAutoResize !== false));
-    setStatus(state.paneAutoResize !== false ? "Auto resize enabled" : "Auto resize disabled");
+    setStatus(state.paneAutoResize !== false ? "Compact header enabled" : "Compact header disabled");
   }, "pane-btn pane-btn-auto", paneIcon.auto);
   actionsOverflowBtn.addEventListener("click", (ev) => {
     ev.preventDefault();
@@ -3219,6 +3289,8 @@ function renderPaneNode(node, paneMap, hosts) {
 function createPaneView(paneId, host) {
   const fontSize = currentPaneFontSize(state.selectedWorkspaceId, paneId);
   const term = new window.Terminal({
+    allowProposedApi: true,
+    windowsPty: { backend: "conpty" },
     convertEol: false,
     cursorBlink: false,
     fontFamily: PANE_TERMINAL_FONT_FAMILY,
@@ -3244,8 +3316,8 @@ function createPaneView(paneId, host) {
       if (term.unicode?.activeVersion !== undefined) {
         term.unicode.activeVersion = "11";
       }
-    } catch {
-      // ignore unicode addon failures
+    } catch (err) {
+      console.error("Terminal Unicode width initialization failed", err);
     }
   }
   term.open(host);
@@ -3291,6 +3363,7 @@ function createPaneView(paneId, host) {
     lastFitHeight: 0,
     lastSyncedCols: 0,
     lastSyncedRows: 0,
+    pendingDimensions: null,
     resizeInFlight: false,
     pendingResizeSync: false,
     readBusy: false,
@@ -3313,7 +3386,7 @@ function createPaneView(paneId, host) {
     }
     if (isTerminalPromptShortcut(ev)) {
       ev.preventDefault();
-      $("terminalPromptBtn").click();
+      $("terminalPromptExpand").click();
       return false;
     }
 
@@ -3771,6 +3844,12 @@ async function openSessionPicker(paneId, anchorBtn) {
   titleBar.append(titleText, subtitleText);
   dropdown.appendChild(titleBar);
 
+  const conversationsBtn = document.createElement("button");
+  conversationsBtn.className = "session-picker-conversations";
+  conversationsBtn.textContent = "Claude · Codex 이전 대화 불러오기";
+  conversationsBtn.addEventListener("click", () => { dropdown.remove(); void window.wincmuxConversations.open(paneId); });
+  dropdown.appendChild(conversationsBtn);
+
   const tools = document.createElement("div");
   tools.className = "session-picker-tools";
   const searchInput = document.createElement("input");
@@ -3803,15 +3882,7 @@ async function openSessionPicker(paneId, anchorBtn) {
   };
 
   const commandBaseName = (cmd = "") => String(cmd).split(/[\\/]/).pop()?.toLowerCase() ?? "";
-  const cleanShellCommand = (value = "") => {
-    let text = String(value).trim();
-    text = text.replace(/^\$OutputEncoding=\[Console\]::OutputEncoding=\[TextUTF8Encoding\]::new\(\);\s*/i, "");
-    text = text.replace(/^\$OutputEncoding=\[Console\]::OutputEncoding=\[Text\.UTF8Encoding\]::new\(\);\s*/i, "");
-    text = text.replace(/^\[Console\]::InputEncoding=\[Text\.UTF8Encoding\]::new\(\);\s*/i, "");
-    text = text.replace(/^if \(Get-Variable PSStyle[\s\S]*?\};\s*/i, "");
-    text = text.replace(/^chcp\s+65001\s*>\s*\$null\s*;?\s*/i, "");
-    return text || value;
-  };
+  const cleanShellCommand = cleanShellCommandForOverlay;
   const sessionLabel = (session) => {
     const cmd = commandBaseName(session.spawn_cmd);
     let parsedArgs = [];
@@ -3875,10 +3946,9 @@ async function openSessionPicker(paneId, anchorBtn) {
         ev.stopPropagation();
         dropdown.remove();
         try {
-          await startShellCommandForPane(paneId, ai.resume_cmd, {
-            cwd: ai.cwd || undefined,
-            focusTerm: true
-          });
+          const match = String(ai.resume_cmd).match(/^(claude\s+--resume|codex\s+resume)\s+([0-9a-f-]{36})\s*$/i);
+          if (!match) { await window.wincmuxConversations.open(paneId); return; }
+          await window.wincmuxConversations.resume({ provider: match[1].toLowerCase().startsWith("claude") ? "claude" : "codex", id: match[2].toLowerCase() }, { workspaceId: ws.id, paneId, includeChildren: true });
         } catch (err) {
           setStatus(String(err?.message ?? err), true);
         }

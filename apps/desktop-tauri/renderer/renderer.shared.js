@@ -1446,7 +1446,11 @@ function renderAgentPaneStates() {
     badge.hidden = !row || row.source === "none";
     badge.textContent = row?.state === "idle" && row.reason !== "Result acknowledged"
       ? "○ 대기" : (AGENT_LABELS[row?.state] ?? AGENT_LABELS.unknown);
-    badge.title = `${row?.source ?? "none"}: ${row?.reason ?? ""}${row?.state === "done" ? " · 클릭하여 확인" : ""}`;
+    const hook = row?.hook;
+    const hookHealth = hook?.received
+      ? ` · 훅 실제 수신 ${hook.count}회 (${hook.provider}, 최근 ${hook.last_event}${hook.active ? '' : ', 세션 종료'})`
+      : ' · 훅 수신 전: 화면/OSC 추정';
+    badge.title = `${row?.source ?? "none"}: ${row?.reason ?? ""}${hookHealth}${row?.state === "done" ? " · 클릭하여 확인" : ""}`;
     if (isAction) badge.disabled = false;
     badge.setAttribute("aria-label", isAction ? `${badge.textContent} · 결과 확인` : badge.textContent);
   }

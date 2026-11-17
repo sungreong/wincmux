@@ -4,6 +4,7 @@ mod assets;
 mod desktop;
 mod remote;
 mod toast;
+mod workspace_viewer;
 use desktop::Desktop;
 use remote::Remote;
 use serde_json::{json, Value};

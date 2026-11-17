@@ -1,6 +1,6 @@
 {
   "name": "wincmux",
-  "version": "0.2.1",
+  "version": "0.2.83",
   "private": true,
   "description": "WinCMux Windows terminal workspace powered by Tauri and Rust",
   "scripts": {
@@ -8,11 +8,18 @@
     "build:ui": "node apps/desktop-tauri/scripts/build-ui.mjs",
     "build": "cd apps/desktop-tauri && tauri build --no-bundle",
     "pretest": "node apps/desktop-tauri/scripts/build-runtime.mjs",
-    "test": "node --test apps/desktop-tauri/tests/adapter.test.cjs && cargo test --locked --offline --release --workspace --manifest-path apps/desktop-tauri/src-tauri/Cargo.toml",
+    "test": "node --test apps/desktop-tauri/tests/adapter.test.cjs apps/desktop-tauri/tests/output-resize.test.cjs apps/desktop-tauri/tests/launch-profiles.test.cjs apps/desktop-tauri/tests/conversations.test.cjs && cargo test --locked --offline --release --workspace --manifest-path apps/desktop-tauri/src-tauri/Cargo.toml",
     "lint": "node apps/desktop-tauri/scripts/check-renderer-syntax.mjs && cargo fmt --all --check --manifest-path apps/desktop-tauri/src-tauri/Cargo.toml",
     "test:ui": "node --experimental-websocket apps/desktop-tauri/tests/benchmark.cjs",
+    "test:rendering": "node --experimental-websocket apps/desktop-tauri/tests/rendering.cjs",
+    "test:launchers": "node --experimental-websocket apps/desktop-tauri/tests/launchers.cjs",
+    "test:reminders": "node --experimental-websocket apps/desktop-tauri/tests/reminders.cjs",
+    "test:conversations": "node --experimental-websocket apps/desktop-tauri/tests/conversations.cjs",
+    "test:reminder-runtime": "node --test apps/desktop-tauri/tests/reminder-runtime.test.cjs",
     "package:win": "cd apps/desktop-tauri && tauri build --bundles nsis",
-    "test:runtime": "node --test apps/desktop-tauri/tests/runtime.test.cjs",
+    "test:runtime": "node --test apps/desktop-tauri/tests/runtime.test.cjs apps/desktop-tauri/tests/agent-hooks.test.cjs bridge/mcp/live.test.cjs",
+    "mcp:server": "node bridge/mcp/server.cjs",
+    "test:mcp": "node --test bridge/mcp/server.test.cjs",
     "test:lifecycle": "node --experimental-websocket apps/desktop-tauri/tests/lifecycle.cjs"
   },
   "devDependencies": {

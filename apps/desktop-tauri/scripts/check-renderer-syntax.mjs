@@ -5,11 +5,17 @@ const rendererDir = new URL("../renderer/", import.meta.url);
 const orderedFiles = [
   "tauri-adapter.js",
   "renderer.shared.js",
+  "renderer.launchers.js",
   "renderer.layout.js",
   "renderer.panes.js",
+  "renderer.workspace-viewer.js",
   "tauri-output.js",
+  "renderer.reminders.js",
+  "renderer.followups.js",
+  "renderer.conversations.js",
   "renderer.quickcmd.js",
   "renderer.hidden.js",
+  "renderer.mcp.js",
   "renderer.js"
 ];
 const MAX_RENDERER_LINES = 800;

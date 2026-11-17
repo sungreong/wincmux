@@ -1,5 +1,7 @@
 # WinCMux
 
+Follow-ups can use terminal readiness and the live Codex/Claude process without hook setup. When hooks are connected, their completion signal takes priority. See [detection and delivery conditions](docs/agent-hooks.md).
+
 [한국어](README.kr.md) · [Windows builds](../../actions) · [Performance evaluation](docs/evaluation.md)
 
 WinCMux is a Windows terminal workspace for Codex CLI, Claude Code, PowerShell, and other CLI tools. It uses Tauri, WebView2, xterm.js, and a Rust core built on Windows ConPTY. The installed app runs its core without Node.js.
@@ -9,13 +11,57 @@ WinCMux is a Windows terminal workspace for Codex CLI, Claude Code, PowerShell, 
 *WinCMux terminal workspace with sample terminal output.*
 
 - Run independent terminals in split panes and organize them into workspaces and groups. Hide and reattach running panes.
-- Write in the editor below the selected pane. Drafts follow each pane through selection and splitting. Press **Ctrl+Enter** or **바로 전송** to paste and submit. Use **확장** or **Ctrl+Alt+Enter** to open the larger editor.
+- Write in the editor below the selected pane. Press **Ctrl+Enter** or **전송 / 대기열** to queue a message for that pane's agent. It sends when the agent is ready and otherwise waits for completion. Drafts follow each pane through selection and splitting.
 - Select a wrapped URL and press **Ctrl+C** to copy one address. Ordinary multiline selections retain their line breaks.
 - Reopen recorded sessions, resume Codex and Claude conversations, receive Windows notifications, and manage workspace instructions, text snippets, and images.
 
 ![WinCMux Korean prompt editor with a multiline draft](assets/prompt-editor.png)
 
-**바로 전송** and **Ctrl+Enter** preserve line breaks and send a separate Enter to submit. **삽입만** only pastes the draft. With an empty editor, **터미널 제출** submits the terminal's existing input. Choose **한 줄로 삽입** followed by **터미널 제출** for sessions that require a single line.
+The per-pane queue appears above the editor and submits messages in order. For a terminal without an agent, **Ctrl+Enter** submits directly. **삽입만** only pastes the draft; **터미널 제출** submits the terminal's existing input.
+
+## What's new in 0.2.83: workspace viewer
+
+Select a workspace and click **파일 보기** in the toolbar. The viewer opens beside the terminal without starting another terminal. You can also open its tabs from the workspace quick actions: **Files**, **Git diff**, or **Agent Assets**. [Download the Windows x64 installer](https://github.com/sungreong/wincmux/releases/tag/v0.2.83).
+
+**Files** shows a folder tree with text and image previews. Search by filename or path pattern, optionally add a text query, and select a folder to limit the search to that folder. To copy a file, select it and click **파일 복사**, then select a destination folder and click **여기에 붙여넣기**. Refresh retains expanded folders and the selected item. Content search reads at most 256 KB per file and 20 MB in total, with a five-second search limit.
+
+![File search and preview in WinCMux 0.2.83](assets/workspace-search-0.2.83.png)
+
+**Git** separates staged, unstaged, and untracked files. Select a change to see its color-coded diff; a file with both staged and unstaged edits appears in both groups. **Agent** groups existing agent files by their actual workspace folder, such as `.agents`, `.codex`, and `.claude`. Expand or collapse each folder, open a file in the preview, and save editable files. Use the list's arrow keys or the preview's arrows and **Alt+↑/↓** to move between files.
+
+![Staged and unstaged Git diff in WinCMux 0.2.83](assets/workspace-git-0.2.83.png)
+
+![Agent file preview in WinCMux 0.2.83](assets/workspace-agent-0.2.83.png)
+
+## What's new in 0.2.6
+
+Follow-ups can now be scheduled without configuring Codex or Claude hooks. WinCMux checks the running agent process and terminal readiness before a one-time submission. Pending reservations fail if the agent process exits. Hook signals remain available for stronger completion detection.
+
+A fresh Claude or Codex composer can accept its first queued prompt before any task has completed. The initial ready state ends when the first task is submitted.
+
+Codex redraws are checked against the rendered terminal screen as well as the raw output. A typed CLI draft no longer blocks delivery. WinCMux clears or stashes it before submitting the queued prompt, and the queue stays visible above the editor after the scheduling panel closes.
+
+## What's new in 0.2.5
+
+The **Schedule follow-up** button now sits beside each terminal's message input. Its panel opens above that input and stays bound to the same terminal session.
+
+## What's new in 0.2.4
+
+Each terminal pane now has its own follow-up panel and session-scoped list. Choose **after the current task completes** or **after a specified time**; both modes require a verified idle agent before a one-time submission. Schema 12 backs up the prior database to `pre-v12-*.bak`. See [hook setup and delivery conditions](docs/agent-hooks.md).
+
+## What's new in 0.2.3
+
+**대화 이력** and **이전 대화 불러오기** discover project conversations directly from Claude's local JSONL files and Codex's rollout files, title index and read-only thread database. Search titles/IDs, filter by provider, include subdirectories and refresh. Resume a selected ID in its saved working directory; occupied or dormant panes are preserved by opening a split. Native Claude/Codex resume pickers are also available. Discovery respects `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, does not rewrite/copy/delete transcripts, and does not collect other accounts or WSL histories. CLI-owned retention still applies; deleted or unsaved conversations cannot be recovered.
+
+Recognizes compact quota banners such as `Usagelimitreached·continuingautomaticallyat7:50pm`. Date-free clocks resolve to their next local occurrence using the banner's first observation, with the current minute treated as due. Explicit dates remain explicit. The first observation is saved as `observed_at`, keeping relative intervals and recovery `now` stable across delayed processing, repaints and midnight. `/usage-credits to continue now` is a separate option, not a replacement for the reset time. Schema 10 preserves saved schedules and backs up existing databases to `pre-v10-*.bak`.
+
+## What's new in 0.2.2
+
+Choose Claude Code, Codex, Gemini or PowerShell from an empty pane. **실행 설정** manages saved names, commands, icons, ordering and the default selection across workspaces.
+
+**예약 알림** creates, edits, cancels and deletes persistent reminders. Recognized Claude/Codex/Gemini quota banners register reminders when they include an unambiguous reset time or retry interval. Repeated output is deduplicated within the same session, provider, limit kind and reset period; unknown accounts in different sessions are not merged. Ambiguous times require manual entry. The default timezone is configurable (initially `Asia/Seoul`). Windows and in-app alerts announce the scheduled time, without claiming the provider has restored access.
+
+Pending reminders keep the core alive after the UI and all terminals close. Overdue reminders fire after sleep/resume or the next app startup following full shutdown. Schema 9 is backed up to `pre-v9-*.bak` before migration. Includes the terminal resizing and Unicode-width corrections.
 
 ## What's new in 0.2.1
 
@@ -26,7 +72,7 @@ The desktop and execution core now have independent lifetimes. **Closing the win
 | Close window, Alt+F4, or UI crash | Live terminal jobs continue |
 | Reopen | Restore sessions, screens, hidden terminals and unread results |
 | Approval needed or task completed | Native notifications and tray state; click to return to the task |
-| No UI and no live terminals | Core exits after 30 seconds |
+| No UI, live terminals or pending reminders | Core exits after 30 seconds |
 | **완전히 종료** (fully quit) | Confirm the live-terminal count, then end all jobs |
 | Install/update/uninstall with live jobs | Stop installation/removal instead of killing jobs |
 

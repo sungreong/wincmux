@@ -1,9 +1,12 @@
 pub mod client;
+pub mod conversations;
 pub mod core;
 pub mod detector;
+pub mod followups;
 pub mod layout;
 pub mod pipe;
 pub mod platform;
+pub mod reminders;
 pub mod screen;
 pub mod store;
 pub mod terminal;

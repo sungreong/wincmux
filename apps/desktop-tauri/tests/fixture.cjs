@@ -6,9 +6,40 @@ process.stdin.setRawMode(true);
 
 let pending = "";
 let draft = "";
+let renderTimer;
+let renderFrame = 0;
 process.stdout.write("FIXTURE_READY\r\n");
 process.stdin.on("data", (data) => {
   pending += data;
+  const quota = /^#quota:(claude|codex|gemini|unknown|auto-continue)#$/.exec(pending);
+  if (quota) {
+    pending = '';
+    const provider = quota[1] === 'unknown' ? 'Gemini' : quota[1] === 'auto-continue' ? 'Codex' : quota[1];
+    const text = quota[1] === 'auto-continue' ? '⚠️Usagelimitreached·continuingautomaticallyat7:50pm·esctocancel ⚠ /usage-credits to continue now'
+      : quota[1] === 'gemini' ? 'You have exhausted your daily quota. Retry in 4 seconds'
+      : quota[1] === 'unknown' ? 'You have exhausted your daily quota.'
+      : "You've hit your 5-hour limit. Retry in 4 seconds";
+    process.stdout.write(provider + '\r\n\x1b[31m' + text + '\x1b[0m\r\n');
+  }
+  if (pending === "#render-on#") {
+    pending = "";
+    clearInterval(renderTimer);
+    const render = () => process.stdout.write("\x1b[H" + [
+      "English answer stays at left",
+      "한글 응답도 왼쪽부터",
+      "Mixed 🧪 cell width",
+      "FRAME " + (++renderFrame)
+    ].map(line => "\x1b[2K" + line).join("\r\n") + "\r\n\x1b[J");
+    render();
+    renderTimer = setInterval(render, 20);
+  }
+  if (pending === "#render-off#") { pending = ""; clearInterval(renderTimer); }
+  if (pending === "#width#") {
+    pending = "";
+    const cols = process.stdout.columns;
+    const prefix = `NEW width=${cols} `;
+    process.stdout.write("\x1b[H\x1b[2K" + prefix + "X".repeat(Math.max(0, cols - prefix.length - 3)) + "END\r\n\x1b[J");
+  }
   if (pending === "#paste-on#" || pending === "#paste-off#") {
     process.stdout.write(pending === "#paste-on#" ? "\x1b[?2004h" : "\x1b[?2004l");
     pending = "";

@@ -23,6 +23,12 @@ pub struct History {
 }
 
 impl History {
+    pub fn bracketed_paste(&self) -> bool {
+        self.screen.bracketed_paste()
+    }
+    pub fn prompt_state(&self) -> crate::screen::PromptState {
+        self.screen.prompt_state()
+    }
     pub fn append(&mut self, chunk: &str) -> usize {
         self.replies.push_str(&self.screen.process(chunk));
         self.end += chunk.len();
@@ -80,6 +86,9 @@ impl History {
 
     pub fn snapshot(&self) -> serde_json::Value {
         self.screen.snapshot(self.end)
+    }
+    pub fn text_snapshot(&self) -> serde_json::Value {
+        self.screen.text_snapshot()
     }
 
     pub fn end_offset(&self) -> usize {
@@ -151,7 +160,15 @@ pub struct Spawned {
 }
 
 impl Spawned {
-    pub fn new(cmd: &str, args: &[String], cwd: &Path, workspace: &str) -> Result<Self, String> {
+    pub fn new(
+        cmd: &str,
+        args: &[String],
+        cwd: &Path,
+        workspace: &str,
+        session_id: &str,
+        hook_token: &str,
+        hook_pipe: &str,
+    ) -> Result<Self, String> {
         let pair = native_pty_system()
             .openpty(size(120, 30))
             .map_err(string_error)?;
@@ -161,6 +178,9 @@ impl Spawned {
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
         command.env("TERM_PROGRAM", "wincmux");
+        command.env("WINCMUX_HOOK_SESSION_ID", session_id);
+        command.env("WINCMUX_HOOK_TOKEN", hook_token);
+        command.env("WINCMUX_HOOK_PIPE", hook_pipe);
         for (key, fallback) in [
             ("LANG", "ko_KR.UTF-8"),
             ("LC_ALL", "ko_KR.UTF-8"),
@@ -248,17 +268,17 @@ impl Terminal {
             .map_err(string_error)
     }
 
-    pub fn resize(&self, cols: u16, rows: u16) -> Result<(), String> {
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<usize, String> {
         crate::screen::Screen::validate_size(cols, rows)?;
         let master = self.master.lock().unwrap();
         let master = master.as_ref().ok_or("PTY session not attached")?;
         // Never hold the history lock during ResizePseudoConsole: Windows may
         // repaint more than a pipe buffer and need the reader to keep draining.
-        let previous = {
+        let (previous, before_offset) = {
             let mut history = self.history.lock().unwrap();
             let previous = history.screen.size();
             history.screen.resize(cols, rows);
-            previous
+            (previous, history.end_offset())
         };
         let result = master.resize(size(cols, rows)).map_err(string_error);
         if result.is_err() {
@@ -268,7 +288,7 @@ impl Terminal {
                 .screen
                 .resize(previous.0, previous.1);
         }
-        result
+        result.map(|()| before_offset)
     }
 
     pub fn close(&self) {

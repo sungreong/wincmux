@@ -380,12 +380,19 @@ function handleStreamEvent(event) {
     applyAgentState(params);
     renderAgentPaneStates();
     renderWorkspaces();
+    window.wincmuxFollowups?.updateTarget();
+    window.wincmuxFollowups?.refresh();
+    return;
+  }
+  if (event.method === "followup.changed") {
+    window.wincmuxFollowups?.refresh();
     return;
   }
   if (event.method === "session.exit") {
     state.agentStates.delete(params.session_id);
     renderAgentPaneStates();
     renderWorkspaces();
+    window.wincmuxFollowups?.updateTarget();
   }
   if (event.method === "notify.created") {
     const row = params.notification;
@@ -769,6 +776,16 @@ async function startSessionForPane(paneId, options = {}) {
     }
     delete state.paneSessions[paneId];
   }
+  // An empty pane presents the saved launcher choices; an explicit command or
+  // restoring an existing session continues through the regular spawn path.
+  if (!existing && !cmd && !dormantPaneSession(paneId)?.spawn_cmd && window.wincmuxLaunchProfiles) {
+    const view = state.paneViews.get(paneId);
+    if (view) {
+      setPaneOverlay(view, "empty", "어떤 도구로 시작할까요?", "프로젝트 폴더에서 바로 실행합니다.");
+      window.wincmuxLaunchProfiles.focusDefault(view);
+      return null;
+    }
+  }
   if (existing && force) {
     await rpc("session.close", { session_id: existing }).catch(() => {});
     delete state.paneSessions[paneId];
@@ -865,7 +882,8 @@ async function startSessionForPane(paneId, options = {}) {
   const shellCmd = (effectiveCmd ?? "pwsh.exe").toLowerCase();
   const isShell = shellCmd.includes("pwsh") || shellCmd.includes("powershell") || shellCmd.includes("cmd.exe");
   setTimeout(() => {
-    state.paneViews.get(paneId)?.fitAddon?.fit?.();
+    const view = state.paneViews.get(paneId);
+    if (view?.sessionId === sid) schedulePaneFit(view, { force: true });
     if (isShell) {
       rpc("session.write", { session_id: sid, data: "\r" }).catch(() => {});
     }
@@ -1058,6 +1076,7 @@ async function runWorkspaceTransition(workspaceId, options = {}) {
     persistWorkspaceGroupState(state.selectedWorkspaceId);
   }
   state.selectedWorkspaceId = workspaceId;
+  window.wincmuxWorkspaceViewer?.workspaceChanged();
   loadWorkspaceGroupState(workspaceId);
   localStorage.setItem(STORAGE_KEYS.selectedWorkspaceId, workspaceId);
   renderWorkspaces();
@@ -1201,6 +1220,7 @@ async function deleteWorkspaceById(workspaceId) {
   }
   await loadWorkspaces();
   await loadUnread();
+  void window.wincmuxReminders?.refresh();
   if (wasSelected && state.selectedWorkspaceId) {
     await switchWorkspace(state.selectedWorkspaceId);
   } else if (wasSelected) {
@@ -2787,13 +2807,35 @@ function openWsInfoPanel(ws, anchorEl) {
   const qaEl = $("wsQuickActions");
   if (qaEl) {
     qaEl.innerHTML = "";
+    const openWorkspaceViewer = (tab) => {
+      closeWsInfoPanel();
+      void (state.selectedWorkspaceId === ws.id ? Promise.resolve() : runWorkspaceTransition(ws.id, { reason: "viewer", forceLayout: true, autoSession: false }))
+        .then(() => window.wincmuxWorkspaceViewer.open(tab))
+        .catch((e) => setStatus(String(e?.message ?? e), true));
+    };
+    const startQuickTerminal = () => {
+      closeWsInfoPanel();
+      void (async () => {
+        if (state.selectedWorkspaceId !== ws.id) await switchWorkspace(ws.id);
+        let paneId = state.selectedPaneId ?? leafPanes()[0]?.pane_id;
+        if (!paneId) throw new Error("터미널 칸이 없습니다.");
+        if (state.paneSessions[paneId]) {
+          paneId = (await splitPaneInternal(paneId, "horizontal", { autoStartIfMissing: false }))?.second;
+        }
+        const view = state.paneViews.get(paneId);
+        if (!view) throw new Error("터미널 칸을 열지 못했습니다.");
+        await window.wincmuxLaunchProfiles.launch(view);
+      })().catch((e) => setStatus(String(e?.message ?? e), true));
+    };
     const actions = [
+      { label: "Files", title: "Browse and search workspace files", fn: () => openWorkspaceViewer("files") },
       { label: "Explorer", title: "Open in File Explorer", fn: () => window.wincmux.openInExplorer(ws.path).catch((e) => setStatus(String(e), true)) },
       { label: "VSCode",   title: "Open in VSCode",        fn: () => window.wincmux.openInVscode(ws.path).catch((e) => setStatus(String(e), true)) },
       { label: "Git",      title: "Show git log & status", fn: () => loadGitSummary(ws) },
-      { label: "Agent Assets", title: "Inspect Claude/Codex workspace assets", fn: () => loadAgentAssets(ws) },
+      { label: "Git diff", title: "Browse workspace changes and diffs", fn: () => openWorkspaceViewer("git") },
+      { label: "Agent Assets", title: "Browse agent files", fn: () => openWorkspaceViewer("agents") },
       { label: "Input Assets", title: "Manage long paste snippets and image paths", fn: () => loadInputAssets(ws) },
-      { label: "+ Terminal",  title: "New PTY in selected pane", fn: () => { closeWsInfoPanel(); startSessionForPane(state.selectedPaneId, { force: true, workspaceId: ws.id }).catch((e) => setStatus(String(e), true)); } },
+      { label: "+ Terminal", title: "Start a terminal in this pane or a new pane", fn: startQuickTerminal },
     ];
     for (const a of actions) {
       const btn = document.createElement("button");
@@ -3391,6 +3433,7 @@ async function bootstrap() {
     applyPanelVisibility();
     initResizeHandles(() => paneApi.fitAllPanes());
     bindEvents();
+    window.wincmuxWorkspaceViewer?.init();
     // Restore saved font scale selection
     if (fontScaleSelect) {
       fontScaleSelect.value = String(state.globalFontScale);
@@ -3438,6 +3481,7 @@ async function bootstrap() {
           setStatus("Core restarting...", false);
         } else if (status === "ready") {
           setStatus("Core reconnected", false);
+          void window.wincmuxMcpSettings?.refresh();
           if (state.selectedWorkspaceId) {
             for (const view of state.paneViews.values()) { view.tauriOutput = null; view.pendingInput = ""; }
             void runWorkspaceTransition(state.selectedWorkspaceId, { reason: "core_ready", forceLayout: true, autoSession: false });
@@ -3475,12 +3519,14 @@ async function bootstrap() {
     document.getElementById("shutdownAllBtn").addEventListener("click", async () => {
       try {
         const info = await rpc("runtime.info");
-        if (window.confirm(`실행 중인 터미널 ${info.terminal_count}개와 모든 하위 작업을 종료할까요?`)) {
+        const reminderNote = info.pending_reminders > 0 ? `\n예약 알림 ${info.pending_reminders}개는 저장됩니다. 완전 종료 중에는 알리지 않으며 다음 실행 때 확인합니다.` : '';
+        if (window.confirm(`실행 중인 터미널 ${info.terminal_count}개와 모든 하위 작업을 종료할까요?${reminderNote}`)) {
           await rpc("runtime.shutdown_all", { confirmed: true });
         }
       } catch (err) { setStatus(String(err), true); }
     });
     state.bootstrapReady = true;
+    void window.wincmuxMcpSettings?.refresh();
     setStatus("Ready");
   } catch (err) {
     setStatus(`Error: ${err.message ?? err}`, true);
