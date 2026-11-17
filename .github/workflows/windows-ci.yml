@@ -23,6 +23,8 @@ jobs:
         run: |
           rustup toolchain install 1.95.0 --profile minimal --component rustfmt
           rustup override set 1.95.0
+      - name: Fetch Rust dependencies for offline tests
+        run: cargo fetch --locked --manifest-path apps/desktop-tauri/src-tauri/Cargo.toml
       - name: Lint
         run: npm run lint
       - name: Bridge and Rust tests
