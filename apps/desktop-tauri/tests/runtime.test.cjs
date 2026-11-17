@@ -8,7 +8,8 @@ test('detached runtime retains sessions, snapshots and acknowledgements; protect
  let child=spawn(executable,['--data-dir',root,'--pipe',pipe,'--no-tray'],{windowsHide:true,stdio:['ignore','pipe','pipe']});let errors='';child.stderr.on('data',d=>errors+=d);let c;
  try{
   c=await until(()=>connect(pipe).catch(()=>null),'core startup '+errors);await c.rpc('client.attach',{client_id:'first'});
-  const info=await c.rpc('runtime.info');assert.equal(info.version,require('../../../package.json').version);assert.equal(info.protocol_version,1);assert.ok(info.data_directory.toLowerCase().endsWith(root.toLowerCase()));
+  const info=await c.rpc('runtime.info');assert.equal(info.version,require('../../../package.json').version);assert.equal(info.protocol_version,1);
+  assert.equal(path.normalize(fs.realpathSync.native(info.data_directory)).toLowerCase(),path.normalize(fs.realpathSync.native(root)).toLowerCase(),'core reports the requested data directory');
   const ws=(await c.rpc('workspace.create',{name:'Runtime test',path:root,backend:'custom'})).workspace.id;
   const result=await c.rpc('session.run',{workspace_id:ws,cmd:process.execPath,args:[path.resolve(__dirname,'fixture.cjs')],cwd:root});const sid=result.session.session_id;
   await until(async()=>(await c.rpc('session.tail',{session_id:sid})).output.includes('FIXTURE_READY'),'fixture');
