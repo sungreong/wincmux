@@ -4,10 +4,13 @@ import vm from "node:vm";
 const rendererDir = new URL("../renderer/", import.meta.url);
 const orderedFiles = [
   "tauri-adapter.js",
+  "workspace-folder-groups.js",
   "renderer.shared.js",
   "renderer.launchers.js",
   "renderer.layout.js",
   "renderer.panes.js",
+  "viewer-markdown.js",
+  "viewer-highlighter.js",
   "renderer.workspace-viewer.js",
   "tauri-output.js",
   "renderer.reminders.js",

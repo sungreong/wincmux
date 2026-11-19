@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>WinCMux</title>
     <link rel="stylesheet" href="./vendor/xterm.css" />
+    <link rel="stylesheet" href="./vendor/highlight/github-dark.min.css" />
     <link rel="stylesheet" href="./design-tokens.css" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -20,29 +21,28 @@
             <span class="workspace-toggle-icon">▾</span>
           </button>
           <div class="workspace-view-toggle" aria-label="Workspace list density">
-            <button id="workspaceCompactBtn" type="button" aria-label="Compact workspace list">Brief</button>
-            <button id="workspaceDetailBtn" type="button" aria-label="Detailed workspace list">Detail</button>
+            <button id="workspaceSimpleBtn" type="button" aria-label="한 줄로 보기" title="이름만 한 줄로 표시">한줄</button>
+            <button id="workspaceCompactBtn" type="button" aria-label="요약 보기" title="이름과 상태 요약 표시">요약</button>
+            <button id="workspaceDetailBtn" type="button" aria-label="상세 보기" title="경로와 브랜치까지 표시">상세</button>
           </div>
         </div>
 
         <div id="workspaceCreateFields" class="workspace-form" aria-label="Add workspace" hidden>
-          <input id="wsNameInput" placeholder="New workspace name" />
-          <div class="path-row">
-            <input id="wsPathInput" placeholder="Workspace folder" />
-            <button id="pickFolderBtn">Browse</button>
+          <div class="workspace-name-row">
+            <input id="wsNameInput" placeholder="New workspace name" aria-label="워크스페이스 이름" />
+            <button id="pickFolderBtn" class="workspace-icon-btn" type="button" aria-label="폴더 찾아보기" title="폴더 찾아보기">📂</button>
+            <button id="createWorkspaceBtn" class="workspace-create-btn workspace-icon-btn" type="button" aria-label="워크스페이스 생성" title="워크스페이스 생성">➕</button>
           </div>
-          <div class="workspace-actions">
-            <button id="createWorkspaceBtn" class="workspace-create-btn">Create</button>
-          </div>
+          <input id="wsPathInput" placeholder="Workspace folder path" aria-label="워크스페이스 폴더 경로" title="워크스페이스 폴더 경로" spellcheck="false" />
         </div>
 
         <ul id="workspaceList"></ul>
 
         <div class="workspace-notepad">
           <div class="notepad-header">
-            <span class="notepad-title">Notes</span>
+            <button id="workspaceNotepadToggle" class="notepad-toggle" type="button" aria-expanded="false" aria-controls="workspaceNotepad"><span class="notepad-title">Notes</span><span class="notepad-chevron" aria-hidden="true">▸</span></button>
           </div>
-          <textarea id="workspaceNotepad" class="notepad-textarea" placeholder="프로젝트 메모" title="워크스페이스별 자동 저장"></textarea>
+          <textarea id="workspaceNotepad" class="notepad-textarea" placeholder="프로젝트 메모" title="워크스페이스별 자동 저장" hidden></textarea>
         </div>
       </aside>
 
@@ -116,7 +116,6 @@
               </svg>
             </button>
           </div>
-          <button id="shutdownAllBtn" class="toolbar-btn" title="모든 작업을 종료하고 앱을 완전히 종료합니다">완전히 종료</button>
           <span id="selectedPaneLabel" class="muted toolbar-pane-label">Selected Pane: -</span>
           <div id="hiddenPanesPopover" class="hidden-panes-popover"></div>
         </div>
@@ -132,16 +131,17 @@
               <div class="workspace-viewer-sidebar">
                 <form id="viewerSearchForm" class="workspace-viewer-search" role="search">
                   <div class="workspace-viewer-search-line"><input id="viewerSearchInput" aria-label="파일 이름 또는 경로 패턴" placeholder="*.py · **/test_*.py" spellcheck="false" /><button type="submit">검색</button><button id="viewerSearchClear" type="button" title="검색 지우기">×</button></div>
-                  <div class="workspace-viewer-search-line"><input id="viewerContentInput" aria-label="파일 내용 검색" placeholder="내용 검색 (최대 256KB/파일)" spellcheck="false" /></div>
+                  <div class="workspace-viewer-search-line"><input id="viewerContentInput" aria-label="파일 내용 검색" placeholder="파일 내용 검색 · 이름은 비워도 됨" spellcheck="false" /></div>
                   <label><input id="viewerSearchScope" type="checkbox" disabled /> 선택 폴더에서 검색 <span id="viewerScopeName"></span></label>
                   <label><input id="viewerSearchIncludeExcluded" type="checkbox" /> 빌드·의존성 폴더 포함</label>
                 </form>
                 <div id="viewerTree" class="workspace-viewer-tree" role="tree"></div>
                 <div id="viewerGitList" class="workspace-viewer-tree" hidden></div>
+                <div id="viewerGitPager" class="workspace-viewer-pager" hidden><button id="viewerGitPrevPage" type="button">이전</button><span id="viewerGitPageLabel">1페이지</span><button id="viewerGitNextPage" type="button">다음</button></div>
                 <div id="viewerAgentList" class="workspace-viewer-tree" hidden></div>
               </div>
               <div id="viewerInnerResize" class="workspace-viewer-inner-resize" title="목록 너비 조절"></div>
-              <div class="workspace-viewer-preview"><div class="workspace-viewer-preview-bar"><div id="viewerPreviewTitle" class="workspace-viewer-preview-title">파일을 선택하세요</div><button id="viewerPrevious" type="button" title="이전 파일 (Alt+↑)">↑</button><button id="viewerNext" type="button" title="다음 파일 (Alt+↓)">↓</button></div><div id="viewerPreview" class="workspace-viewer-preview-body"></div></div>
+              <div class="workspace-viewer-preview"><div class="workspace-viewer-preview-bar"><div id="viewerPreviewTitle" class="workspace-viewer-preview-title">파일을 선택하세요</div><input id="viewerLanguageSearch" type="search" list="viewerLanguageOptions" aria-label="언어 빠른 검색" placeholder="언어 검색" autocomplete="off" spellcheck="false" hidden /><datalist id="viewerLanguageOptions"></datalist><button id="viewerLanguageSearchBtn" type="button" title="언어 빠른 검색" aria-label="언어 빠른 검색" hidden>⌕</button><select id="viewerLanguageSelect" aria-label="코드 언어 선택" title="구문 강조 언어 선택" hidden><option value="">언어 자동</option></select><button id="viewerMarkdownToggle" type="button" hidden>원문 보기</button><button id="viewerPrevious" type="button" title="이전 파일 (Alt+↑)">↑</button><button id="viewerNext" type="button" title="다음 파일 (Alt+↓)">↓</button></div><div id="viewerFindBar" class="workspace-viewer-find" hidden><input id="viewerFindInput" aria-label="현재 파일에서 찾기" placeholder="현재 파일에서 찾기" spellcheck="false" /><span id="viewerFindCount">0/0</span><button id="viewerFindPrevious" type="button" title="이전 일치">↑</button><button id="viewerFindNext" type="button" title="다음 일치">↓</button></div><div id="viewerPreview" class="workspace-viewer-preview-body"></div></div>
             </div>
             <div class="workspace-viewer-actions"><button id="viewerCopyPath" type="button" disabled>경로 복사</button><button id="viewerCopyContent" type="button" disabled>내용 복사</button><button id="viewerCopyFile" type="button" disabled>파일 복사</button><button id="viewerPasteFile" type="button" disabled>여기에 붙여넣기</button></div>
             <div id="viewerMessage" class="workspace-viewer-message" role="status"></div>
@@ -163,11 +163,26 @@
       </aside>
     </div>
 
+    <dialog id="workspaceDuplicateDialog" class="workspace-duplicate-dialog" aria-labelledby="workspaceDuplicateTitle" aria-describedby="workspaceDuplicateHelp">
+      <h2 id="workspaceDuplicateTitle">이미 등록된 폴더입니다</h2>
+      <p id="workspaceDuplicateHelp">같은 경로 또는 폴더 이름의 워크스페이스가 있습니다. 기존 항목을 확인하세요.</p>
+      <div class="workspace-duplicate-path"><strong>새 경로</strong><code id="workspaceDuplicateNewPath"></code></div>
+      <div class="workspace-duplicate-existing"><strong>기존 워크스페이스</strong><ul id="workspaceDuplicateExisting"></ul></div>
+      <form method="dialog" class="workspace-duplicate-actions">
+        <button type="submit" value="cancel">취소</button>
+        <button type="submit" value="create" class="workspace-duplicate-create">그래도 생성</button>
+      </form>
+    </dialog>
+
     <div id="wsInfoOverlay" class="ws-info-overlay" style="display:none">
       <div id="wsInfoPanel" class="ws-info-panel">
         <div class="ws-info-header">
           <span id="wsInfoTitle" class="ws-info-title"></span>
           <button id="wsInfoCloseBtn" class="ws-info-close" title="Close">✕</button>
+        </div>
+        <div class="ws-info-path-row">
+          <input id="wsInfoPath" type="text" readonly aria-label="워크스페이스 폴더 경로" title="워크스페이스 폴더 경로" />
+          <button id="wsInfoCopyPath" type="button" aria-label="폴더 경로 복사" title="폴더 경로 복사">📋</button>
         </div>
         <div id="wsQuickActions" class="ws-quick-actions"></div>
         <textarea id="wsDescInput" class="ws-desc-input" placeholder="Project description" title="Saved automatically"></textarea>
@@ -299,10 +314,14 @@
     <script src="./vendor/addon-fit.js"></script>
     <script src="./vendor/addon-unicode11.js"></script>
     <script src="./tauri-adapter.js"></script>
+    <script src="./workspace-folder-groups.js"></script>
     <script src="./renderer.shared.js"></script>
     <script src="./renderer.launchers.js"></script>
     <script src="./renderer.layout.js"></script>
     <script src="./renderer.panes.js"></script>
+    <script src="./viewer-markdown.js"></script>
+    <script src="./vendor/highlight/languages-list.js"></script>
+    <script src="./viewer-highlighter.js"></script>
     <script src="./renderer.workspace-viewer.js"></script>
     <script src="./tauri-output.js"></script>
     <script src="./renderer.reminders.js"></script>

@@ -10,7 +10,9 @@ Params: `{}`
 Params: `{ "id": string, "name": string }`
 
 ## workspace.delete
-Params: `{ "id": string }`
+Params: `{ "id": string, "confirmed_running"?: boolean }`
+
+A workspace with no running terminals deletes immediately. If it has running terminals, the core rejects an unconfirmed request. After the user confirms, pass `confirmed_running: true`; the core closes all of that workspace's running terminals before removing its records. Files in the workspace folder are not deleted.
 
 ## workspace.pin
 Params: `{ "id": string, "pinned": bool }`
@@ -70,6 +72,14 @@ Params: `{ "workspace_id": string, "pane_id": string }`
 ## layout.list
 Params: `{ "workspace_id": string }`
 
+## group.list / group.create
+Params: `{ "workspace_id": string }` for `group.list`; `{ "workspace_id": string, "name": string, "color"?: string }` for `group.create`. A group categorizes terminal sessions within a workspace; it is not a separate pane layout.
+
+## session.group.list / session.group.set
+Params: `{ "workspace_id": string }` for `session.group.list`; `{ "workspace_id": string, "session_id": string, "group_id": string }` for `session.group.set`. The core verifies that the session and group belong to the same workspace.
+
+`group.create`, `session.group.set`, `layout.split`, and `pane.session.bind` emit `workspace.structure_changed` on the `session` stream topic after a successful update, allowing an open UI to reload groups, layout and bindings.
+
 ## agent.list
 Params: `{}`
 
@@ -107,7 +117,7 @@ Snapshots also include `windows_pty: {backend: "conpty", buildNumber?}` for xter
 
 ## Local conversation discovery (0.2.3)
 
-- `conversation.list {workspace_id,include_children?:true,refresh?:false}` returns `{items,warnings,project_path,include_children}`. Rows contain `provider,id,title,cwd,updated_at,source_path,archived,cwd_exists,resume_command`. Dates are Unix seconds. Discovery is read-only and scoped by normalized, case-insensitive path component boundaries, with a 15-second cache; refresh bypasses it.
+- `conversation.list {workspace_id,include_children?:true,refresh?:false}` returns `{items,warnings,project_path,include_children}`. Rows contain `provider,id,title,cwd,updated_at,size_bytes,source_path,archived,cwd_exists,resume_command`. Dates are Unix seconds; `size_bytes` is the transcript file size or null if metadata is unavailable. It is not a message or token count. Discovery is read-only and scoped by normalized, case-insensitive path component boundaries, with a 15-second cache; refresh bypasses it. The desktop conversation dialog stores hidden/favorite marks and layout preferences in local app storage; these do not alter the CLI transcripts or this API.
 - Sources are Claude `projects/*/*.jsonl` and Codex `sessions`, `archived_sessions`, `session_index.jsonl`, plus the newest `state_*.sqlite` opened read-only. Roots respect `CLAUDE_CONFIG_DIR` / `CODEX_HOME` or the Windows user's defaults. Subagents, invalid UUIDs and unrelated projects are excluded. Bounded head/tail reads tolerate corrupt/partial JSONL. File traversal has a reported limit and ignores reparse points.
 - `conversation.resolve {workspace_id,provider,id,include_children?:true}` re-scans and validates project membership, UUID and working-directory availability, returning the selected row. It does not start a process. The renderer generates `claude --resume <UUID>` or `codex resume <UUID>` itself, opens a split for occupied/dormant panes and uses the saved cwd without fallback. Original transcript ownership and retention remain with the CLI. `ai.sessions` still represents previously detected terminal resume commands, not the local conversation library.
 

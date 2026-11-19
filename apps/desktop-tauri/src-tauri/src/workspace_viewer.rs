@@ -3,7 +3,7 @@ use glob::{MatchOptions, Pattern};
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::Read,
+    io::{BufRead, BufReader, Read},
     path::{Component, Path, PathBuf},
     process::Stdio,
     time::{Duration, Instant},
@@ -11,6 +11,7 @@ use std::{
 use wincmux_runtime::{store::Result, terminal::hidden_command};
 
 const MAX_ENTRIES: usize = 500;
+const GIT_PAGE_SIZE: usize = 100;
 const MAX_TEXT: u64 = 512 * 1024;
 const MAX_IMAGE: u64 = 8 * 1024 * 1024;
 const MAX_SEARCH_VISITS: usize = 100_000;
@@ -339,47 +340,80 @@ fn git(root: &Path, args: &[&str]) -> Result<std::process::Output> {
     Ok(output)
 }
 
-fn git_status(root: &Path) -> Result<Value> {
-    let output = git(
-        root,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    )?;
-    if output.stdout.len() > 4 * 1024 * 1024 {
-        return Err("Git status is too large".into());
+fn git_status(root: &Path, p: &Value) -> Result<Value> {
+    let page = p["page"].as_u64().unwrap_or(0);
+    if page > 999 {
+        return Err("Git status page is out of range".into());
     }
+    let offset = page as usize * GIT_PAGE_SIZE;
+    let mut child = hidden_command("git")
+        .arg("--literal-pathspecs")
+        .arg("-C")
+        .arg(root)
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut output = BufReader::new(child.stdout.take().ok_or("missing Git output")?);
     let mut items = Vec::new();
-    let mut fields = output.stdout.split(|byte| *byte == 0);
-    while let Some(field) = fields.next() {
+    let mut field = Vec::new();
+    let mut seen = 0;
+    let mut has_more = false;
+    loop {
+        field.clear();
+        if output.read_until(0, &mut field)? == 0 {
+            break;
+        }
+        field.pop();
         if field.len() < 4 {
             continue;
         }
         let status = String::from_utf8_lossy(&field[..2]).to_string();
         let path = String::from_utf8_lossy(&field[3..]).to_string();
         if status.contains('R') || status.contains('C') {
-            fields.next();
+            let mut original_path = Vec::new();
+            output.read_until(0, &mut original_path)?;
         }
-        let chars: Vec<char> = status.chars().collect();
+        let mut record = Vec::with_capacity(2);
         if status == "??" {
-            items.push(json!({"status":"?", "section":"untracked", "relativePath":path}));
+            record.push(json!({"status":"?", "section":"untracked", "relativePath":path}));
         } else {
+            let chars: Vec<char> = status.chars().collect();
             if chars[0] != ' ' {
-                items.push(
+                record.push(
                     json!({"status":chars[0].to_string(), "section":"staged", "relativePath":path}),
                 );
             }
             if chars[1] != ' ' {
-                items.push(json!({"status":chars[1].to_string(), "section":"unstaged", "relativePath":path}));
+                record.push(json!({"status":chars[1].to_string(), "section":"unstaged", "relativePath":path}));
             }
         }
-        if items.len() >= MAX_ENTRIES {
+        for item in record {
+            if seen >= offset + GIT_PAGE_SIZE {
+                has_more = true;
+                break;
+            }
+            if seen >= offset {
+                items.push(item);
+            }
+            seen += 1;
+        }
+        if has_more {
             break;
         }
+    }
+    drop(output);
+    if has_more {
+        let _ = child.kill();
+    }
+    if !child.wait()?.success() && !has_more {
+        return Err("Git status failed".into());
     }
     let branch = git(root, &["branch", "--show-current"])
         .ok()
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
         .unwrap_or_default();
-    Ok(json!({"branch":branch, "items":items, "truncated":items.len() >= MAX_ENTRIES}))
+    Ok(json!({"branch":branch, "items":items, "page":page, "hasMore":has_more}))
 }
 
 fn git_diff(root: &Path, p: &Value) -> Result<Value> {
@@ -432,7 +466,7 @@ pub fn action(name: &str, root: &Path, p: &Value) -> Result<Value> {
         "viewer-search" => search(root, p),
         "viewer-preview" => preview(root, p),
         "viewer-copy" => copy(root, p),
-        "viewer-git-status" => git_status(root),
+        "viewer-git-status" => git_status(root, p),
         "viewer-git-diff" => git_diff(root, p),
         _ => Err("unsupported viewer action".into()),
     }
@@ -441,6 +475,34 @@ pub fn action(name: &str, root: &Path, p: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_status_pages_large_change_lists() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("wincmux-git-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root)?;
+        git(&root, &["init", "--quiet"])?;
+        for index in 0..MAX_ENTRIES {
+            fs::write(root.join(format!("file-{index:04}.txt")), "")?;
+        }
+        let first = git_status(&root, &json!({"page":0}))?;
+        assert_eq!(first["items"].as_array().unwrap().len(), GIT_PAGE_SIZE);
+        assert_eq!(first["hasMore"], true);
+        assert_eq!(first["items"][0]["relativePath"], "file-0000.txt");
+        let last = git_status(&root, &json!({"page":4}))?;
+        assert_eq!(last["items"].as_array().unwrap().len(), GIT_PAGE_SIZE);
+        assert_eq!(last["hasMore"], false);
+
+        fs::write(root.join("file-extra.txt"), "")?;
+        let large = git_status(&root, &json!({"page":4}))?;
+        assert_eq!(large["hasMore"], true);
+        let next = git_status(&root, &json!({"page":5}))?;
+        assert_eq!(next["items"].as_array().unwrap().len(), 1);
+        assert_eq!(next["items"][0]["relativePath"], "file-extra.txt");
+        assert_eq!(next["hasMore"], false);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     fn rejects_parent_and_absolute_paths() {
         let root = std::env::temp_dir();

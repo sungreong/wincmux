@@ -1,7 +1,7 @@
 // A small, on-demand companion pane. It creates no terminal and loads only open folders.
 (() => {
   const $v = (id) => document.getElementById(id);
-  const viewer = { open: false, tab: "files", workspaceId: null, selected: null, copied: null, previewText: null, generation: 0, listGeneration: 0, expandedByWorkspace: new Map(), agentCollapsedByWorkspace: new Map(), searchFolder: null };
+  const viewer = { open: false, tab: "files", workspaceId: null, selected: null, copied: null, previewText: null, markdownText: null, markdownSource: false, generation: 0, listGeneration: 0, highlightGeneration: 0, gitPage: 0, codeLines: [], findMatches: [], findIndex: -1, expandedByWorkspace: new Map(), agentCollapsedByWorkspace: new Map(), searchFolder: null };
   const expanded = () => {
     if (!viewer.expandedByWorkspace.has(viewer.workspaceId)) viewer.expandedByWorkspace.set(viewer.workspaceId, new Set());
     return viewer.expandedByWorkspace.get(viewer.workspaceId);
@@ -61,6 +61,160 @@
     }
   }
 
+  const paintCode = (code, text, tokens, active) => window.wincmuxViewerHighlighter.paint(code, text, tokens, active);
+
+  function showFindMatch() {
+    const { findMatches, findIndex } = viewer;
+    $v("viewerFindCount").textContent = findMatches.length ? `${findIndex + 1}/${findMatches.length}` : "0/0";
+    const match = findMatches[findIndex];
+    if (!match) return;
+    const { code, text, tokens, start, length, row } = match;
+    paintCode(code, text, tokens, { start, length });
+    row.scrollIntoView({ block: "center", inline: "nearest" });
+  }
+
+  function findInPreview(preferredLine) {
+    const previous = viewer.findMatches[viewer.findIndex];
+    if (previous) paintCode(previous.code, previous.text, previous.tokens);
+    viewer.findMatches = [];
+    viewer.findIndex = -1;
+    const needle = $v("viewerFindInput").value.toLocaleLowerCase();
+    if (!needle) { $v("viewerFindCount").textContent = "0/0"; return; }
+    for (const { row, code, text, line, tokens } of viewer.codeLines) {
+      const lower = text.toLocaleLowerCase();
+      let from = 0;
+      while (from < lower.length) {
+        const start = lower.indexOf(needle, from);
+        if (start < 0) break;
+        viewer.findMatches.push({ row, code, text, line, tokens, start, length: needle.length });
+        from = start + Math.max(needle.length, 1);
+        if (viewer.findMatches.length >= 10000) break;
+      }
+      if (viewer.findMatches.length >= 10000) break;
+    }
+    if (viewer.findMatches.length) {
+      viewer.findIndex = Math.max(0, viewer.findMatches.findIndex((match) => match.line >= (preferredLine || 1)));
+    }
+    showFindMatch();
+  }
+
+  function moveFind(delta) {
+    const previous = viewer.findMatches[viewer.findIndex];
+    if (previous) paintCode(previous.code, previous.text, previous.tokens);
+    if (!viewer.findMatches.length) return;
+    viewer.findIndex = (viewer.findIndex + delta + viewer.findMatches.length) % viewer.findMatches.length;
+    showFindMatch();
+  }
+
+  function highlightCode(value, path, entries) {
+    const request = ++viewer.highlightGeneration;
+    const source = value.replace(/\r\n?/g, "\n").split("\n").slice(0, entries.length).join("\n");
+    window.wincmuxViewerHighlighter.highlight(source, path, $v("viewerLanguageSelect").value || null).then(({ language, lines }) => {
+      if (request !== viewer.highlightGeneration || viewer.codeLines !== entries) return;
+      $v("viewerLanguageSelect").options[0].textContent = `언어 자동 · ${language || "일반 텍스트"}`;
+      $v("viewerLanguageSelect").title = language ? `자동 감지: ${language} · 내장 강조` : "자동 감지: 일반 텍스트";
+      for (const [index, entry] of entries.entries()) {
+        entry.tokens = lines?.[index] || null;
+        const current = viewer.findMatches[viewer.findIndex];
+        const active = current?.code === entry.code ? { start: current.start, length: current.length } : undefined;
+        paintCode(entry.code, entry.text, entry.tokens, active);
+      }
+      const tokensByCode = new Map(entries.map((entry) => [entry.code, entry.tokens]));
+      viewer.findMatches.forEach((match) => { match.tokens = tokensByCode.get(match.code); });
+    }).catch((error) => {
+      if (request !== viewer.highlightGeneration) return;
+      $v("viewerLanguageSelect").options[0].textContent = "언어 자동 · 강조 불가";
+      $v("viewerLanguageSelect").title = `내장 언어 강조를 불러오지 못했습니다: ${String(error?.message ?? error)}`;
+      message("언어 강조 모듈을 불러오지 못했습니다. 앱을 업데이트하거나 다시 설치하세요.");
+    });
+  }
+
+  function renderCode(body, value, line, preserveFind = false) {
+    const codeView = document.createElement("div");
+    codeView.className = "workspace-viewer-code";
+    viewer.codeLines = [];
+    const fragment = document.createDocumentFragment();
+    const lines = value.replace(/\r\n?/g, "\n").split("\n");
+    const entries = viewer.codeLines;
+    const path = viewer.selected?.relativePath;
+    for (const [index, text] of lines.slice(0, 5000).entries()) {
+      const row = document.createElement("div");
+      row.className = "workspace-viewer-code-line";
+      if (line === index + 1) row.classList.add("target");
+      const number = document.createElement("span");
+      number.className = "workspace-viewer-line-number";
+      number.textContent = String(index + 1);
+      const code = document.createElement("span");
+      code.className = "workspace-viewer-code-text";
+      paintCode(code, text);
+      row.append(number, code);
+      fragment.append(row);
+      entries.push({ row, code, text, line: index + 1, tokens: null });
+    }
+    codeView.append(fragment);
+    body.append(codeView);
+    if (lines.length > 5000) {
+      const note = document.createElement("div");
+      note.className = "workspace-viewer-note";
+      note.textContent = "처음 5,000줄만 표시합니다.";
+      body.append(note);
+    }
+    $v("viewerFindBar").hidden = false;
+    $v("viewerLanguageSelect").hidden = false;
+    $v("viewerLanguageSearchBtn").hidden = false;
+    if (!preserveFind) $v("viewerFindInput").value = viewer.tab === "files" && line ? $v("viewerContentInput").value.trim() : "";
+    findInPreview(line);
+    if (line && !viewer.findMatches.length) viewer.codeLines[line - 1]?.row.scrollIntoView({ block: "center" });
+    highlightCode(value, path, entries);
+  }
+
+  function addAgentEditor(body, item, content) {
+    if (viewer.tab !== "agents" || !item?.editable) return;
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.textContent = "편집";
+    edit.addEventListener("click", () => {
+      const editor = document.createElement("textarea");
+      editor.className = "workspace-viewer-agent-editor";
+      editor.value = content;
+      const save = document.createElement("button");
+      save.type = "button";
+      save.textContent = "저장";
+      save.addEventListener("click", async () => {
+        save.disabled = true;
+        try {
+          await window.wincmux.agentAssetWrite(workspace().path, item.relativePath, editor.value);
+          message("Agent 파일을 저장했습니다.");
+          select(item);
+        } catch (error) { save.disabled = false; showError(error); }
+      });
+      $v("viewerMarkdownToggle").hidden = true;
+      body.replaceChildren(editor, save);
+      editor.focus();
+    });
+    body.prepend(edit);
+  }
+
+  function showMarkdownPreview(source) {
+    const body = $v("viewerPreview");
+    body.replaceChildren();
+    viewer.markdownSource = source;
+    $v("viewerMarkdownToggle").textContent = source ? "문서 보기" : "원문 보기";
+    if (source) renderCode(body, viewer.markdownText, viewer.selected?.line, true);
+    else {
+      viewer.codeLines = [];
+      $v("viewerLanguageSelect").hidden = true;
+      $v("viewerLanguageSearchBtn").hidden = true;
+      $v("viewerLanguageSearch").hidden = true;
+      viewer.findMatches = [];
+      viewer.findIndex = -1;
+      $v("viewerFindCount").textContent = "0/0";
+      $v("viewerFindBar").hidden = false;
+      window.wincmuxViewerMarkdown.render(body, viewer.markdownText);
+    }
+    addAgentEditor(body, viewer.selected, viewer.markdownText);
+  }
+
   function updateActions() {
     const selected = viewer.selected;
     $v("viewerCopyPath").disabled = !selected;
@@ -84,6 +238,17 @@
     ++viewer.generation;
     viewer.selected = item;
     viewer.previewText = null;
+    viewer.markdownText = null;
+    $v("viewerLanguageSelect").value = "";
+    $v("viewerLanguageSelect").options[0].textContent = "언어 자동 · 확인 중";
+    $v("viewerLanguageSelect").hidden = true;
+    $v("viewerLanguageSearchBtn").hidden = true;
+    $v("viewerLanguageSearch").hidden = true;
+    viewer.codeLines = [];
+    viewer.findMatches = [];
+    viewer.findIndex = -1;
+    $v("viewerFindBar").hidden = true;
+    $v("viewerMarkdownToggle").hidden = true;
     $v("viewerPreviewTitle").textContent = item.relativePath || workspace()?.path || "";
     $v("viewerPreview").replaceChildren();
     document.querySelectorAll(".workspace-viewer-row.selected").forEach((el) => el.classList.remove("selected"));
@@ -112,35 +277,14 @@
       } else if (result.kind === "text") {
         if (viewer.tab === "git" && item.section !== "untracked") {
           renderDiff(body, result.text);
+        } else if (/\.mdx?$/i.test(item.relativePath)) {
+          viewer.markdownText = result.text;
+          $v("viewerMarkdownToggle").hidden = false;
+          showMarkdownPreview(false);
         } else {
-          const pre = document.createElement("pre");
-          pre.textContent = result.text || "빈 파일";
-          body.append(pre);
-          if (viewer.tab === "agents" && item.editable) {
-            const edit = document.createElement("button");
-            edit.type = "button";
-            edit.textContent = "편집";
-            edit.addEventListener("click", () => {
-              const editor = document.createElement("textarea");
-              editor.className = "workspace-viewer-agent-editor";
-              editor.value = result.text;
-              const save = document.createElement("button");
-              save.type = "button";
-              save.textContent = "저장";
-              save.addEventListener("click", async () => {
-                save.disabled = true;
-                try {
-                  await window.wincmux.agentAssetWrite(workspace().path, item.relativePath, editor.value);
-                  message("Agent 파일을 저장했습니다.");
-                  select(item);
-                } catch (error) { save.disabled = false; showError(error); }
-              });
-              body.replaceChildren(editor, save);
-              editor.focus();
-            });
-            body.prepend(edit);
-          }
+          renderCode(body, result.text, item.line);
         }
+        if (viewer.markdownText === null) addAgentEditor(body, item, result.text);
         viewer.previewText = result.text;
       } else {
         body.textContent = result.kind === "large" ? "미리보기 크기 제한을 넘었습니다." : "이 파일은 미리보기를 지원하지 않습니다.";
@@ -293,16 +437,22 @@
     const previous = viewer.selected && identity(viewer.selected);
     const scroll = list.scrollTop;
     list.textContent = "Git 상태를 읽는 중…";
+    $v("viewerGitPrevPage").disabled = true;
+    $v("viewerGitNextPage").disabled = true;
     const wsId = viewer.workspaceId;
     const listGeneration = ++viewer.listGeneration;
     try {
-      const result = await call("viewer-git-status");
+      const page = viewer.gitPage;
+      const result = await call("viewer-git-status", { page });
       if (viewer.workspaceId !== wsId || !viewer.open || viewer.tab !== "git" || viewer.listGeneration !== listGeneration) return;
       list.replaceChildren();
       const header = document.createElement("div");
       header.className = "workspace-viewer-note";
-      header.textContent = `${result.branch || "(detached)"} · 변경 ${result.items.length}개${result.truncated ? " 이상" : ""}`;
+      header.textContent = `${result.branch || "(detached)"} · ${page + 1}페이지 · ${result.items.length}개 표시${result.hasMore ? " · 다음 페이지 있음" : ""}`;
       list.append(header);
+      $v("viewerGitPageLabel").textContent = `${page + 1}페이지`;
+      $v("viewerGitPrevPage").disabled = page === 0;
+      $v("viewerGitNextPage").disabled = !result.hasMore;
       if (!result.items.length) {
         const empty = document.createElement("div");
         empty.className = "workspace-viewer-note";
@@ -339,7 +489,24 @@
       }
       restoreSelection(previous, list);
       list.scrollTop = scroll;
-    } catch (error) { list.replaceChildren(); showError(error); }
+    } catch (error) { if (viewer.listGeneration === listGeneration) { list.replaceChildren(); showError(error); } }
+  }
+
+  function changeGitPage(delta) {
+    viewer.gitPage = Math.max(0, Math.min(999, viewer.gitPage + delta));
+    viewer.selected = null;
+    viewer.previewText = null;
+    viewer.markdownText = null;
+    ++viewer.generation;
+    $v("viewerPreviewTitle").textContent = "파일을 선택하세요";
+    $v("viewerPreview").replaceChildren();
+    $v("viewerFindBar").hidden = true;
+    $v("viewerMarkdownToggle").hidden = true;
+    $v("viewerLanguageSelect").hidden = true;
+    $v("viewerLanguageSearchBtn").hidden = true;
+    $v("viewerLanguageSearch").hidden = true;
+    updateActions();
+    void loadGit();
   }
 
   async function loadAgents() {
@@ -424,6 +591,7 @@
     viewer.tab = tab;
     viewer.selected = null;
     viewer.previewText = null;
+    viewer.markdownText = null;
     ++viewer.generation;
     $v("viewerFilesTab").classList.toggle("active", tab === "files");
     $v("viewerGitTab").classList.toggle("active", tab === "git");
@@ -431,9 +599,15 @@
     $v("viewerTree").hidden = tab !== "files";
     $v("viewerGitList").hidden = tab !== "git";
     $v("viewerAgentList").hidden = tab !== "agents";
+    $v("viewerGitPager").hidden = tab !== "git";
     $v("viewerSearchForm").hidden = tab !== "files";
     $v("viewerPreviewTitle").textContent = "파일을 선택하세요";
     $v("viewerPreview").replaceChildren();
+    $v("viewerFindBar").hidden = true;
+    $v("viewerMarkdownToggle").hidden = true;
+    $v("viewerLanguageSelect").hidden = true;
+    $v("viewerLanguageSearchBtn").hidden = true;
+    $v("viewerLanguageSearch").hidden = true;
     updateActions();
     message("");
     refresh();
@@ -461,6 +635,38 @@
   }
 
   function init() {
+    for (const language of window.wincmuxHighlightLanguages || []) {
+      const option = document.createElement("option");
+      option.value = language;
+      option.textContent = language;
+      $v("viewerLanguageSelect").append(option);
+      $v("viewerLanguageOptions").append(option.cloneNode(true));
+    }
+    $v("viewerLanguageSelect").addEventListener("change", () => {
+      if (viewer.previewText !== null && viewer.codeLines.length) highlightCode(viewer.previewText, viewer.selected?.relativePath, viewer.codeLines);
+    });
+    const languageSearch = $v("viewerLanguageSearch");
+    const commitLanguageSearch = () => {
+      const query = languageSearch.value.trim().toLowerCase();
+      const language = query && (window.wincmuxHighlightLanguages || []).find((name) => name.toLowerCase() === query)
+        || (query && (window.wincmuxHighlightLanguages || []).find((name) => name.toLowerCase().startsWith(query)));
+      if (query && !language) { languageSearch.setCustomValidity("일치하는 언어가 없습니다."); languageSearch.reportValidity(); return; }
+      languageSearch.setCustomValidity("");
+      $v("viewerLanguageSelect").value = language || "";
+      $v("viewerLanguageSelect").dispatchEvent(new Event("change"));
+      languageSearch.hidden = true;
+      $v("viewerLanguageSelect").focus();
+    };
+    $v("viewerLanguageSearchBtn").addEventListener("click", () => {
+      languageSearch.hidden = !languageSearch.hidden;
+      if (!languageSearch.hidden) { languageSearch.value = ""; languageSearch.focus(); }
+    });
+    languageSearch.addEventListener("change", () => { if (languageSearch.value.trim()) commitLanguageSearch(); });
+    languageSearch.addEventListener("keydown", (event) => {
+      event.stopPropagation();
+      if (event.key === "Enter") { event.preventDefault(); commitLanguageSearch(); }
+      if (event.key === "Escape") { languageSearch.hidden = true; $v("viewerLanguageSearchBtn").focus(); }
+    });
     $v("workspaceViewerBtn").addEventListener("click", () => setOpen(!viewer.open));
     $v("viewerClose").addEventListener("click", () => setOpen(false));
     $v("viewerRefresh").addEventListener("click", refresh);
@@ -469,12 +675,28 @@
     $v("viewerAgentsTab").addEventListener("click", () => setTab("agents"));
     $v("viewerPrevious").addEventListener("click", () => navigate(-1));
     $v("viewerNext").addEventListener("click", () => navigate(1));
+    $v("viewerGitPrevPage").addEventListener("click", () => changeGitPage(-1));
+    $v("viewerGitNextPage").addEventListener("click", () => changeGitPage(1));
+    $v("viewerFindInput").addEventListener("input", () => {
+      if (viewer.markdownText !== null && !viewer.markdownSource) showMarkdownPreview(true);
+      else findInPreview();
+    });
+    $v("viewerMarkdownToggle").addEventListener("click", () => showMarkdownPreview(!viewer.markdownSource));
+    $v("viewerFindInput").addEventListener("keydown", (event) => {
+      event.stopPropagation();
+      if (event.key === "Enter") { event.preventDefault(); moveFind(event.shiftKey ? -1 : 1); }
+    });
+    $v("viewerFindPrevious").addEventListener("click", () => moveFind(-1));
+    $v("viewerFindNext").addEventListener("click", () => moveFind(1));
     for (const listId of ["viewerTree", "viewerGitList", "viewerAgentList"]) {
       $v(listId).addEventListener("keydown", (event) => {
         if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); event.stopPropagation(); navigate(event.key === "ArrowDown" ? 1 : -1); }
       });
     }
     $v("workspaceViewer").addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f" && !$v("viewerFindBar").hidden) {
+        event.preventDefault(); event.stopPropagation(); $v("viewerFindInput").focus(); $v("viewerFindInput").select();
+      }
       if (event.altKey && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
         event.preventDefault(); event.stopPropagation(); navigate(event.key === "ArrowDown" ? 1 : -1);
       }
@@ -493,7 +715,7 @@
       if (viewer.open && viewer.tab === "files" && ($v("viewerSearchInput").value.trim() || $v("viewerContentInput").value.trim())) void loadFiles();
     });
     for (const type of ["keydown", "keyup", "paste", "cut", "copy"]) {
-      for (const id of ["viewerSearchInput", "viewerContentInput"]) $v(id).addEventListener(type, (event) => event.stopPropagation());
+      for (const id of ["viewerSearchInput", "viewerContentInput", "viewerFindInput", "viewerLanguageSearch"]) $v(id).addEventListener(type, (event) => event.stopPropagation());
     }
     $v("viewerCopyPath").addEventListener("click", () => window.wincmux.clipboardWrite(fullPath(viewer.selected.relativePath)).then(() => message("경로를 복사했습니다.")).catch(showError));
     $v("viewerCopyContent").addEventListener("click", () => window.wincmux.clipboardWrite(viewer.previewText).then(() => message("내용을 복사했습니다.")).catch(showError));
@@ -536,6 +758,7 @@
     viewer.workspaceId = workspace()?.id ?? null;
     viewer.copied = null;
     viewer.searchFolder = null;
+    viewer.gitPage = 0;
     updateScope();
     ++viewer.generation;
     if (viewer.open) {

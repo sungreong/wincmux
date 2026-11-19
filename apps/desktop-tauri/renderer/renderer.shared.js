@@ -22,6 +22,8 @@ const STORAGE_KEYS = {
   workspacePaneGroupHints: "wincmux.workspacePaneGroupHints",
   workspaceCreateOpen: "wincmux.workspaceCreateOpen",
   workspaceListMode: "wincmux.workspaceListMode",
+  workspaceFolderCollapsed: "wincmux.workspaceFolderCollapsed",
+  workspaceNotesOpen: "wincmux.workspaceNotesOpen",
   globalFontScale: "wincmux.globalFontScale"
 };
 
@@ -262,7 +264,10 @@ const state = {
   workspaceSelectedGroups: parseStoredMap(STORAGE_KEYS.workspaceSelectedGroups),
   workspacePaneGroupHints: parseStoredMap(STORAGE_KEYS.workspacePaneGroupHints),
   workspaceCreateOpen: localStorage.getItem(STORAGE_KEYS.workspaceCreateOpen) === "1",
-  workspaceListMode: localStorage.getItem(STORAGE_KEYS.workspaceListMode) === "compact" ? "compact" : "detail",
+  workspaceListMode: ["simple", "compact"].includes(localStorage.getItem(STORAGE_KEYS.workspaceListMode))
+    ? localStorage.getItem(STORAGE_KEYS.workspaceListMode) : "detail",
+  workspaceFolderCollapsed: parseStoredMap(STORAGE_KEYS.workspaceFolderCollapsed),
+  workspaceNotesOpen: localStorage.getItem(STORAGE_KEYS.workspaceNotesOpen) === "1",
   hiddenPanesByWorkspace: {},
   quickPresets: loadQuickPresets(),
   quickHistory: loadQuickHistory(),
@@ -327,6 +332,7 @@ const toggleWorkspaceCreateBtn = $("toggleWorkspaceCreateBtn");
 const workspaceCreateFields = $("workspaceCreateFields");
 const workspaceCompactBtn = $("workspaceCompactBtn");
 const workspaceDetailBtn = $("workspaceDetailBtn");
+const workspaceSimpleBtn = $("workspaceSimpleBtn");
 const wsNameInput = $("wsNameInput");
 const wsPathInput = $("wsPathInput");
 const openInVscodeBtn = $("openInVscodeBtn");
@@ -556,6 +562,16 @@ function renderGroupBar() {
     groupBar.appendChild(btn);
   }
 
+  if (state.selectedGroupId) {
+    const terminalBtn = document.createElement("button");
+    terminalBtn.className = "group-chip group-terminal-add";
+    terminalBtn.type = "button";
+    terminalBtn.textContent = "+ Terminal";
+    terminalBtn.title = "Create a terminal in this group";
+    terminalBtn.addEventListener("click", () => createTerminalInGroup(state.selectedGroupId).catch((err) => setStatus(String(err), true)));
+    groupBar.appendChild(terminalBtn);
+  }
+
   const addBtn = document.createElement("button");
   addBtn.className = "group-chip group-add";
   addBtn.type = "button";
@@ -605,6 +621,8 @@ function showGroupCreateInput(anchorEl, options = {}) {
         renderGroupBar();
         if (typeof options.onCreated === "function") {
           await options.onCreated(result.group);
+        } else {
+          renderPaneSurface(true);
         }
         setStatus(`Pane group created: ${name}`);
       }
@@ -1381,15 +1399,18 @@ function renderWorkspaceSidebarControls() {
     toggleWorkspaceCreateBtn.setAttribute("aria-expanded", createOpen ? "true" : "false");
     toggleWorkspaceCreateBtn.classList.toggle("open", createOpen);
   }
-  if (workspaceCompactBtn && workspaceDetailBtn) {
-    const compact = state.workspaceListMode === "compact";
-    workspaceCompactBtn.classList.toggle("active", compact);
-    workspaceDetailBtn.classList.toggle("active", !compact);
-    workspaceCompactBtn.setAttribute("aria-pressed", compact ? "true" : "false");
-    workspaceDetailBtn.setAttribute("aria-pressed", compact ? "false" : "true");
+  if (workspaceSimpleBtn && workspaceCompactBtn && workspaceDetailBtn) {
+    for (const [button, mode] of [
+      [workspaceSimpleBtn, "simple"], [workspaceCompactBtn, "compact"], [workspaceDetailBtn, "detail"]
+    ]) {
+      const active = state.workspaceListMode === mode;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    }
   }
   if (workspaceList) {
     workspaceList.classList.toggle("workspace-list-compact", state.workspaceListMode === "compact");
+    workspaceList.classList.toggle("workspace-list-simple", state.workspaceListMode === "simple");
   }
 }
 
@@ -1407,7 +1428,7 @@ function toggleWorkspaceCreate() {
 }
 
 function setWorkspaceListMode(mode) {
-  state.workspaceListMode = mode === "compact" ? "compact" : "detail";
+  state.workspaceListMode = ["simple", "compact", "detail"].includes(mode) ? mode : "detail";
   localStorage.setItem(STORAGE_KEYS.workspaceListMode, state.workspaceListMode);
   renderWorkspaceSidebarControls();
   renderWorkspaces();
@@ -1465,16 +1486,14 @@ function agentWorkspaceSummary(workspaceId) {
     .filter(([key]) => counts[key]).map(([key, label]) => `${label} ${counts[key]}`).join(" · ");
 }
 
-function renderWorkspaces() {
-  const unreadByWorkspace = unreadCountsByWorkspace();
-  const compact = state.workspaceListMode === "compact";
-  workspaceList.innerHTML = "";
-  for (const [index, ws] of state.workspaces.entries()) {
+function renderWorkspaceRow(ws, index, unreadByWorkspace, mode) {
     const unread = unreadByWorkspace.get(ws.id) ?? 0;
     const isActive = ws.id === state.selectedWorkspaceId;
     const li = document.createElement("li");
     li.className = isActive ? "active" : "";
-    li.classList.toggle("ws-compact", compact);
+    li.classList.toggle("ws-compact", mode === "compact");
+    li.classList.toggle("ws-simple", mode === "simple");
+    li.title = ws.path;
     if (unread > 0) {
       li.classList.add("ws-has-unread");
       if (!isActive) {
@@ -1576,10 +1595,18 @@ function renderWorkspaces() {
       titleRow.appendChild(badge);
     }
 
-    const pathEl = document.createElement("div");
+    const pathEl = document.createElement("button");
+    pathEl.type = "button";
     pathEl.className = "muted ws-path";
     pathEl.textContent = ws.path;
-    pathEl.title = ws.path;
+    pathEl.title = `경로 복사: ${ws.path}`;
+    pathEl.setAttribute("aria-label", `${ws.name} 폴더 경로 복사: ${ws.path}`);
+    pathEl.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      void window.wincmux.clipboardWrite(ws.path)
+        .then(() => setStatus(`폴더 경로 복사: ${ws.path}`))
+        .catch((err) => setStatus(String(err), true));
+    });
 
     const branchEl = document.createElement("div");
     branchEl.className = "muted ws-branch";
@@ -1595,7 +1622,66 @@ function renderWorkspaces() {
     li.addEventListener("click", () => {
       switchWorkspace(ws.id).catch((err) => setStatus(String(err), true));
     });
-    workspaceList.appendChild(li);
+    return li;
+}
+
+function renderWorkspaceFolderHeader(entry, rows, unreadByWorkspace) {
+  const collapsed = state.workspaceFolderCollapsed[entry.key] === true;
+  const header = document.createElement("li");
+  header.className = "ws-folder-header";
+  header.classList.toggle("has-active", entry.members.some(({ workspace }) => workspace.id === state.selectedWorkspaceId));
+  header.title = entry.path;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "ws-folder-toggle";
+  toggle.setAttribute("aria-expanded", String(!collapsed));
+  toggle.setAttribute("aria-label", `${entry.label} 폴더, 워크스페이스 ${entry.members.length}개`);
+  const chevron = document.createElement("span");
+  chevron.className = "ws-folder-chevron";
+  chevron.textContent = "▸";
+  const title = document.createElement("span");
+  title.className = "ws-folder-title";
+  title.textContent = entry.label;
+  const count = document.createElement("span");
+  count.className = "ws-folder-count";
+  count.textContent = String(entry.members.length);
+  toggle.append(chevron, title, count);
+  const unread = entry.members.reduce((sum, { workspace }) => sum + (unreadByWorkspace.get(workspace.id) ?? 0), 0);
+  if (unread > 0) {
+    const badge = document.createElement("span");
+    badge.className = "ws-unread-badge";
+    badge.textContent = unread > 99 ? "99+" : String(unread);
+    badge.title = `${unread} unread notifications in this folder`;
+    toggle.appendChild(badge);
+  }
+  toggle.addEventListener("click", () => {
+    const next = toggle.getAttribute("aria-expanded") === "true";
+    state.workspaceFolderCollapsed[entry.key] = next;
+    localStorage.setItem(STORAGE_KEYS.workspaceFolderCollapsed, JSON.stringify(state.workspaceFolderCollapsed));
+    toggle.setAttribute("aria-expanded", String(!next));
+    for (const row of rows) row.hidden = next;
+  });
+  header.appendChild(toggle);
+  return header;
+}
+
+function renderWorkspaces() {
+  const unreadByWorkspace = unreadCountsByWorkspace();
+  const mode = state.workspaceListMode;
+  workspaceList.innerHTML = "";
+  for (const entry of workspaceFolderEntries(state.workspaces)) {
+    if (entry.type === "workspace") {
+      workspaceList.appendChild(renderWorkspaceRow(entry.workspace, entry.index, unreadByWorkspace, mode));
+      continue;
+    }
+    const collapsed = state.workspaceFolderCollapsed[entry.key] === true;
+    const rows = entry.members.map(({ workspace, index }) => {
+      const row = renderWorkspaceRow(workspace, index, unreadByWorkspace, mode);
+      row.classList.add("ws-folder-member");
+      row.hidden = collapsed;
+      return row;
+    });
+    workspaceList.append(renderWorkspaceFolderHeader(entry, rows, unreadByWorkspace), ...rows);
   }
   renderWorkspaceSidebarControls();
   setToolbarBtnLabel(toggleWorkspacePanelBtn, state.leftCollapsed ? "Show Workspaces" : "Hide Workspaces");

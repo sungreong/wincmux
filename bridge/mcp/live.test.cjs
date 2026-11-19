@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const net = require('node:net');
+const { once } = require('node:events');
 const { randomUUID } = require('node:crypto');
 const { setTimeout: sleep } = require('node:timers/promises');
 
@@ -17,6 +19,8 @@ test('MCP tools inspect and submit to an isolated real WinCMux PTY', { timeout: 
     windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
   });
   let sid;
+  let stream;
+  const events = [];
   async function until(fn, label, ms = 12000) {
     const end = Date.now() + ms;
     while (Date.now() < end) {
@@ -28,7 +32,38 @@ test('MCP tools inspect and submit to an isolated real WinCMux PTY', { timeout: 
   }
   try {
     await until(() => callTool('wincmux_status').catch(() => null), 'core startup');
+    stream = net.createConnection(pipe);
+    await once(stream, 'connect');
+    stream.setEncoding('utf8');
+    let streamBuffer = '';
+    stream.on('data', chunk => {
+      streamBuffer += chunk;
+      let end;
+      while ((end = streamBuffer.indexOf('\n')) >= 0) {
+        events.push(JSON.parse(streamBuffer.slice(0, end)));
+        streamBuffer = streamBuffer.slice(end + 1);
+      }
+    });
+    stream.write(JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'session.stream.subscribe',
+      params: { topics: ['session'] } }) + '\n');
+    await until(() => events.some(event => event.id === 99), 'stream subscription');
     const ws = (await callTool('wincmux_create_workspace', { name: 'MCP test', path: root })).workspace.id;
+    const initialPane = (await callTool('wincmux_list_terminals', { workspace_id: ws })).workspaces[0].panes[0].pane_id;
+    const group = (await callTool('wincmux_create_group', { workspace_id: ws, name: 'Test agents' })).group;
+    await until(() => events.some(event => event.method === 'workspace.structure_changed' && event.params.change === 'group.create' && event.params.workspace_id === ws), 'group refresh event');
+    assert.equal((await callTool('wincmux_list_groups', { workspace_id: ws })).groups.some(item => item.id === group.id), true);
+    const panes = await callTool('wincmux_split_pane', { workspace_id: ws, pane_id: initialPane, direction: 'vertical' });
+    await until(() => events.some(event => event.method === 'workspace.structure_changed' && event.params.change === 'layout.split' && event.params.pane_ids?.[1] === panes.second_pane_id), 'pane refresh event');
+    await assert.rejects(callTool('wincmux_start_terminal', { workspace_id: ws, pane_id: panes.second_pane_id, group_id: 'missing' }), /group_id not found/);
+    const groupedShell = await callTool('wincmux_start_terminal', { workspace_id: ws, pane_id: panes.second_pane_id, group_id: group.id });
+    const groupedList = (await callTool('wincmux_list_terminals', { workspace_id: ws })).workspaces[0];
+    assert.equal(groupedList.panes.find(pane => pane.pane_id === panes.second_pane_id).session_id, groupedShell.session_id);
+    assert.equal(groupedList.panes.find(pane => pane.pane_id === panes.second_pane_id).group_name, 'Test agents');
+    await assert.rejects(callTool('wincmux_start_terminal', { workspace_id: ws, pane_id: panes.second_pane_id }), /already has a running terminal/);
+    const defaultGroup = (await callTool('wincmux_list_groups', { workspace_id: ws })).groups.find(item => item.name === 'Default');
+    await callTool('wincmux_move_terminal_to_group', { workspace_id: ws, session_id: groupedShell.session_id, group_id: defaultGroup.id });
+    assert.equal((await callTool('wincmux_list_terminals', { workspace_id: ws })).workspaces[0].panes.find(pane => pane.pane_id === panes.second_pane_id).group_id, defaultGroup.id);
+    await callTool('wincmux_close_terminal', { session_id: groupedShell.session_id });
     const shell = await callTool('wincmux_start_terminal', { workspace_id: ws });
     assert.ok(shell.session_id);
     await callTool('wincmux_close_terminal', { session_id: shell.session_id });
@@ -53,6 +88,7 @@ process.stdout.write('\\r\\nRECEIVED:'+value+'\\r\\n> ');});`;
     assert.ok(activity.some(item => item.tool === 'wincmux_read_terminal' && item.outcome === 'blocked'));
     assert.ok(activity.some(item => item.tool === 'wincmux_terminal_input' && item.outcome === 'success'));
   } finally {
+    stream?.destroy();
     if (sid) await callTool('wincmux_close_terminal', { session_id: sid }).catch(() => {});
     await coreCall('runtime.shutdown').catch(() => {});
     if (child.exitCode === null) child.kill();

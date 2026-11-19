@@ -617,6 +617,13 @@ impl Core {
                     .filter(|(_, session)| session.terminal.workspace == workspace)
                     .map(|(id, _)| id.clone())
                     .collect();
+                if !ids.is_empty() && p["confirmed_running"] != true {
+                    return Err(format!(
+                        "workspace has {} running terminals; confirmation required",
+                        ids.len()
+                    )
+                    .into());
+                }
                 for id in ids {
                     self.close_session(&id)?;
                 }
@@ -673,6 +680,15 @@ impl Core {
                     }
                 }?;
                 self.emit("notify.reminders_changed", json!({}));
+                Ok(result)
+            }
+            "group.create" | "session.group.set" | "layout.split" | "pane.session.bind" => {
+                let workspace_id = text(&p, "workspace_id")?.to_owned();
+                let result = store::dispatch(&self.db.lock().unwrap(), method, &p)?;
+                self.emit(
+                    "workspace.structure_changed",
+                    json!({"workspace_id":workspace_id,"change":method,"pane_id":p["pane_id"],"pane_ids":result["pane_ids"]}),
+                );
                 Ok(result)
             }
             _ => store::dispatch(&self.db.lock().unwrap(), method, &p),
@@ -1495,6 +1511,47 @@ pub fn git_info(path: &Path) -> Value {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn workspace_delete_confirms_live_sessions_and_closes_them() -> Result<()> {
+        let core = Core::new(Path::new(":memory:"))?;
+        let cwd = std::env::temp_dir();
+        let empty = core.rpc(
+            "workspace.create",
+            json!({"name":"Empty","path":cwd,"backend":"custom"}),
+        )?;
+        let empty_id = text(&empty["workspace"], "id")?;
+        core.rpc("workspace.delete", json!({"id":empty_id}))?;
+        assert!(!core.rpc("workspace.list", json!({}))?["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|workspace| workspace["id"] == empty_id));
+
+        let active = core.rpc(
+            "workspace.create",
+            json!({"name":"Active","path":cwd,"backend":"custom"}),
+        )?;
+        let active_id = text(&active["workspace"], "id")?;
+        let started = core.rpc(
+            "session.run",
+            json!({"workspace_id":active_id,"cmd":"powershell.exe","args":["-NoProfile","-Command","Start-Sleep -Seconds 30"],"cwd":cwd}),
+        )?;
+        let sid = text(&started["session"], "session_id")?;
+        assert!(core
+            .rpc("workspace.delete", json!({"id":active_id}))
+            .unwrap_err()
+            .to_string()
+            .contains("confirmation required"));
+        assert!(core.sessions.lock().unwrap().running.contains_key(sid));
+        core.rpc(
+            "workspace.delete",
+            json!({"id":active_id,"confirmed_running":true}),
+        )?;
+        assert!(!core.sessions.lock().unwrap().running.contains_key(sid));
+        assert_eq!(core.runtime_info()["terminal_count"], 0);
+        Ok(())
+    }
 
     #[test]
     fn pending_reminder_keeps_an_empty_core_alive_and_due_alert_is_not_suppressed() -> Result<()> {

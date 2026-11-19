@@ -161,7 +161,7 @@ async function captureScreenshots(cdp, start, firstPane, firstSession, buffers, 
     return {workspaceButton:name?.tagName, titleFits:name.scrollWidth<=name.clientWidth,
       helpCollapsed:!!help&&!help.open,
       statusReadOnly:status.length>0&&status.every(el=>el.tagName!=="BUTTON"),
-      filterPressed:[...document.querySelectorAll(".group-chip:not(.group-add)")].every(el=>el.hasAttribute("aria-pressed"))};
+      filterPressed:[...document.querySelectorAll(".group-chip:not(.group-add):not(.group-terminal-add)")].every(el=>el.hasAttribute("aria-pressed"))};
   })()`);
   assert.equal(design.workspaceButton,"BUTTON");
   assert.equal(design.titleFits,true,JSON.stringify(design));

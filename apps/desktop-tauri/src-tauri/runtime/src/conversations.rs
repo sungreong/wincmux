@@ -144,7 +144,11 @@ fn row(
     source: &Path,
     archived: bool,
 ) -> Value {
+    // Each returned row points to its own CLI transcript, including Codex DB rows.
+    // File metadata is cheap; counting turns would require reading every transcript.
+    let size_bytes = fs::metadata(source).ok().map(|meta| meta.len());
     json!({"provider":provider,"id":id,"cwd":cwd,"title":short(title),"updated_at":updated,
+        "size_bytes":size_bytes,
         "source_path":source.to_string_lossy(),"archived":archived,"cwd_exists":Path::new(cwd).is_dir(),
         "resume_command":if provider=="claude" {format!("claude --resume {id}")} else {format!("codex resume {id}")}})
 }

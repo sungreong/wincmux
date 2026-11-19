@@ -32,8 +32,8 @@ use windows::{
         },
         UI::{
             Shell::{
-                Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-                NOTIFYICONDATAW,
+                ExtractIconExW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD,
+                NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
             },
             WindowsAndMessaging::*,
         },
@@ -41,6 +41,7 @@ use windows::{
 };
 
 static LOG_ROOT: OnceLock<PathBuf> = OnceLock::new();
+static TRAY_ICON: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 #[derive(Clone)]
 pub struct ProcessIdentity {
     pub parent: u32,
@@ -406,6 +407,15 @@ pub fn start(core: Arc<Core>, ui: PathBuf) {
             return;
         };
         TRAY_WINDOW.store(hwnd.0 as isize, std::sync::atomic::Ordering::Release);
+        if let Some(ui) = UI.get() {
+            let path = HSTRING::from(ui.to_string_lossy().as_ref());
+            let mut icon = HICON::default();
+            if ExtractIconExW(PCWSTR(path.as_ptr()), 0, None, Some(&mut icon), 1) > 0
+                && !icon.0.is_null()
+            {
+                TRAY_ICON.store(icon.0 as isize, std::sync::atomic::Ordering::Release);
+            }
+        }
         let _ = SetTimer(Some(hwnd), 1, 1000, None);
         update_tray(hwnd, NIM_ADD);
         let mut msg = MSG::default();
@@ -414,16 +424,25 @@ pub fn start(core: Arc<Core>, ui: PathBuf) {
             DispatchMessageW(&msg);
         }
         update_tray(hwnd, NIM_DELETE);
+        let icon = TRAY_ICON.swap(0, std::sync::atomic::Ordering::AcqRel);
+        if icon != 0 {
+            let _ = DestroyIcon(HICON(icon as *mut std::ffi::c_void));
+        }
     });
 }
 unsafe fn update_tray(hwnd: HWND, action: windows::Win32::UI::Shell::NOTIFY_ICON_MESSAGE) {
+    let icon = TRAY_ICON.load(std::sync::atomic::Ordering::Acquire);
     let mut data = NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
         uID: 1,
         uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
         uCallbackMessage: WM_APP + 1,
-        hIcon: LoadIconW(None, IDI_APPLICATION).unwrap_or_default(),
+        hIcon: if icon != 0 {
+            HICON(icon as *mut std::ffi::c_void)
+        } else {
+            LoadIconW(None, IDI_APPLICATION).unwrap_or_default()
+        },
         ..Default::default()
     };
     let text = if let Some(core) = CORE.get() {

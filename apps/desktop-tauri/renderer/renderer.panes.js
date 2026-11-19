@@ -1380,18 +1380,6 @@ function normalizePaneSessions() {
     }
   }
 
-  const assigned = new Set(Object.values(state.paneSessions).filter(Boolean));
-  for (const pane of leafPanes()) {
-    if (state.paneSessions[pane.pane_id]) {
-      continue;
-    }
-    const free = runningSessions().find((s) => !assigned.has(s.id) && !hiddenSessions.has(s.id));
-    if (free) {
-      state.paneSessions[pane.pane_id] = free.id;
-      assigned.add(free.id);
-    }
-  }
-
   ensureSelectedPane();
   rebuildPaneSessionLookup();
 }
@@ -3652,7 +3640,13 @@ function renderPaneSurface(force = false) {
   const rootNode = renderPaneNode(root, paneMap, hosts);
   if (!rootNode) {
     const group = paneGroupById(state.selectedGroupId);
-    renderPaneEmptyState("No panes in this group", `${group?.name ?? "Selected"} has no panes. Choose All or move a terminal into this group.`);
+    renderPaneEmptyState("No panes in this group", `${group?.name ?? "Selected"} has no panes yet.`);
+    const create = document.createElement("button");
+    create.type = "button";
+    create.className = "pane-empty-create";
+    create.textContent = "+ Terminal in this group";
+    create.addEventListener("click", () => createTerminalInGroup(state.selectedGroupId).catch((err) => setStatus(String(err), true)));
+    paneSurface.querySelector(".pane-empty-state")?.append(create);
     return;
   }
   paneSurface.appendChild(rootNode);

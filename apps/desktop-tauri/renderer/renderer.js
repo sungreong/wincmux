@@ -326,6 +326,33 @@ function scheduleSessionRefresh() {
   }, 80);
 }
 
+let structureRefreshTimer = null;
+function scheduleStructureRefresh(params) {
+  if (!state.selectedWorkspaceId || params.workspace_id !== state.selectedWorkspaceId) return;
+  if (structureRefreshTimer) clearTimeout(structureRefreshTimer);
+  structureRefreshTimer = setTimeout(async () => {
+    structureRefreshTimer = null;
+    const workspaceId = state.selectedWorkspaceId;
+    if (workspaceId !== params.workspace_id) return;
+    try {
+      const priorLeafIds = state.panes.filter(pane => !pane.split).map(pane => pane.pane_id);
+      await Promise.all([loadSessions(workspaceId), loadPanes(workspaceId), loadPaneGroups(workspaceId)]);
+      if (state.selectedWorkspaceId !== workspaceId) return;
+      const currentLeafIds = new Set(state.panes.filter(pane => !pane.split).map(pane => pane.pane_id));
+      for (const paneId of priorLeafIds) {
+        if (!currentLeafIds.has(paneId)) delete state.paneSessions[paneId];
+      }
+      await tryRestorePaneSessions(workspaceId);
+      if (state.selectedWorkspaceId !== workspaceId) return;
+      paneApi.normalizePaneSessions();
+      paneApi.renderPaneSurface(true);
+      paneApi.refreshPaneBindings();
+    } catch (error) {
+      setStatus(`Workspace refresh failed: ${String(error?.message ?? error)}`, true);
+    }
+  }, 150);
+}
+
 let notificationUiRefreshRaf = null;
 function scheduleNotificationUiRefresh() {
   if (notificationUiRefreshRaf) {
@@ -373,6 +400,10 @@ function handleStreamEvent(event) {
     return;
   }
   const params = event.params ?? {};
+  if (event.method === "workspace.structure_changed") {
+    scheduleStructureRefresh(params);
+    return;
+  }
   if (RENDERER_DEBUG_LOGS && event.method !== "session.output") {
     console.debug("[stream]", event.method, JSON.stringify(params).slice(0, 120));
   }
@@ -617,11 +648,13 @@ function assistantLaunchGroupId(cmd, args) {
 }
 
 function groupIdForNewPaneSession(paneId, cmd, args, explicitGroupId = null) {
+  const paneGroup = groupForPane(paneId);
   return explicitGroupId
-    ?? assistantLaunchGroupId(cmd, args)
     ?? (paneId ? state.paneGroupHints[paneId] : null)
-    ?? groupForPane(paneId)?.id
+    ?? (paneGroup?.name !== "Default" ? paneGroup?.id : null)
     ?? state.selectedGroupId
+    ?? assistantLaunchGroupId(cmd, args)
+    ?? paneGroup?.id
     ?? defaultPaneGroup()?.id
     ?? null;
 }
@@ -776,9 +809,9 @@ async function startSessionForPane(paneId, options = {}) {
     }
     delete state.paneSessions[paneId];
   }
-  // An empty pane presents the saved launcher choices; an explicit command or
-  // restoring an existing session continues through the regular spawn path.
-  if (!existing && !cmd && !dormantPaneSession(paneId)?.spawn_cmd && window.wincmuxLaunchProfiles) {
+  // A new terminal always asks which tool to run. A saved command is only
+  // replayed when the caller explicitly requests Restore.
+  if (!existing && !cmd && !restoreDormant && window.wincmuxLaunchProfiles) {
     const view = state.paneViews.get(paneId);
     if (view) {
       setPaneOverlay(view, "empty", "어떤 도구로 시작할까요?", "프로젝트 폴더에서 바로 실행합니다.");
@@ -791,7 +824,7 @@ async function startSessionForPane(paneId, options = {}) {
     delete state.paneSessions[paneId];
   }
   const dormant = dormantPaneSession(paneId);
-  const restoreFromDormant = !cmd && dormant?.spawn_cmd && (restoreDormant || force || !existing);
+  const restoreFromDormant = !cmd && restoreDormant && Boolean(dormant?.spawn_cmd);
   let effectiveCmd = cmd;
   let effectiveArgs = args;
   let effectiveCwd = cwd;
@@ -1162,41 +1195,92 @@ function autoFillWorkspaceNameFromPath(pathValue) {
   lastAutoWorkspaceName = folderName;
 }
 
-async function onCreateWorkspace() {
-  const defaultPath =
-    localStorage.getItem(STORAGE_KEYS.lastWorkspacePath) ?? "C:\\";
-  const pathValue = wsPathInput.value.trim() || defaultPath;
-  const name =
-    wsNameInput.value.trim()
-    || workspaceNameFromPath(pathValue)
-    || `workspace-${Date.now().toString().slice(-6)}`;
-  const created = await rpc("workspace.create", {
-    name,
-    path: pathValue,
-    backend: "codex",
+let workspaceCreatePending = false;
+
+function confirmDuplicateWorkspace(pathValue, existing) {
+  const dialog = document.getElementById("workspaceDuplicateDialog");
+  const list = document.getElementById("workspaceDuplicateExisting");
+  document.getElementById("workspaceDuplicateNewPath").textContent = pathValue;
+  list.replaceChildren(...existing.map((workspace) => {
+    const item = document.createElement("li");
+    const name = document.createElement("strong");
+    const path = document.createElement("code");
+    name.textContent = workspace.name;
+    path.textContent = workspace.path;
+    item.append(name, path);
+    return item;
+  }));
+  dialog.returnValue = "cancel";
+  return new Promise((resolve) => {
+    dialog.addEventListener("close", () => resolve(dialog.returnValue === "create"), { once: true });
+    dialog.showModal();
+    dialog.querySelector('[value="cancel"]').focus();
   });
-  rememberWorkspacePath(pathValue);
-  state.selectedWorkspaceId = created?.workspace?.id ?? null;
-  await loadWorkspaces();
-  if (state.selectedWorkspaceId) {
-    await switchWorkspace(state.selectedWorkspaceId);
+}
+
+async function onCreateWorkspace() {
+  if (workspaceCreatePending) return;
+  workspaceCreatePending = true;
+  const createButton = document.getElementById("createWorkspaceBtn");
+  if (createButton) createButton.disabled = true;
+  try {
+    const defaultPath =
+      localStorage.getItem(STORAGE_KEYS.lastWorkspacePath) ?? "C:\\";
+    const pathValue = wsPathInput.value.trim() || defaultPath;
+    const name =
+      wsNameInput.value.trim()
+      || workspaceNameFromPath(pathValue)
+      || `workspace-${Date.now().toString().slice(-6)}`;
+    const pathKey = workspacePathKey(pathValue);
+    const folderKey = workspaceFolderNameKey(pathValue);
+    const existing = (await rpc("workspace.list")).workspaces.filter(
+      (workspace) => workspacePathKey(workspace.path) === pathKey
+        || (folderKey && workspaceFolderNameKey(workspace.path) === folderKey),
+    );
+    if (existing.length > 0 && !await confirmDuplicateWorkspace(pathValue, existing)) return;
+    const created = await rpc("workspace.create", {
+      name,
+      path: pathValue,
+      backend: "codex",
+    });
+    rememberWorkspacePath(pathValue);
+    state.selectedWorkspaceId = created?.workspace?.id ?? null;
+    await loadWorkspaces();
+    if (state.selectedWorkspaceId) {
+      await switchWorkspace(state.selectedWorkspaceId);
+    }
+    wsNameInput.value = "";
+    lastAutoWorkspaceName = "";
+    wsPathInput.value = pathValue;
+    setStatus(`Workspace created: ${name}`);
+  } finally {
+    workspaceCreatePending = false;
+    if (createButton) createButton.disabled = false;
   }
-  wsNameInput.value = "";
-  lastAutoWorkspaceName = "";
-  wsPathInput.value = pathValue;
-  setStatus(`Workspace created: ${name}`);
 }
 async function deleteWorkspaceById(workspaceId) {
   const ws = state.workspaces.find((item) => item.id === workspaceId);
   if (!ws) {
     return;
   }
-  const message = `Delete workspace "${ws.name}"?\n\nThis removes it from WinCMux and closes its sessions. Files on disk are not deleted.`;
-  if (!window.confirm(message)) {
-    return;
+  const running = (await rpc("session.list", { workspace_id: ws.id })).sessions
+    .filter((session) => session.status === "running");
+  const confirmRunning = (count) => window.confirm(
+    `"${ws.name}" 워크스페이스에서 터미널 ${count}개가 실행 중입니다.\n\n정말 삭제할까요? 삭제하면 이 터미널과 하위 작업도 종료됩니다. 폴더의 파일은 삭제되지 않습니다.`,
+  );
+  let confirmedRunning = running.length > 0;
+  if (confirmedRunning && !confirmRunning(running.length)) return;
+  try {
+    await rpc("workspace.delete", { id: ws.id, confirmed_running: confirmedRunning });
+  } catch (error) {
+    if (confirmedRunning || !String(error).includes("confirmation required")) throw error;
+    const latest = (await rpc("session.list", { workspace_id: ws.id })).sessions
+      .filter((session) => session.status === "running");
+    if (latest.length > 0 && !confirmRunning(latest.length)) return;
+    confirmedRunning = latest.length > 0;
+    await rpc("workspace.delete", { id: ws.id, confirmed_running: confirmedRunning });
   }
   const wasSelected = ws.id === state.selectedWorkspaceId;
-  await rpc("workspace.delete", { id: ws.id });
   removeWorkspacePaneFonts(ws.id);
   hiddenClearPanesForWorkspace(ws.id);
   delete state.workspacePaneGroupHints[ws.id];
@@ -1363,6 +1447,28 @@ async function splitPaneInternal(paneId, direction, options = {}) {
     }
   }
   return { first, second };
+}
+async function createTerminalInGroup(groupId) {
+  const ws = selectedWorkspace();
+  if (!ws || !paneGroupById(groupId)) throw new Error("Select a pane group first.");
+  const panes = leafPanes();
+  const source = panes.find((pane) => groupForPane(pane.pane_id)?.id === groupId)?.pane_id
+    ?? (panes.some((pane) => pane.pane_id === state.selectedPaneId) ? state.selectedPaneId : null)
+    ?? panes[0]?.pane_id;
+  if (!source) throw new Error("No terminal pane is available.");
+  const result = await splitPaneInternal(source, "horizontal", { autoStartIfMissing: false });
+  const paneId = result?.second;
+  if (!paneId) throw new Error("Could not create terminal pane.");
+  setPaneGroupHint(paneId, groupId);
+  setWorkspaceSelectedGroup(groupId);
+  state.selectedPaneId = paneId;
+  renderGroupBar();
+  paneApi.renderPaneSurface(true);
+  paneApi.refreshPaneBindings();
+  await paneApi.selectPane(paneId, { persist: true, focusTerm: true });
+  await startSessionForPane(paneId, { workspaceId: ws.id, focusTerm: true });
+  setStatus(`Terminal added to ${paneGroupById(groupId)?.name ?? "group"}`);
+  return paneId;
 }
 async function onSplit(paneId, direction) {
   const result = await splitPaneInternal(paneId, direction, {
@@ -2800,6 +2906,12 @@ function openWsInfoPanel(ws, anchorEl) {
 
   panel.classList.remove("ws-info-panel-agent-assets", "ws-info-panel-input-assets");
   titleEl.textContent = ws.name;
+  $("wsInfoPath").value = ws.path;
+  $("wsInfoCopyPath").onclick = () => {
+    void window.wincmux.clipboardWrite(ws.path)
+      .then(() => setStatus(`폴더 경로 복사: ${ws.path}`))
+      .catch((err) => setStatus(String(err), true));
+  };
   descInput.value = ws.description ?? "";
   overlay.style.display = "";
 
@@ -2817,14 +2929,10 @@ function openWsInfoPanel(ws, anchorEl) {
       closeWsInfoPanel();
       void (async () => {
         if (state.selectedWorkspaceId !== ws.id) await switchWorkspace(ws.id);
-        let paneId = state.selectedPaneId ?? leafPanes()[0]?.pane_id;
-        if (!paneId) throw new Error("터미널 칸이 없습니다.");
-        if (state.paneSessions[paneId]) {
-          paneId = (await splitPaneInternal(paneId, "horizontal", { autoStartIfMissing: false }))?.second;
-        }
-        const view = state.paneViews.get(paneId);
-        if (!view) throw new Error("터미널 칸을 열지 못했습니다.");
-        await window.wincmuxLaunchProfiles.launch(view);
+        const groupId = state.selectedGroupId
+          ?? groupForPane(state.selectedPaneId)?.id
+          ?? defaultPaneGroup()?.id;
+        await createTerminalInGroup(groupId);
       })().catch((e) => setStatus(String(e?.message ?? e), true));
     };
     const actions = [
@@ -2835,7 +2943,7 @@ function openWsInfoPanel(ws, anchorEl) {
       { label: "Git diff", title: "Browse workspace changes and diffs", fn: () => openWorkspaceViewer("git") },
       { label: "Agent Assets", title: "Browse agent files", fn: () => openWorkspaceViewer("agents") },
       { label: "Input Assets", title: "Manage long paste snippets and image paths", fn: () => loadInputAssets(ws) },
-      { label: "+ Terminal", title: "Start a terminal in this pane or a new pane", fn: startQuickTerminal },
+      { label: "+ Terminal", title: "Add a pane and choose a terminal to start", fn: startQuickTerminal },
     ];
     for (const a of actions) {
       const btn = document.createElement("button");
@@ -3169,10 +3277,21 @@ function bindInputAssetPrompt() {
 // ?? Workspace Notepad ??????????????????????????????????????????
 let notepadSaveTimer = null;
 
+function renderNotepadVisibility() {
+  const panel = document.querySelector(".workspace-notepad");
+  const toggle = document.getElementById("workspaceNotepadToggle");
+  const textarea = document.getElementById("workspaceNotepad");
+  if (!panel || !toggle || !textarea) return;
+  panel.classList.toggle("open", state.workspaceNotesOpen);
+  toggle.setAttribute("aria-expanded", String(state.workspaceNotesOpen));
+  textarea.hidden = !state.workspaceNotesOpen;
+}
+
 function loadNotepadForWorkspace(workspaceId) {
   const el = document.getElementById("workspaceNotepad");
   if (!el) return;
   el.value = workspaceId ? (state.workspaceNotes[workspaceId] ?? "") : "";
+  el.closest(".workspace-notepad")?.classList.toggle("has-note", Boolean(el.value.trim()));
 }
 
 function saveNotepadForWorkspace(workspaceId, text) {
@@ -3184,7 +3303,16 @@ function saveNotepadForWorkspace(workspaceId, text) {
 function bindNotepadEvents() {
   const el = document.getElementById("workspaceNotepad");
   if (!el) return;
+  const toggle = document.getElementById("workspaceNotepadToggle");
+  renderNotepadVisibility();
+  toggle?.addEventListener("click", () => {
+    state.workspaceNotesOpen = !state.workspaceNotesOpen;
+    localStorage.setItem(STORAGE_KEYS.workspaceNotesOpen, state.workspaceNotesOpen ? "1" : "0");
+    renderNotepadVisibility();
+    if (state.workspaceNotesOpen) el.focus();
+  });
   el.addEventListener("input", () => {
+    el.closest(".workspace-notepad")?.classList.toggle("has-note", Boolean(el.value.trim()));
     const wsId = state.selectedWorkspaceId;
     if (!wsId) return;
     clearTimeout(notepadSaveTimer);
@@ -3199,6 +3327,7 @@ function bindNotepadEvents() {
 
 function bindEvents() {
   toggleWorkspaceCreateBtn?.addEventListener("click", () => toggleWorkspaceCreate());
+  workspaceSimpleBtn?.addEventListener("click", () => setWorkspaceListMode("simple"));
   workspaceCompactBtn?.addEventListener("click", () => setWorkspaceListMode("compact"));
   workspaceDetailBtn?.addEventListener("click", () => setWorkspaceListMode("detail"));
   $("createWorkspaceBtn").addEventListener("click", () =>
@@ -3516,15 +3645,6 @@ async function bootstrap() {
     }, 3000);
     const activation = await window.wincmux.takeActivation();
     if (activation?.notification_id) await openNotificationById(activation.notification_id, activation.notification);
-    document.getElementById("shutdownAllBtn").addEventListener("click", async () => {
-      try {
-        const info = await rpc("runtime.info");
-        const reminderNote = info.pending_reminders > 0 ? `\n예약 알림 ${info.pending_reminders}개는 저장됩니다. 완전 종료 중에는 알리지 않으며 다음 실행 때 확인합니다.` : '';
-        if (window.confirm(`실행 중인 터미널 ${info.terminal_count}개와 모든 하위 작업을 종료할까요?${reminderNote}`)) {
-          await rpc("runtime.shutdown_all", { confirmed: true });
-        }
-      } catch (err) { setStatus(String(err), true); }
-    });
     state.bootstrapReady = true;
     void window.wincmuxMcpSettings?.refresh();
     setStatus("Ready");

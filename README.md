@@ -19,6 +19,46 @@ WinCMux is a Windows terminal workspace for Codex CLI, Claude Code, PowerShell, 
 
 The per-pane queue appears above the editor and submits messages in order. For a terminal without an agent, **Ctrl+Enter** submits directly. **삽입만** only pastes the draft; **터미널 제출** submits the terminal's existing input.
 
+## What's new in 0.2.94: viewer, groups, and reminders
+
+The workspace viewer pages large Git change lists, searches file contents, and previews Markdown. Code previews show the detected language and offer language and in-file search. Bundled syntax highlighting also handles Windows line endings. New terminals ask which tool to run; panes created or split inside a group stay there. Duplicate usage-limit reminders are consolidated and completed automatic reminders leave the list. [Download the Windows x64 installer](https://github.com/sungreong/wincmux/releases/tag/v0.2.94).
+
+## What's new in 0.2.92: visible duplicate confirmation
+
+Creating a workspace with an existing path or folder name now opens an in-app dialog listing the existing workspaces and paths. Cancel leaves the list unchanged; only **Create anyway** proceeds.
+
+## What's new in 0.2.91: duplicate confirmation and folder paths
+
+The creation form places icon-only folder picker and create buttons beside the name, leaving a full-width path field below. Creating a workspace with an existing path or matching final folder name now shows the existing paths and asks for confirmation. In detailed view, folder paths wrap and can be clicked to copy. The workspace `⋯` menu shows and copies the full path in every list mode.
+
+## What's new in 0.2.90: workspace deletion confirmation
+
+Deleting a workspace with running terminals shows their count and asks for confirmation. Confirming closes those terminals and child processes before removing the workspace. A workspace with no running terminals is removed immediately. Project files on disk remain intact.
+
+## What's new in 0.2.89: cleaner sidebar
+
+The redundant **Fully quit** toolbar button is gone. Use the window X or Alt+F4 to choose **Fully quit**, **Close window**, or **Cancel**. Notes start collapsed and remember their open state. Workspaces are grouped only when their final folder names match exactly (ignoring Windows path case); each group can be collapsed. Creating a workspace for an already registered path asks for confirmation. The list offers one-line, summary, and detailed views.
+
+## What's new in 0.2.88: Windows tray icon
+
+The background core now displays the WinCMux icon instead of the generic Windows icon. The icon file includes dedicated 16–48px sizes for clearer display in the system tray and at different display scaling levels.
+
+## What's new in 0.2.87: MCP group and pane control
+
+The MCP server can now list and create groups, split a pane, start Claude or Codex in a specific pane and group, and move an existing terminal between groups. An open app refreshes after MCP layout and group changes. See the [MCP tool guide](bridge/mcp/README.md).
+
+## What's new in 0.2.86: window close choices
+
+Closing the main window with X now offers **Fully quit**, **Close window**, and **Cancel**. Fully quit ends terminal processes through the existing core shutdown RPC; closing only the window leaves the background core and sessions running.
+
+## What's new in 0.2.85: conversation sorting
+
+Sort Claude and Codex conversations by newest or oldest update time, or by largest or smallest transcript file. File size is read from each original transcript without scanning its contents and is not a message or token count. The selected sort order is saved locally.
+
+## What's new in 0.2.84: conversation library controls
+
+In **이전 대화 불러오기**, hide or favorite Claude Code and Codex conversations without changing their transcripts. View hidden conversations to restore them, filter by date or favorites, browse pages of 10/20/50, and switch to compact rows. Display preferences are saved locally in the app.
+
 ## What's new in 0.2.83: workspace viewer
 
 Select a workspace and click **파일 보기** in the toolbar. The viewer opens beside the terminal without starting another terminal. You can also open its tabs from the workspace quick actions: **Files**, **Git diff**, or **Agent Assets**. [Download the Windows x64 installer](https://github.com/sungreong/wincmux/releases/tag/v0.2.83).
@@ -65,15 +105,16 @@ Pending reminders keep the core alive after the UI and all terminals close. Over
 
 ## What's new in 0.2.1
 
-The desktop and execution core now have independent lifetimes. **Closing the window ends the UI**, while `wincmux-core.exe` keeps shells, agents and development servers running. Reopening reconnects to the same jobs and terminal screen. Dedicated WebView2 processes are released while the UI is closed.
+The desktop and execution core have independent lifetimes. Choosing **Close window** from the X dialog ends the UI while `wincmux-core.exe` keeps shells, agents and development servers running. Reopening reconnects to the same jobs and terminal screen. Dedicated WebView2 processes are released while the UI is closed.
 
 | Situation | Behavior |
 |---|---|
-| Close window, Alt+F4, or UI crash | Live terminal jobs continue |
+| Window X or Alt+F4 | Choose Fully quit, Close window, or Cancel |
+| UI crash | Live terminal jobs continue |
 | Reopen | Restore sessions, screens, hidden terminals and unread results |
 | Approval needed or task completed | Native notifications and tray state; click to return to the task |
 | No UI, live terminals or pending reminders | Core exits after 30 seconds |
-| **완전히 종료** (fully quit) | Confirm the live-terminal count, then end all jobs |
+| **Fully quit** in the X dialog | End live terminal jobs and child processes |
 | Install/update/uninstall with live jobs | Stop installation/removal instead of killing jobs |
 
 Reboot, logoff and a core crash do not preserve processes. A new core marks prior jobs exited; command or conversation resumption remains an explicit user choice.

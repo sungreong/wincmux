@@ -8,12 +8,76 @@ mod workspace_viewer;
 use desktop::Desktop;
 use remote::Remote;
 use serde_json::{json, Value};
-use std::{path::PathBuf, sync::Arc};
-use tauri::{ipc::Channel, AppHandle, Manager, State};
-use tauri_plugin_dialog::DialogExt;
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
+use tauri::{ipc::Channel, AppHandle, Manager, State, WindowEvent};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogResult};
 use wincmux_runtime::{core, store, terminal};
 
 const DEFAULT_PIPE: &str = r"\\.\pipe\wincmux-tauri-rpc";
+static CLOSE_PROMPT_OPEN: AtomicBool = AtomicBool::new(false);
+const FULL_EXIT_LABEL: &str = "완전히 종료";
+const CLOSE_WINDOW_LABEL: &str = "창만 닫기";
+
+#[derive(Debug, PartialEq, Eq)]
+enum CloseChoice {
+    FullExit,
+    CloseWindow,
+    Cancel,
+}
+
+fn close_choice(result: MessageDialogResult) -> CloseChoice {
+    match result {
+        MessageDialogResult::Yes => CloseChoice::FullExit,
+        MessageDialogResult::No => CloseChoice::CloseWindow,
+        MessageDialogResult::Custom(label) if label == FULL_EXIT_LABEL => CloseChoice::FullExit,
+        MessageDialogResult::Custom(label) if label == CLOSE_WINDOW_LABEL => {
+            CloseChoice::CloseWindow
+        }
+        _ => CloseChoice::Cancel,
+    }
+}
+
+fn prompt_close(window: &tauri::Window) {
+    if CLOSE_PROMPT_OPEN.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let app = window.app_handle().clone();
+    app.dialog()
+        .message("완전히 종료하면 실행 중인 모든 터미널과 하위 작업이 종료됩니다. 창만 닫으면 작업은 백그라운드에서 계속 실행됩니다.")
+        .title("WinCMux 종료")
+        .parent(window)
+        .buttons(MessageDialogButtons::YesNoCancelCustom(
+            FULL_EXIT_LABEL.into(), CLOSE_WINDOW_LABEL.into(), "취소".into(),
+        ))
+        .show_with_result(move |result| match close_choice(result) {
+            CloseChoice::CloseWindow => {
+                CLOSE_PROMPT_OPEN.store(false, Ordering::Release);
+                app.exit(0);
+            }
+            CloseChoice::FullExit => {
+                let remote = app.try_state::<Arc<Remote>>().map(|state| Arc::clone(state.inner()));
+                let Some(remote) = remote else {
+                    CLOSE_PROMPT_OPEN.store(false, Ordering::Release);
+                    return;
+                };
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = remote.rpc("runtime.shutdown_all", json!({"confirmed":true})).await {
+                        CLOSE_PROMPT_OPEN.store(false, Ordering::Release);
+                        app.dialog().message(error).title("완전히 종료하지 못했습니다").show(|_| {});
+                    } else {
+                        app.exit(0);
+                    }
+                });
+            }
+            CloseChoice::Cancel => CLOSE_PROMPT_OPEN.store(false, Ordering::Release),
+        });
+}
 
 #[tauri::command]
 async fn rpc(
@@ -151,6 +215,14 @@ fn main() {
             Ok(())
         })
         .on_menu_event(|app, event| desktop::menu_event(app, event.id().as_ref()))
+        .on_window_event(move |window, event| {
+            if !hidden_test && window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    prompt_close(window);
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             rpc,
             subscribe,
@@ -185,5 +257,25 @@ mod activation_tests {
             "wincmux://notification/../../cmd.exe".into()
         ])
         .is_none());
+    }
+
+    #[test]
+    fn window_close_choice_distinguishes_full_exit_close_and_cancel() {
+        assert_eq!(
+            close_choice(MessageDialogResult::Custom(FULL_EXIT_LABEL.into())),
+            CloseChoice::FullExit
+        );
+        assert_eq!(
+            close_choice(MessageDialogResult::Custom(CLOSE_WINDOW_LABEL.into())),
+            CloseChoice::CloseWindow
+        );
+        assert_eq!(
+            close_choice(MessageDialogResult::Custom("취소".into())),
+            CloseChoice::Cancel
+        );
+        assert_eq!(
+            close_choice(MessageDialogResult::Cancel),
+            CloseChoice::Cancel
+        );
     }
 }

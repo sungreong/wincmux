@@ -23,9 +23,13 @@ After installing the updated WinCMux build, the bundled script can instead be us
 | `wincmux_status` | Core version and runtime state |
 | `wincmux_list_workspaces` | Workspace IDs, names and paths |
 | `wincmux_create_workspace` | Add an existing local folder |
-| `wincmux_list_terminals` | Panes, running sessions and agent readiness |
+| `wincmux_list_groups` | Groups and terminal assignments in a workspace |
+| `wincmux_create_group` | Create a named pane group, optionally with a `#RRGGBB` color |
+| `wincmux_list_terminals` | Panes, running sessions, group assignments and agent readiness |
+| `wincmux_split_pane` | Split a leaf pane; the old terminal stays in the first child |
+| `wincmux_move_terminal_to_group` | Assign an existing terminal to a group |
 | `wincmux_read_terminal` | Visible text grid and bounded recent terminal output |
-| `wincmux_start_terminal` | Start a shell or Claude/Codex/Gemini, optionally in an empty pane |
+| `wincmux_start_terminal` | Start a shell or Claude/Codex/Gemini, optionally in an empty pane and group |
 | `wincmux_terminal_input` | Send text, optionally followed by Enter, immediately |
 | `wincmux_press_key` | Enter, Escape, Tab, Ctrl+C and arrow keys |
 | `wincmux_close_terminal` | End a specified terminal session |
@@ -33,6 +37,8 @@ After installing the updated WinCMux build, the bundled script can instead be us
 | `wincmux_send_followup_now` | Immediately submit a pending or paused follow-up to its terminal |
 | `wincmux_list_followups` | Inspect pending and recent follow-up prompts |
 | `wincmux_capture_window` | PNG screenshot of the WinCMux app |
+
+To create two terminals in one group, use `wincmux_create_group`, select an empty leaf from `wincmux_list_terminals`, split it with `wincmux_split_pane`, then call `wincmux_start_terminal` with the new `second_pane_id` and `group_id`. The group is a view assignment for sessions; the pane layout belongs to the workspace. A split of an occupied pane retains its terminal in the first child. `wincmux_move_terminal_to_group` changes a running terminal's group without restarting it. The open app refreshes its group and pane layout after these MCP operations.
 
 `wincmux_capture_window` defaults to an MCP image block whose `data` field is Base64 PNG. Pass `{"format":"base64"}` to receive JSON containing `mime_type`, `width`, `height`, `pid`, and a Base64 `data` string. Captures stay within the local MCP connection. Screenshots can include terminal content and workspace paths, so the MCP client must be trusted to read them.
 

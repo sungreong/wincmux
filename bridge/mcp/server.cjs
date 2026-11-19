@@ -5,8 +5,9 @@ const path = require('node:path');
 const fs = require('node:fs');
 const readline = require('node:readline');
 const { execFile } = require('node:child_process');
+const { randomUUID } = require('node:crypto');
 
-let version = '0.2.6';
+let version = '0.2.94';
 try { version = require('../../package.json').version; } catch { /* Bundled resource has no package.json. */ }
 const pipe = process.env.WINCMUX_TAURI_PIPE || '\\\\.\\pipe\\wincmux-tauri-rpc';
 const OBJECT = { type: 'object', additionalProperties: false };
@@ -22,12 +23,20 @@ const tools = [
   tool('wincmux_list_workspaces', 'List WinCMux workspaces and their IDs and project paths.', OBJECT, true),
   tool('wincmux_create_workspace', 'Add an existing local folder as a WinCMux workspace.',
     required({ name: { type: 'string', minLength: 1 }, path: { type: 'string', minLength: 1 } }, ['name', 'path']), false),
+  tool('wincmux_list_groups', 'List pane groups and terminal assignments in one workspace.',
+    required({ workspace_id: wid }, ['workspace_id']), true),
+  tool('wincmux_create_group', 'Create a named pane group in a workspace.',
+    required({ workspace_id: wid, name: { type: 'string', minLength: 1, maxLength: 32 }, color: { type: 'string', pattern: '^#[0-9a-fA-F]{6}$' } }, ['workspace_id', 'name']), false),
   tool('wincmux_list_terminals', 'List panes and terminal sessions, including running state and agent readiness. Optionally select one workspace.',
     { ...OBJECT, properties: { workspace_id: wid } }, true),
+  tool('wincmux_split_pane', 'Split a terminal pane horizontally or vertically. An existing terminal stays in the first child pane; use the second pane_id to start another terminal.',
+    required({ workspace_id: wid, pane_id: { type: 'string' }, direction: { type: 'string', enum: ['horizontal', 'vertical'] } }, ['workspace_id', 'pane_id', 'direction']), false),
+  tool('wincmux_move_terminal_to_group', 'Assign an existing terminal session to a pane group in the same workspace.',
+    required({ workspace_id: wid, session_id: sid, group_id: { type: 'string' } }, ['workspace_id', 'session_id', 'group_id']), false),
   tool('wincmux_read_terminal', 'Read the visible text grid of a terminal and a bounded recent raw output tail. The grid requires the updated core.',
     required({ session_id: sid, max_bytes: { type: 'integer', minimum: 1, maximum: 16000 } }, ['session_id']), true),
-  tool('wincmux_start_terminal', 'Start a PowerShell terminal in a workspace, optionally launching Claude, Codex, or Gemini there. A pane_id binds it to an empty pane; without one it remains accessible by session_id.',
-    required({ workspace_id: wid, agent: { type: 'string', enum: ['powershell', 'claude', 'codex', 'gemini'] }, pane_id: { type: 'string' } }, ['workspace_id']), false),
+  tool('wincmux_start_terminal', 'Start a PowerShell terminal in a workspace, optionally launching Claude, Codex, or Gemini there. pane_id binds it to an empty pane; group_id assigns its pane group. Without pane_id it remains accessible by session_id.',
+    required({ workspace_id: wid, agent: { type: 'string', enum: ['powershell', 'claude', 'codex', 'gemini'] }, pane_id: { type: 'string' }, group_id: { type: 'string' } }, ['workspace_id']), false),
   tool('wincmux_terminal_input', 'Type text directly into a running terminal. Set enter=true to press Enter in the same write. This sends immediately, including while an agent is busy; use wincmux_queue_followup to wait.',
     required({ session_id: sid, text: { type: 'string', maxLength: 16000 }, enter: { type: 'boolean' } }, ['session_id', 'text']), false),
   tool('wincmux_press_key', 'Press Enter, Escape, Tab, Ctrl+C, or an arrow in a running terminal.',
@@ -120,36 +129,82 @@ async function dispatchTool(name, args = {}) {
     case 'wincmux_create_workspace': return coreCall('workspace.create', {
       name: string(args.name, 'name'), path: string(args.path, 'path'), backend: 'custom'
     });
+    case 'wincmux_list_groups': {
+      const workspace_id = string(args.workspace_id, 'workspace_id');
+      const exists = (await coreCall('workspace.list')).workspaces.some(workspace => workspace.id === workspace_id);
+      if (!exists) throw Error('workspace_id not found');
+      const [groups, assignments] = await Promise.all([
+        coreCall('group.list', { workspace_id }), coreCall('session.group.list', { workspace_id })
+      ]);
+      return { workspace_id, groups: groups.groups, assignments: assignments.bindings };
+    }
+    case 'wincmux_create_group': {
+      const workspace_id = string(args.workspace_id, 'workspace_id');
+      const name = string(args.name, 'name').trim();
+      if (name.length > 32) throw Error('name must be at most 32 characters');
+      if (args.color !== undefined && !/^#[0-9a-fA-F]{6}$/.test(args.color)) throw Error('color must be #RRGGBB');
+      if (!(await coreCall('workspace.list')).workspaces.some(workspace => workspace.id === workspace_id))
+        throw Error('workspace_id not found');
+      return coreCall('group.create', { workspace_id, name, ...(args.color ? { color: args.color } : {}) });
+    }
     case 'wincmux_list_terminals': {
       const workspaces = (await coreCall('workspace.list')).workspaces;
       const chosen = args.workspace_id ? workspaces.filter(ws => ws.id === args.workspace_id) : workspaces;
       if (args.workspace_id && !chosen.length) throw Error('workspace_id not found');
       const agents = (await coreCall('agent.list')).items;
       const result = await Promise.all(chosen.map(async workspace => {
-        const [sessions, bindings, layout] = await Promise.all([
+        const [sessions, bindings, layout, groups, groupBindings] = await Promise.all([
           coreCall('session.list', { workspace_id: workspace.id }),
           coreCall('pane.session.bindings', { workspace_id: workspace.id }),
           coreCall('layout.list', { workspace_id: workspace.id }),
+          coreCall('group.list', { workspace_id: workspace.id }),
+          coreCall('session.group.list', { workspace_id: workspace.id }),
         ]);
         const bySession = new Map(sessions.sessions.map(session => [session.id, session]));
         const byPane = new Map(bindings.bindings.map(binding => [binding.pane_id, binding.session_id]));
         const byAgent = new Map(agents.map(agent => [agent.session_id, agent]));
+        const byGroup = new Map(groups.groups.map(group => [group.id, group.name]));
+        const groupBySession = new Map(groupBindings.bindings.map(binding => [binding.session_id, binding.group_id]));
+        const groupFields = session => {
+          const group_id = session ? groupBySession.get(session.id) ?? null : null;
+          return { group_id, group_name: byGroup.get(group_id) ?? null };
+        };
         return {
           workspace_id: workspace.id, workspace_name: workspace.name,
+          groups: groups.groups,
           panes: layout.panes.filter(pane => typeof pane === 'string' || !pane.split).map(pane => {
             const id = typeof pane === 'string' ? pane : pane.pane_id;
             const session = bySession.get(byPane.get(id));
             return { pane_id: id, is_focused: pane.is_focused === true,
               session_id: session?.id ?? null, status: session?.status ?? 'empty',
-              command: session?.spawn_cmd ?? null, agent: session ? byAgent.get(session.id) ?? null : null };
+              command: session?.spawn_cmd ?? null, agent: session ? byAgent.get(session.id) ?? null : null,
+              ...groupFields(session) };
           }),
           sessions: sessions.sessions.filter(session => session.status === 'running').map(session => ({
             session_id: session.id, command: session.spawn_cmd, cwd: session.spawn_cwd,
-            agent: byAgent.get(session.id) ?? null,
+            agent: byAgent.get(session.id) ?? null, ...groupFields(session),
           })),
         };
       }));
       return { workspaces: result };
+    }
+    case 'wincmux_split_pane': {
+      const workspace_id = string(args.workspace_id, 'workspace_id');
+      const pane_id = string(args.pane_id, 'pane_id');
+      if (!['horizontal', 'vertical'].includes(args.direction)) throw Error('invalid direction');
+      if (!(await coreCall('workspace.list')).workspaces.some(workspace => workspace.id === workspace_id))
+        throw Error('workspace_id not found');
+      const layout = await coreCall('layout.list', { workspace_id });
+      if (!layout.panes.some(pane => pane.pane_id === pane_id && !pane.split)) throw Error('pane_id is not a terminal pane');
+      const result = await coreCall('layout.split', { workspace_id, pane_id, direction: args.direction });
+      return { workspace_id, original_pane_id: pane_id, first_pane_id: result.pane_ids[0], second_pane_id: result.pane_ids[1] };
+    }
+    case 'wincmux_move_terminal_to_group': {
+      const workspace_id = string(args.workspace_id, 'workspace_id');
+      const session_id = string(args.session_id, 'session_id');
+      const group_id = string(args.group_id, 'group_id');
+      await coreCall('session.group.set', { workspace_id, session_id, group_id });
+      return { ok: true, workspace_id, session_id, group_id };
     }
     case 'wincmux_read_terminal': {
       const session_id = string(args.session_id, 'session_id');
@@ -169,6 +224,11 @@ async function dispatchTool(name, args = {}) {
       if (!['powershell', 'claude', 'codex', 'gemini'].includes(agent)) throw Error('invalid agent');
       const workspace = (await coreCall('workspace.list')).workspaces.find(item => item.id === workspace_id);
       if (!workspace) throw Error('workspace_id not found');
+      if (args.group_id !== undefined) {
+        const group_id = string(args.group_id, 'group_id');
+        const groups = await coreCall('group.list', { workspace_id });
+        if (!groups.groups.some(group => group.id === group_id)) throw Error('group_id not found in workspace');
+      }
       if (args.pane_id !== undefined) {
         const pane_id = string(args.pane_id, 'pane_id');
         const [layout, bindings, sessions] = await Promise.all([
@@ -184,11 +244,22 @@ async function dispatchTool(name, args = {}) {
         workspace_id, cmd: 'powershell.exe', args: ['-NoLogo', '-NoProfile'], cwd: workspace.path
       });
       const session_id = started.session.session_id;
-      if (args.pane_id !== undefined) {
-        await coreCall('pane.session.bind', { workspace_id, pane_id: args.pane_id, session_id });
+      try {
+        if (args.group_id !== undefined) {
+          await coreCall('session.group.set', { workspace_id, session_id, group_id: args.group_id });
+        }
+        if (args.pane_id !== undefined) {
+          await coreCall('pane.session.bind', { workspace_id, pane_id: args.pane_id, session_id });
+        }
+        if (agent !== 'powershell') {
+          const command = agent === 'claude' ? `claude --session-id ${randomUUID()}` : agent;
+          await coreCall('session.write', { session_id, data: `${command}\r` });
+        }
+      } catch (error) {
+        await coreCall('session.close', { session_id }).catch(() => {});
+        throw error;
       }
-      if (agent !== 'powershell') await coreCall('session.write', { session_id, data: `${agent}\r` });
-      return { session_id, workspace_id, pane_id: args.pane_id ?? null, launched: agent };
+      return { session_id, workspace_id, pane_id: args.pane_id ?? null, group_id: args.group_id ?? null, launched: agent };
     }
     case 'wincmux_terminal_input': {
       const session_id = string(args.session_id, 'session_id');

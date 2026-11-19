@@ -1,6 +1,52 @@
 (() => {
-  let dialog, list, info, error, search, provider, children, heading;
-  let workspaceId = null, targetPaneId = null, items = [], generation = 0, busy = false;
+  let dialog, list, info, error, search, provider, children, heading, fromDate, toDate, view, favoritesOnly, compact, pageSize, sortOrder, pageLabel, previous, next;
+  let workspaceId = null, targetPaneId = null, items = [], generation = 0, busy = false, page = 1;
+  const preferenceKey = 'wincmux.conversations.preferences.v1';
+  const layoutKey = 'wincmux.conversations.compact.v1';
+  const sizeKey = 'wincmux.conversations.pageSize.v1';
+  const sortKey = 'wincmux.conversations.sort.v1';
+  const sortOptions = ['newest', 'oldest', 'largest', 'smallest'];
+  function readPreferences() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(preferenceKey) || '{}');
+      return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
+    } catch { return {}; }
+  }
+  const preferences = readPreferences();
+  const itemKey = item => `${item.provider}:${item.id}`;
+  const marked = (item, field) => preferences[itemKey(item)]?.[field] === true;
+  function setMarked(item, field, enabled) {
+    const key = itemKey(item), next = { ...preferences[key], [field]: enabled };
+    if (!next.favorite && !next.hidden) delete preferences[key]; else preferences[key] = next;
+    localStorage.setItem(preferenceKey, JSON.stringify(preferences));
+    render();
+  }
+  function localDay(seconds) {
+    if (!Number.isFinite(seconds)) return '';
+    const date = new Date(seconds * 1000);
+    if (Number.isNaN(date.getTime())) return '';
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  }
+  const timeValue = item => Number.isFinite(item.updated_at) ? item.updated_at : 0;
+  const newestFirst = (a, b) => timeValue(b) - timeValue(a) || itemKey(a).localeCompare(itemKey(b));
+  function compareConversations(a, b) {
+    if (sortOrder.value === 'oldest') return timeValue(a) - timeValue(b) || itemKey(a).localeCompare(itemKey(b));
+    if (sortOrder.value === 'largest' || sortOrder.value === 'smallest') {
+      const left = Number.isFinite(a.size_bytes) ? a.size_bytes : null;
+      const right = Number.isFinite(b.size_bytes) ? b.size_bytes : null;
+      if (left === null) return right === null ? newestFirst(a, b) : 1;
+      if (right === null) return -1;
+      return (sortOrder.value === 'largest' ? right - left : left - right) || newestFirst(a, b);
+    }
+    return newestFirst(a, b);
+  }
+  function formatBytes(bytes) {
+    if (!Number.isFinite(bytes)) return '';
+    if (bytes < 1024) return `${bytes} B`;
+    const unit = bytes < 1024 * 1024 ? 'KiB' : 'MiB';
+    const value = bytes / (unit === 'KiB' ? 1024 : 1024 * 1024);
+    return `${new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1 }).format(value)} ${unit}`;
+  }
   const names = { claude: 'Claude Code', codex: 'Codex' };
   const idPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const element = (tag, className, text) => {
@@ -53,24 +99,50 @@
     list.replaceChildren();
     const query = search.value.trim().toLowerCase();
     const visible = items.filter(item => (!provider.value || item.provider === provider.value)
-      && `${item.title} ${item.id} ${item.cwd}`.toLowerCase().includes(query));
-    info.textContent = `${visible.length}개 대화 · 원본은 각 도구가 보관합니다. 실행 중인 터미널이 있으면 새 터미널에서 재개합니다.`;
-    for (const item of visible) {
+      && `${item.title} ${item.id} ${item.cwd}`.toLowerCase().includes(query)
+      && (view.value === 'all' || marked(item, 'hidden') === (view.value === 'hidden'))
+      && (!favoritesOnly.checked || marked(item, 'favorite'))
+      && (!fromDate.value || localDay(item.updated_at) >= fromDate.value)
+      && (!toDate.value || (localDay(item.updated_at) && localDay(item.updated_at) <= toDate.value))).sort(compareConversations);
+    const size = Number(pageSize.value), pages = Math.max(1, Math.ceil(visible.length / size));
+    page = Math.min(page, pages);
+    const start = (page - 1) * size;
+    const hiddenCount = items.filter(item => marked(item, 'hidden')).length;
+    info.textContent = `${visible.length}개 대화 · 숨김 ${hiddenCount}개 · 원본은 각 도구가 보관합니다.`;
+    pageLabel.textContent = `${page} / ${pages} 페이지${visible.length ? ` · ${start + 1}–${Math.min(start + size, visible.length)} / ${visible.length}` : ''}`;
+    previous.disabled = page <= 1; next.disabled = page >= pages;
+    dialog.classList.toggle('conversation-compact', compact.checked);
+    for (const item of visible.slice(start, start + size)) {
       const row = element('article', 'conversation-row'); row.dataset.id = item.id; row.dataset.provider = item.provider;
       const icon = element('span', `conversation-icon conversation-${item.provider}`);
       icon.innerHTML = window.wincmuxLaunchProfiles.iconMarkup(item.provider);
       const detail = element('div', 'conversation-detail');
       const title = element('strong', 'conversation-title', item.title || `${names[item.provider]} 대화`);
       const time = Number.isFinite(item.updated_at) ? new Date(item.updated_at * 1000).toLocaleString() : '';
-      const meta = element('span', 'conversation-meta', `${names[item.provider]} · ${time}${item.archived ? ' · 보관됨' : ''}`);
+      const bytes = formatBytes(item.size_bytes);
+      const meta = element('span', 'conversation-meta', `${names[item.provider]} · ${time}${bytes ? ` · ${bytes}` : ''}${item.archived ? ' · 보관됨' : ''}`);
+      if (bytes) meta.title = '원본 대화 파일 크기 · 메시지 수나 토큰 수가 아닙니다.';
       const cwd = element('span', 'conversation-cwd', item.cwd); cwd.title = item.cwd;
       const id = element('span', 'conversation-id', item.id); id.title = item.source_path;
       detail.append(title, meta, cwd, id);
+      const actions = element('div', 'conversation-actions');
+      const favorite = element('button', 'conversation-mark', marked(item, 'favorite') ? '★' : '☆');
+      favorite.type = 'button'; favorite.dataset.action = 'favorite';
+      favorite.setAttribute('aria-label', marked(item, 'favorite') ? '즐겨찾기 해제' : '즐겨찾기');
+      favorite.setAttribute('aria-pressed', String(marked(item, 'favorite')));
+      favorite.title = favorite.getAttribute('aria-label');
+      favorite.addEventListener('click', () => setMarked(item, 'favorite', !marked(item, 'favorite')));
+      const hide = element('button', 'conversation-mark', marked(item, 'hidden') ? '복원' : '숨기기');
+      hide.type = 'button'; hide.dataset.action = 'hide';
+      hide.setAttribute('aria-label', marked(item, 'hidden') ? '대화 숨김 해제' : '대화 숨기기');
+      hide.title = hide.getAttribute('aria-label');
+      hide.addEventListener('click', () => setMarked(item, 'hidden', !marked(item, 'hidden')));
+      actions.append(favorite, hide);
       const button = element('button', 'conversation-resume', item.cwd_exists ? '이 대화 재개' : '폴더 없음');
       button.type = 'button'; button.disabled = busy || !item.cwd_exists;
       button.title = item.cwd_exists ? item.resume_command : '대화를 실행했던 원래 폴더를 복원하세요.';
       button.addEventListener('click', () => { void resume(item).catch(showError); });
-      row.append(icon, detail, button); list.append(row);
+      row.append(icon, detail, actions, button); list.append(row);
     }
     if (!visible.length) list.append(element('p', 'conversation-empty', items.length
       ? '검색 조건에 맞는 대화가 없습니다.'
@@ -94,7 +166,8 @@
     if (busy) return;
     ensureDialog(); workspaceId = ws.id; targetPaneId = paneId;
     heading.textContent = `${ws.name} · 이전 대화 불러오기`;
-    search.value = ''; provider.value = ''; items = []; error.hidden = true;
+    search.value = ''; provider.value = ''; fromDate.value = ''; toDate.value = '';
+    view.value = 'visible'; favoritesOnly.checked = false; page = 1; items = []; error.hidden = true;
     if (!dialog.open) dialog.showModal(); search.focus(); await refresh();
   }
   async function nativePicker(kind) {
@@ -115,18 +188,35 @@
     // Only constant markup. Local transcript metadata always uses textContent.
     dialog.innerHTML = `<header class="conversation-header"><h2 id="conversationHeading"></h2><button type="button" data-action="close" aria-label="닫기">×</button></header>
       <div class="conversation-controls"><input type="search" id="conversationSearch" aria-label="대화 검색" placeholder="제목 · 대화 ID · 폴더 검색"><select id="conversationProvider" aria-label="도구 필터"><option value="">모든 도구</option><option value="claude">Claude Code</option><option value="codex">Codex</option></select><button type="button" data-action="refresh">새로고침</button></div>
-      <label class="conversation-scope"><input type="checkbox" id="conversationChildren" checked> 이 프로젝트의 하위 폴더 포함</label>
+      <div class="conversation-filters"><label>시작일 <input type="date" id="conversationFrom"></label><label>종료일 <input type="date" id="conversationTo"></label><select id="conversationView" aria-label="숨김 상태 필터"><option value="visible">표시 중</option><option value="hidden">숨긴 대화</option><option value="all">전체</option></select><label><input type="checkbox" id="conversationFavorites"> 즐겨찾기만</label></div>
+      <div class="conversation-options"><label class="conversation-scope"><input type="checkbox" id="conversationChildren" checked> 하위 폴더 포함</label><label><input type="checkbox" id="conversationCompact"> 간결하게</label><label>정렬 <select id="conversationSort"><option value="newest">최근 수정순</option><option value="oldest">오래된순</option><option value="largest">파일 큰순</option><option value="smallest">파일 작은순</option></select></label><label>페이지당 <select id="conversationPageSize"><option value="10">10개</option><option value="20">20개</option><option value="50">50개</option></select></label></div>
       <p class="conversation-info"></p><p class="conversation-error" role="alert" hidden></p><p class="conversation-warning"></p>
-      <div class="conversation-list"></div><footer class="conversation-footer"><span>도구에서 직접 선택</span><button type="button" data-picker="claude">Claude resume</button><button type="button" data-picker="codex">Codex resume</button></footer>`;
+      <div class="conversation-list"></div><nav class="conversation-pagination" aria-label="대화 페이지"><button type="button" data-page="previous">이전</button><span aria-live="polite"></span><button type="button" data-page="next">다음</button></nav><footer class="conversation-footer"><span>도구에서 직접 선택</span><button type="button" data-picker="claude">Claude resume</button><button type="button" data-picker="codex">Codex resume</button></footer>`;
     dialog.setAttribute('aria-labelledby', 'conversationHeading'); document.body.append(dialog);
     heading = dialog.querySelector('h2'); list = dialog.querySelector('.conversation-list'); info = dialog.querySelector('.conversation-info');
     error = dialog.querySelector('.conversation-error'); search = dialog.querySelector('input[type="search"]');
-    provider = dialog.querySelector('select'); children = dialog.querySelector('input[type="checkbox"]');
-    search.addEventListener('input', render); provider.addEventListener('change', render);
+    provider = dialog.querySelector('#conversationProvider'); children = dialog.querySelector('#conversationChildren');
+    fromDate = dialog.querySelector('#conversationFrom'); toDate = dialog.querySelector('#conversationTo');
+    view = dialog.querySelector('#conversationView'); favoritesOnly = dialog.querySelector('#conversationFavorites');
+    compact = dialog.querySelector('#conversationCompact'); pageSize = dialog.querySelector('#conversationPageSize');
+    sortOrder = dialog.querySelector('#conversationSort');
+    pageLabel = dialog.querySelector('.conversation-pagination span');
+    previous = dialog.querySelector('[data-page="previous"]'); next = dialog.querySelector('[data-page="next"]');
+    compact.checked = localStorage.getItem(layoutKey) === '1';
+    pageSize.value = ['10', '20', '50'].includes(localStorage.getItem(sizeKey)) ? localStorage.getItem(sizeKey) : '10';
+    sortOrder.value = sortOptions.includes(localStorage.getItem(sortKey)) ? localStorage.getItem(sortKey) : 'newest';
+    const filterChanged = () => { page = 1; render(); };
+    search.addEventListener('input', filterChanged);
+    for (const control of [provider, fromDate, toDate, view, favoritesOnly]) control.addEventListener('change', filterChanged);
+    compact.addEventListener('change', () => { localStorage.setItem(layoutKey, compact.checked ? '1' : '0'); render(); });
+    pageSize.addEventListener('change', () => { localStorage.setItem(sizeKey, pageSize.value); page = 1; render(); });
+    sortOrder.addEventListener('change', () => { localStorage.setItem(sortKey, sortOrder.value); page = 1; render(); list.scrollTop = 0; });
+    previous.addEventListener('click', () => { page--; render(); list.scrollTop = 0; });
+    next.addEventListener('click', () => { page++; render(); list.scrollTop = 0; });
     children.addEventListener('change', () => { void refresh(); });
     dialog.querySelector('[data-action="refresh"]').addEventListener('click', () => { void refresh(true); });
     dialog.querySelector('[data-action="close"]').addEventListener('click', () => dialog.close());
-    dialog.addEventListener('close', () => { generation++; });
+    dialog.addEventListener('close', () => { if (!dialog.open) generation++; });
     for (const button of dialog.querySelectorAll('[data-picker]')) button.addEventListener('click', () => { void nativePicker(button.dataset.picker).catch(showError); });
   }
   document.getElementById('conversationBtn')?.addEventListener('click', () => { void open(); });

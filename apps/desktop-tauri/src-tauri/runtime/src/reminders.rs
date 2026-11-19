@@ -7,7 +7,7 @@ use regex::Regex;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     sync::LazyLock,
     time::{Duration, Instant},
 };
@@ -84,9 +84,44 @@ pub fn pending_count(db: &Connection) -> usize {
 }
 
 pub fn list(db: &Connection) -> Result<Value> {
+    cleanup_auto(db)?;
     Ok(
         json!({"items":store::rows(db,"SELECT r.*,w.name AS workspace_name FROM reminders r JOIN workspaces w ON w.id=r.workspace_id WHERE r.status!='deleted' ORDER BY CASE r.status WHEN 'needs_time' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,COALESCE(r.due_at,0),r.created_at DESC LIMIT 300",[])?,"settings":settings(db)?}),
     )
+}
+
+fn cleanup_auto(db: &Connection) -> Result<()> {
+    // Keep dedup keys in deleted rows so a repainted terminal screen cannot
+    // recreate an alert the user has already dismissed.
+    db.execute(
+        &format!("UPDATE reminders SET status='deleted',updated_at={NOW} WHERE source='auto' AND status IN ('sent','cancelled')"),
+        [],
+    )?;
+    let active = store::rows(
+        db,
+        "SELECT id,workspace_id,provider,limit_kind FROM reminders WHERE source='auto' AND status IN ('pending','needs_time') ORDER BY workspace_id,provider,limit_kind,CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,due_at,created_at",
+        [],
+    )?;
+    let mut seen = HashSet::new();
+    for item in active {
+        let key = format!(
+            "{}|{}|{}",
+            item["workspace_id"], item["provider"], item["limit_kind"]
+        );
+        if seen.insert(key) {
+            continue;
+        }
+        let id = store::text(&item, "id")?;
+        db.execute(
+            &format!("UPDATE reminders SET status='deleted',updated_at={NOW} WHERE id=?"),
+            [id],
+        )?;
+        db.execute(
+            "UPDATE notifications SET suppressed=1 WHERE dedup_key=?",
+            [format!("quota:{id}")],
+        )?;
+    }
+    Ok(())
 }
 
 pub fn save(db: &Connection, p: &Value, now: i64) -> Result<Value> {
@@ -458,6 +493,7 @@ pub fn register_auto(
     notice: &QuotaNotice,
     _processed_at: i64,
 ) -> Result<Option<Value>> {
+    cleanup_auto(db)?;
     let settings = settings(db)?;
     if settings["auto_enabled"] != 1 {
         return Ok(None);
@@ -473,6 +509,9 @@ pub fn register_auto(
         due.map(|d| d.to_string())
             .unwrap_or_else(|| format!("unknown:{}", notice.observed_at / 86400))
     );
+    if !store::row(db, "SELECT id FROM reminders WHERE source='auto' AND workspace_id=? AND provider=? AND limit_kind=? AND status IN ('pending','needs_time') LIMIT 1", params![workspace,notice.provider,notice.kind])?.is_null() {
+        return Ok(None);
+    }
     if !store::row(db, "SELECT id FROM reminders WHERE dedup_key=?", [&key])?.is_null() {
         return Ok(None);
     }
@@ -521,6 +560,7 @@ fn display_provider(provider: &str) -> &str {
 }
 
 pub fn fire_due(db: &Connection, now: i64) -> Result<Vec<Value>> {
+    cleanup_auto(db)?;
     let tx = db.unchecked_transaction()?;
     let due = store::rows(
         &tx,
@@ -542,7 +582,7 @@ pub fn fire_due(db: &Connection, now: i64) -> Result<Vec<Value>> {
             &tx,
             &json!({"workspace_id":item["workspace_id"],"session_id":item["session_id"],"title":item["title"],"body":body,"kind":"reminder_due","level":"info","source":"reminder","source_kind":"schedule","dedup_key":format!("reminder:{id}:{}",item["due_at"])}),
         )?;
-        tx.execute(&format!("UPDATE reminders SET status='sent',fired_at={NOW},updated_at={NOW},notification_id=? WHERE id=? AND status='pending'"),params![notification["id"].as_str(),id])?;
+        tx.execute(&format!("UPDATE reminders SET status=CASE WHEN source='auto' THEN 'deleted' ELSE 'sent' END,fired_at={NOW},updated_at={NOW},notification_id=? WHERE id=? AND status='pending'"),params![notification["id"].as_str(),id])?;
         notifications.push(notification);
     }
     tx.commit()?;
@@ -850,6 +890,27 @@ mod tests {
         assert!(register_auto(&db, &ws, "session", &notice, now + 3)
             .unwrap()
             .is_none());
+    }
+    #[test]
+    fn same_workspace_limit_is_single_across_sessions_and_expires_after_firing() {
+        let (db, ws) = database();
+        let now = epoch("2026-11-17T04:00:00Z");
+        let notice = QuotaNotice {
+            provider: "claude".into(),
+            kind: "five_hour".into(),
+            body: "Usage limit reached. Resets at 2:50pm (Asia/Seoul)".into(),
+            observed_at: now,
+        };
+        assert!(register_auto(&db, &ws, "first", &notice, now)
+            .unwrap()
+            .is_some());
+        assert!(register_auto(&db, &ws, "second", &notice, now)
+            .unwrap()
+            .is_none());
+        db.execute("INSERT INTO reminders(id,workspace_id,session_id,provider,limit_kind,title,body,due_at,timezone,source,status,dedup_key,observed_at,created_at,updated_at) SELECT 'legacy-duplicate',workspace_id,'older-session',provider,limit_kind,title,body,due_at+60,timezone,source,status,'legacy-key',observed_at,created_at,updated_at FROM reminders WHERE status='pending' LIMIT 1", []).unwrap();
+        assert_eq!(list(&db).unwrap()["items"].as_array().unwrap().len(), 1);
+        assert_eq!(fire_due(&db, now + 7200).unwrap().len(), 1);
+        assert!(list(&db).unwrap()["items"].as_array().unwrap().is_empty());
     }
     #[test]
     fn due_delivery_is_transactional_and_survives_reopening() {
