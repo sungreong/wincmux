@@ -1,5 +1,11 @@
 (() => {
-  let dialog, form, list, error, options, active = null, loaded = [], refreshTimer;
+  const { request, context, subscribe, reportStatus } = window.wincmuxRemindersConfig ?? {
+    request: (method, params) => rpc(method, params),
+    context: () => ({ workspaceId: state.selectedWorkspaceId, sessionId: state.paneSessions[state.selectedPaneId], workspaces: state.workspaces }),
+    subscribe: handler => window.wincmux.onStreamEvent(handler),
+    reportStatus: message => setStatus(message)
+  };
+  let dialog, form, list, error, options, active = null, loaded = [], remoteWorkspaces = [], refreshTimer;
   let refreshChain=Promise.resolve();
   let settingsDirty=false;
   let busy=false;
@@ -14,9 +20,9 @@
     timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
   }).format(new Date(seconds * 1000)).replace(' ', 'T');
   function showError(err) { error.textContent = String(err?.message ?? err); error.hidden = false; }
-  function fillWorkspaces(value = state.selectedWorkspaceId) {
+  function fillWorkspaces(value = context().workspaceId) {
     form.elements.workspace.replaceChildren();
-    for (const workspace of state.workspaces) {
+    for (const workspace of [...context().workspaces, ...remoteWorkspaces]) {
       const option = document.createElement('option'); option.value = workspace.id; option.textContent = workspace.name;
       form.elements.workspace.append(option);
     }
@@ -32,7 +38,7 @@
     form.elements.timezone.value = item?.timezone ?? options.timezone;
     form.elements.due.value = item?.due_at ? localTime(item.due_at, form.elements.timezone.value)
       : item?.status === 'needs_time' ? '' : localTime(Date.now()/1000 + 1800, form.elements.timezone.value);
-    const session = item?.session_id ?? state.paneSessions[state.selectedPaneId];
+    const session = item ? item.session_id : context().sessionId;
     form.elements.attach.checked = Boolean(session);
     form.elements.attach.disabled = !session;
     form.querySelector('[data-action="cancel"]').disabled = !item || !['pending','needs_time'].includes(item.status);
@@ -69,8 +75,9 @@
   }
   async function loadReminders() {
     try {
-      const result = await rpc('reminder.list',{});
+      const result = await request('reminder.list',{});
       loaded = result.items; options = result.settings;
+      remoteWorkspaces = result.remote_workspaces ?? [];
       const count = loaded.filter(item=>['pending','needs_time'].includes(item.status)).length;
       document.getElementById('reminderCount').textContent = count ? ` ${count}` : '';
       if (dialog?.open) {
@@ -109,13 +116,13 @@
         error.hidden=true;
         setBusy(true);
         button.disabled=true;
-        try { await rpc('reminder.settings.save',{auto_enabled:dialog.querySelector('#reminderAutoEnabled').checked,timezone:dialog.querySelector('#reminderDefaultTimezone').value.trim()}); settingsDirty=false; await refresh(); setStatus('알림 감지 설정을 저장했습니다.'); }
+        try { await request('reminder.settings.save',{auto_enabled:dialog.querySelector('#reminderAutoEnabled').checked,timezone:dialog.querySelector('#reminderDefaultTimezone').value.trim()}); settingsDirty=false; await refresh(); reportStatus('알림 감지 설정을 저장했습니다.'); }
         catch(err){showError(err);} finally{button.disabled=false;setBusy(false);}
       }
       if (['cancel','delete'].includes(action) && active) {
         setBusy(true);
         button.disabled=true;
-        try { await rpc(`reminder.${action}`,{id:active.id}); await refresh(); fillEditor(); }
+        try { await request(`reminder.${action}`,{id:active.id}); await refresh(); fillEditor(); }
         catch(err){showError(err);} finally{if(active)button.disabled=false;setBusy(false);}
       }
     });
@@ -126,9 +133,10 @@
       button.disabled=true;
       try {
         const ws=form.elements.workspace.value;
-        const sid=active ? active.workspace_id===ws ? active.session_id : null : ws===state.selectedWorkspaceId ? state.paneSessions[state.selectedPaneId] : null;
-        const saved=await rpc('reminder.save',{id:active?.id,workspace_id:ws,session_id:form.elements.attach.checked ? sid : null,provider:form.elements.provider.value,title:form.elements.title.value.trim(),body:form.elements.body.value,local_time:form.elements.due.value,timezone:form.elements.timezone.value.trim()});
-        await refresh(); fillEditor(saved); setStatus('알림을 예약했습니다.');
+        const { workspaceId, sessionId } = context();
+        const sid=active ? active.workspace_id===ws ? active.session_id : null : ws===workspaceId ? sessionId : null;
+        const saved=await request('reminder.save',{id:active?.id,workspace_id:ws,session_id:form.elements.attach.checked ? sid : null,provider:form.elements.provider.value,title:form.elements.title.value.trim(),body:form.elements.body.value,local_time:form.elements.due.value,timezone:form.elements.timezone.value.trim()});
+        await refresh(); fillEditor(saved); reportStatus('알림을 예약했습니다.');
       }catch(err){showError(err);}finally{button.disabled=false;setBusy(false);}
     });
   }
@@ -156,7 +164,7 @@
     toast.querySelector('p').textContent=notification.body;
     toast.hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{toast.hidden=true;},15000);
   }
-  window.wincmux.onStreamEvent(event=>{
+  subscribe(event=>{
     if(event.method==='notify.reminders_changed')scheduleRefresh();
     if(event.method==='notify.created' && ['reminder_due','usage_limit'].includes(event.params?.notification?.kind)) { showToast(event.params.notification);scheduleRefresh(); }
   });

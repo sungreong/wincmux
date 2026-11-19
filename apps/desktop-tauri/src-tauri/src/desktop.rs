@@ -186,7 +186,7 @@ pub fn menu_event(app: &AppHandle, id: &str) {
     }
 }
 
-fn open_vscode(path: &Path) -> Result<Value> {
+pub(crate) fn open_vscode(path: &Path) -> Result<Value> {
     for (var, relative) in [
         ("LOCALAPPDATA", "Programs/Microsoft VS Code/Code.exe"),
         ("ProgramFiles", "Microsoft VS Code/Code.exe"),

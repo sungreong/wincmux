@@ -78,6 +78,12 @@ async function run() {
     console.log('viewer test: bootstrap');
     const ws = await cdp.eval(`rpc('workspace.create',${JSON.stringify({ name: 'Viewer test', path: project, backend: 'custom' })})`);
     await cdp.eval(`loadWorkspaces().then(()=>switchWorkspace(${JSON.stringify(ws.workspace.id)}))`);
+    const externalPath = path.join(temp, 'external-workspace');
+    fs.mkdirSync(externalPath);
+    const external = await cdp.eval(`rpc('workspace.create',${JSON.stringify({ name: 'MCP-created workspace', path: externalPath, backend: 'custom' })})`);
+    await until(() => cdp.eval(`state.workspaces.some(item => item.id === ${JSON.stringify(external.workspace.id)})`), 'external workspace appears in sidebar state');
+    await cdp.eval(`rpc('workspace.delete',${JSON.stringify({ id: external.workspace.id })})`);
+    await until(() => cdp.eval(`!state.workspaces.some(item => item.id === ${JSON.stringify(external.workspace.id)})`), 'external workspace removal appears in sidebar state');
     await until(() => cdp.eval('!!document.querySelector(".launch-viewer-card[data-viewer-tab=files]")'), 'viewer launcher');
     assert.equal(await cdp.eval('document.querySelector(".launch-viewer-card[data-viewer-tab=files]").getBoundingClientRect().top < document.querySelector(".pane-terminal-overlay").getBoundingClientRect().bottom'), true);
     const beforeSessions = await cdp.eval('Object.keys(state.paneSessions).length');
@@ -86,6 +92,19 @@ async function run() {
     assert.equal(await cdp.eval('Object.keys(state.paneSessions).length'), beforeSessions);
     assert.equal(await cdp.eval('document.getElementById("viewerTree").getBoundingClientRect().right < document.querySelector(".workspace-viewer-preview").getBoundingClientRect().left'), true);
     await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="note.txt"]')`), 'file tree');
+    assert(await cdp.eval(`(() => {
+      const sidebar=document.querySelector('.workspace-viewer-sidebar');
+      const main=document.getElementById('viewerMain');
+      main.style.setProperty('--viewer-nav-width','140px');
+      try {
+        const bounds=sidebar.getBoundingClientRect();
+        const folder=document.getElementById('viewerFolderBar');
+        const search=document.getElementById('viewerSearchForm').getBoundingClientRect();
+        const tree=document.getElementById('viewerTree').getBoundingClientRect();
+        return folder.getBoundingClientRect().bottom <= search.top && search.bottom <= tree.top && tree.height > 30
+          && [...folder.querySelectorAll('button')].every(button=>button.getBoundingClientRect().right <= bounds.right);
+      } finally { main.style.removeProperty('--viewer-nav-width'); }
+    })()`), 'folder commands, search, and tree stay in separate rows at narrow widths');
     console.log('viewer test: file tree');
     await cdp.eval(`document.querySelector('#viewerTree button[title="note.txt"]').click()`);
     await until(() => cdp.eval('document.getElementById("viewerPreview").textContent.includes("after")'), 'text preview');
@@ -124,6 +143,12 @@ async function run() {
     await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="note.txt"]')`), 'tree after clear');
     await cdp.eval(`document.querySelector('#viewerTree button[title="src"]').click()`);
     await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="src/test_alpha.py"]')`), 'expanded folder');
+    await cdp.eval('document.getElementById("viewerFocusFolder").click()');
+    await until(() => cdp.eval('document.getElementById("viewerFolderPath").textContent === "src" && !document.querySelector(\'#viewerTree button[title="note.txt"]\')'), 'focused folder only');
+    assert.equal(await cdp.eval('document.getElementById("viewerSearchScope").checked'), true);
+    await cdp.eval('document.getElementById("viewerParentFolder").click()');
+    await until(() => cdp.eval('document.getElementById("viewerFolderPath").textContent === "워크스페이스 전체" && !!document.querySelector(\'#viewerTree button[title="note.txt"]\')'), 'return to workspace');
+    await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="src/test_alpha.py"]')`), 'expanded folder restored');
     await cdp.eval(`document.querySelector('#viewerTree button[title="src/syntax.py"]').click()`);
     await until(() => cdp.eval('document.querySelector("#viewerPreview .hljs-keyword")?.textContent === "import"'), 'Python syntax highlighting');
     assert.equal(await cdp.eval('document.getElementById("viewerLanguageSelect").options[0].textContent'), '언어 자동 · python');
@@ -250,6 +275,7 @@ async function run() {
     await until(() => cdp.eval('state.paneGroups.find(group=>group.id===state.selectedGroupId)?.name === "Custom" && !!document.querySelector(".pane-empty-create")'), 'new group is empty');
     await cdp.eval('document.querySelector(".pane-empty-create").click()');
     await until(() => cdp.eval('groupForPane(state.selectedPaneId)?.name === "Custom" && !state.paneSessions[state.selectedPaneId] && !!document.querySelector(".pane-leaf")'), 'terminal created in group');
+    await until(() => cdp.eval('statusBar.title === "Terminal added to Custom"'), 'group terminal creation finished');
     const customPane = await cdp.eval('state.selectedPaneId');
     assert.equal(await cdp.eval(`groupIdForNewPaneSession(${JSON.stringify(customPane)},'claude',[]) === state.selectedGroupId`), true);
     await cdp.eval(`onSplit(${JSON.stringify(customPane)},'horizontal')`);

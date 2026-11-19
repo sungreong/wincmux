@@ -1,4 +1,4 @@
-// Opt-in live CLI test. It sends two short prompts to the user's configured
+// Opt-in live CLI test. It sends three short prompts to the user's configured
 // provider account and is intentionally excluded from npm test.
 const fs = require('node:fs');
 const os = require('node:os');
@@ -8,10 +8,12 @@ const { randomUUID } = require('node:crypto');
 const { setTimeout: sleep } = require('node:timers/promises');
 
 const agent = process.argv[2];
+const workspaceOption = process.argv.indexOf('--workspace');
+const workspacePath = workspaceOption >= 0 ? process.argv[workspaceOption + 1] : null;
 const columns = process.argv[3] === '--narrow' ? 61 : null;
 const force = process.argv.includes('--force');
-if (!['claude', 'codex', 'gemini'].includes(agent)) {
-  console.error('Usage: node bridge/mcp/real-agent-smoke.cjs claude|codex|gemini');
+if (!['claude', 'codex', 'gemini'].includes(agent) || (workspaceOption >= 0 && !workspacePath)) {
+  console.error('Usage: node bridge/mcp/real-agent-smoke.cjs claude|codex|gemini [--workspace existing-folder]');
   process.exit(2);
 }
 const pipe = '\\\\.\\pipe\\wincmux-real-mcp-' + randomUUID();
@@ -40,8 +42,14 @@ async function until(fn, label, ms = 30000) {
   let startFailure;
   try {
     await until(() => callTool('wincmux_status').catch(error => { startFailure = error.message; return null; }), 'core start', 15000);
-    const workspace = await callTool('wincmux_create_workspace', { name: 'Real agent smoke', path: root });
-    const started = await callTool('wincmux_start_terminal', { workspace_id: workspace.workspace.id, agent: columns ? 'powershell' : agent });
+    const workspace = await callTool('wincmux_create_workspace', { name: 'Real agent smoke', path: workspacePath ?? root });
+    const listed = await callTool('wincmux_list_terminals', { workspace: 'Real agent smoke' });
+    if (listed.workspaces[0]?.workspace_id !== workspace.workspace.id) throw Error('workspace name did not select the created workspace');
+    const started = await callTool('wincmux_start_terminal', { workspace: 'Real agent smoke', agent: columns ? 'powershell' : agent });
+    if (started.workspace_name !== 'Real agent smoke' || !started.pane_id) throw Error('terminal was not visible in the named workspace');
+    const activity = await coreCall('mcp.activity.list');
+    if (!activity.items.some(item => item.tool === 'wincmux_start_terminal' && item.workspace_name === 'Real agent smoke'))
+      throw Error('MCP activity did not name the workspace');
     sid = started.session_id;
     if (columns) {
       await coreCall('session.resize', { session_id: sid, cols: columns, rows: 35 });
@@ -59,7 +67,7 @@ async function until(fn, label, ms = 30000) {
         const visible = screen.screen?.lines?.join('\n') ?? '';
         const codexRestricted = agent === 'codex' && visible.includes('Folder access') && visible.includes('1. Open restricted');
         const geminiFolder = agent === 'gemini' && visible.includes('Do you trust the files in this folder?')
-          && visible.includes('1. Trust folder') && visible.includes(root);
+          && visible.includes('1. Trust folder') && visible.includes(workspacePath ?? root);
         if (codexRestricted || geminiFolder) {
           startupChoiceSent = true;
           await callTool('wincmux_press_key', { session_id: sid, key: 'enter' });
@@ -75,6 +83,9 @@ async function until(fn, label, ms = 30000) {
     const second = await callTool('wincmux_queue_followup', {
       session_id: sid, prompt: 'Reply with exactly MCP-TWO. Do not use tools.', delivery_mode: force ? 'after_completion' : 'when_ready'
     });
+    const third = force ? null : await callTool('wincmux_queue_followup', {
+      session_id: sid, prompt: 'Reply with exactly MCP-THREE. Do not use tools.', delivery_mode: 'when_ready'
+    });
     await until(async () => (await followup(first.id))?.status === 'sent', 'first prompt sent', 15000);
     console.log(`${agent}: first prompt sent`);
     if (force) {
@@ -84,6 +95,7 @@ async function until(fn, label, ms = 30000) {
       console.log(`${agent}: forced second prompt while state=${before.state}, ready=${before.terminal_ready}`);
     }
     await until(async () => (await followup(second.id))?.status === 'sent', 'second prompt sent after completion', 30000);
+    if (third) await until(async () => (await followup(third.id))?.status === 'sent', 'third prompt sent after completion', 45000);
     const state = await agentState();
     if (!force && state.terminal_completed_count < 1 && !state.hook?.completed_count) throw Error('second prompt sent before a confirmed completion');
     const screen = await callTool('wincmux_read_terminal', { session_id: sid, max_bytes: 800 });
@@ -91,13 +103,16 @@ async function until(fn, label, ms = 30000) {
       if (!force) throw Error('first assistant reply was not visible on the terminal screen');
     }
     if (force) await until(async () => (await callTool('wincmux_read_terminal', { session_id: sid, max_bytes: 800 })).screen?.lines?.some(line => /^[•●]\s*MCP-TWO\b/.test(line.trim())), 'forced prompt response visible', 60000);
-    console.log(`${agent}: ${force ? 'forced second prompt was answered' : 'second prompt sent after completion'}; completed=${state.terminal_completed_count}`);
+    if (third) await until(async () => (await callTool('wincmux_read_terminal', { session_id: sid, max_bytes: 800 })).screen?.lines?.some(line => /^[•●]\s*MCP-THREE\b/.test(line.trim())), 'third prompt response visible', 60000);
+    console.log(`${agent}: ${force ? 'forced second prompt was answered' : 'three prompts sent and final reply visible'}; completed=${state.terminal_completed_count}`);
   } catch (error) {
     console.error(`${agent}: ${error.message}`);
-    if (startFailure) console.error('start_failure=' + startFailure);
+    if (!sid && startFailure) console.error('start_failure=' + startFailure);
     if (coreError) console.error('core_stderr=' + coreError.slice(-3000));
     if (core.exitCode !== null) console.error('core_exit=' + core.exitCode);
     if (sid) {
+      const queue = await callTool('wincmux_list_followups', { session_id: sid }).catch(() => null);
+      console.error('queue=' + JSON.stringify(queue?.items.map(({ status, result }) => ({ status, result }))));
       const state = (await coreCall('agent.list').catch(() => ({ items: [] }))).items.find(item => item.session_id === sid);
       console.error('agent_state=' + JSON.stringify(state && {
         state: state.state, reason: state.reason, terminal_ready: state.terminal_ready,
@@ -105,6 +120,7 @@ async function until(fn, label, ms = 30000) {
         completed: state.terminal_completed_count, hook: state.hook, source: state.source
       }));
       const screen = await callTool('wincmux_read_terminal', { session_id: sid, max_bytes: 800 }).catch(() => null);
+      console.error('cursor=' + JSON.stringify(screen?.screen && { row: screen.screen.cursor_row, col: screen.screen.cursor_col }));
       const lines = screen?.screen?.lines?.map((line, row) => ({ row, line })).filter(item => item.line).slice(-12) ?? [];
       const redacted = lines.map(item => ({ ...item, line: item.line.replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, '[email]').replace(/C:\\[^\s]+/gi, '[path]') }));
       console.error('screen=' + JSON.stringify(redacted));

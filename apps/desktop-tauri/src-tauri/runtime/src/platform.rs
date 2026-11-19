@@ -4,6 +4,7 @@ use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
     mem::size_of,
+    os::windows::ffi::OsStringExt,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
@@ -14,7 +15,10 @@ use windows::{
             CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, LRESULT, WPARAM,
         },
         System::{
-            Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED},
+            Com::{
+                CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
+                COINIT_MULTITHREADED,
+            },
             Diagnostics::ToolHelp::{
                 CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
                 TH32CS_SNAPPROCESS,
@@ -32,8 +36,9 @@ use windows::{
         },
         UI::{
             Shell::{
-                ExtractIconExW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD,
-                NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+                ExtractIconExW, FOLDERID_Documents, SHGetKnownFolderPath, Shell_NotifyIconW,
+                KF_FLAG_DONT_VERIFY, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
+                NIM_MODIFY, NOTIFYICONDATAW,
             },
             WindowsAndMessaging::*,
         },
@@ -42,6 +47,23 @@ use windows::{
 
 static LOG_ROOT: OnceLock<PathBuf> = OnceLock::new();
 static TRAY_ICON: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+pub fn documents_folder() -> PathBuf {
+    // Use the current Known Folder path, including OneDrive and group policy redirects.
+    unsafe {
+        if let Ok(folder) = SHGetKnownFolderPath(&FOLDERID_Documents, KF_FLAG_DONT_VERIFY, None) {
+            if !folder.is_null() {
+                let path = PathBuf::from(std::ffi::OsString::from_wide(folder.as_wide()));
+                CoTaskMemFree(Some(folder.0.cast()));
+                return path;
+            }
+        }
+    }
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Documents")
+}
+
 #[derive(Clone)]
 pub struct ProcessIdentity {
     pub parent: u32,
@@ -121,6 +143,31 @@ pub fn process_descends_from(mut pid: u32, ancestor: u32) -> bool {
     false
 }
 
+fn nearest_unique_descendant(
+    root: u32,
+    parents: &HashMap<u32, u32>,
+    candidates: Vec<(u32, u64)>,
+) -> Option<(u32, u64)> {
+    let mut ranked = candidates
+        .into_iter()
+        .filter_map(|(pid, started)| {
+            let mut cursor = pid;
+            let mut depth = 0;
+            while cursor != root && depth < 24 {
+                cursor = *parents.get(&cursor)?;
+                depth += 1;
+            }
+            (cursor == root).then_some((pid, started, depth))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by_key(|(_, _, depth)| *depth);
+    let first = ranked.first()?;
+    if ranked.get(1).is_some_and(|second| second.2 == first.2) {
+        return None;
+    }
+    Some((first.0, first.1))
+}
+
 pub fn terminal_agent_anchor(root: u32) -> Option<(u32, u64)> {
     let root_identity = process_identity(root)?;
     let root_image = root_identity.image.to_ascii_lowercase();
@@ -187,32 +234,40 @@ pub fn terminal_agent_anchor(root: u32) -> Option<(u32, u64)> {
                 .collect()
         };
         let native = anchors(native);
-        if native.len() == 1 {
-            return native.into_iter().next();
-        }
         if !native.is_empty() {
-            return None;
+            return nearest_unique_descendant(root, &parents, native);
         }
         // npm-installed agents run under Node. Their MCP servers may start other
         // Node processes below them, so bind to the unique nearest runner.
-        let mut nearest = anchors(script_runners)
-            .into_iter()
-            .filter_map(|(pid, started)| {
-                let mut cursor = pid;
-                let mut depth = 0;
-                while cursor != root && depth < 24 {
-                    cursor = *parents.get(&cursor)?;
-                    depth += 1;
-                }
-                (cursor == root).then_some((pid, started, depth))
-            })
-            .collect::<Vec<_>>();
-        nearest.sort_by_key(|(_, _, depth)| *depth);
-        let first = nearest.first()?;
-        if nearest.get(1).is_some_and(|second| second.2 == first.2) {
-            return None;
-        }
-        Some((first.0, first.1))
+        nearest_unique_descendant(root, &parents, anchors(script_runners))
+    }
+}
+
+#[cfg(test)]
+mod agent_process_tests {
+    use super::*;
+
+    #[test]
+    fn nested_codex_helpers_keep_the_nearest_agent_anchor() {
+        let parents = HashMap::from([
+            (13876, 12492),
+            (32676, 13876),
+            (10208, 32676),
+            (15096, 32676),
+        ]);
+        assert_eq!(
+            nearest_unique_descendant(12492, &parents, vec![(32676, 1), (10208, 2), (15096, 3)]),
+            Some((32676, 1))
+        );
+    }
+
+    #[test]
+    fn equally_near_agents_remain_ambiguous() {
+        let parents = HashMap::from([(10, 1), (11, 1)]);
+        assert_eq!(
+            nearest_unique_descendant(1, &parents, vec![(10, 1), (11, 2)]),
+            None
+        );
     }
 }
 pub fn process_anchor(

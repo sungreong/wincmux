@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WinCMux 원격 작업공간</title>
+  <link rel="stylesheet" href="./vendor/xterm.css">
+  <link rel="stylesheet" href="./vendor/highlight/github-dark.min.css">
+  <link rel="stylesheet" href="./design-tokens.css">
+  <link rel="stylesheet" href="./ssh-workspace.css">
+  <link rel="stylesheet" href="./workspace-reminders.css">
+</head>
+<body>
+<header class="top">
+  <strong id="workspaceTitle">원격 작업공간</strong>
+  <span>MCP 미지원</span>
+  <span id="sshStatus" role="status">연결되지 않음</span>
+  <div class="workspace-notice-tools" role="group" aria-label="알림">
+    <button type="button" id="workspaceAlerts" class="icon-control" data-icon="bell" title="알림" aria-label="알림" aria-haspopup="dialog"><span id="workspaceAlertCount" hidden></span></button>
+    <button type="button" id="reminderBtn" class="icon-control" data-icon="clock" title="예약 알림" aria-label="예약 알림" aria-haspopup="dialog"><span id="reminderCount"></span></button>
+  </div>
+  <button type="button" id="disconnect" hidden>연결 끊기</button>
+  <details id="connectionOptions" hidden>
+    <summary class="icon-control" data-icon="more" title="연결 옵션" aria-label="연결 옵션"></summary>
+    <div><button type="button" id="forgetPassword" hidden>저장된 비밀번호 삭제</button></div>
+  </details>
+</header>
+<main>
+  <section id="setup">
+    <header class="setup-heading">
+      <h1>SSH 서버 연결</h1>
+      <p>서버에 연결하면 원격 작업공간이 열리고 연결이 이 목록에 저장됩니다.</p>
+    </header>
+    <div class="setup-grid">
+      <div class="saved-connections" aria-labelledby="savedTitle">
+        <header class="saved-heading">
+          <h2 id="savedTitle">저장한 연결</h2>
+          <button type="button" id="forget" disabled>선택 삭제</button>
+        </header>
+        <p id="emptyProfiles" class="empty-profiles">연결한 서버가 여기에 표시됩니다.</p>
+        <ul id="profiles" aria-labelledby="savedTitle"></ul>
+      </div>
+      <form id="connectionForm" aria-labelledby="connectionTitle">
+        <h2 id="connectionTitle">연결 설정</h2>
+        <div class="connection-modes" role="group" aria-label="연결 방식">
+          <button type="button" id="windowsSshMode" aria-pressed="true">Windows SSH 목록</button>
+          <button type="button" id="newSshMode" aria-pressed="false">직접 입력</button>
+        </div>
+        <fieldset id="windowsSsh">
+          <label for="alias">Windows SSH 별칭</label>
+          <input id="alias" list="aliases" placeholder="목록에서 선택하거나 별칭 검색" autocomplete="off" spellcheck="false" required>
+          <datalist id="aliases"></datalist>
+          <p id="aliasHint"></p>
+          <div class="alias-actions">
+            <button type="button" id="editSshConfig">VS Code에서 SSH 설정 열기</button>
+            <button type="button" id="refreshAliases">목록 새로 고침</button>
+          </div>
+        </fieldset>
+        <fieldset id="manual">
+          <label for="host">호스트</label>
+          <input id="host" placeholder="서버 주소" autocomplete="off" spellcheck="false" required>
+          <div class="form-row">
+            <label>사용자<input id="user" autocomplete="username" required></label>
+            <label>포트<input id="port" type="number" value="22" min="1" max="65535" required></label>
+          </div>
+          <label for="identity">개인 키 경로 (선택)</label>
+          <div class="key-picker"><input id="identity" placeholder="예: ~/.ssh/id_ed25519" autocomplete="off" spellcheck="false"><button type="button" id="pickKey">파일 선택</button></div>
+        </fieldset>
+        <label for="name">연결 이름 (선택)</label>
+        <input id="name" maxlength="64" placeholder="예: 개발 서버" autocomplete="off">
+        <footer class="connection-actions">
+          <button type="submit" id="connect">연결</button>
+          <button type="submit" id="testConnect">연결 테스트</button>
+          <button type="button" id="registerAlias" hidden>Windows SSH에 저장</button>
+        </footer>
+        <p id="connectFeedback" role="status" aria-atomic="true"></p>
+      </form>
+    </div>
+  </section>
+  <section id="workspace" hidden>
+    <form id="targetForm" class="target">
+      <div class="target-scope" role="group" aria-label="작업 대상">
+        <select id="container" aria-label="작업 대상"><option value="">SSH 서버</option></select>
+        <button type="button" id="dockerAttach" class="icon-control" data-icon="container" title="Docker 컨테이너 접속" aria-label="Docker 컨테이너 접속" aria-haspopup="dialog"></button>
+      </div>
+      <div class="target-folder" role="group" aria-label="작업 폴더">
+        <input id="directory" aria-label="원격 폴더" placeholder="원격 폴더 경로" spellcheck="false">
+        <button type="button" id="browse" class="icon-control" data-icon="folder" title="폴더 선택" aria-label="폴더 선택" aria-haspopup="dialog"></button>
+        <button type="submit" id="openTarget">열기</button>
+      </div>
+      <div class="target-tools" role="group" aria-label="폴더 작업">
+        <button type="button" id="saveProfile" class="icon-control" data-icon="save" title="폴더 저장" aria-label="폴더 저장"></button>
+        <button type="button" id="openCode" class="icon-control" data-icon="code" title="VS Code에서 열기" aria-label="VS Code에서 열기" hidden></button>
+      </div>
+    </form>
+    <nav id="environmentTabs" class="environment-tabs" aria-label="작업환경" hidden></nav>
+    <div id="workArea" hidden>
+      <section class="terminals">
+        <header class="terminal-launch">
+          <strong>터미널</strong><button type="button" id="newTerminal">+ 셸</button><button type="button" id="newClaude">+ Claude Code</button><button type="button" id="newCodex">+ Codex</button>
+          <div class="terminal-tools" role="group" aria-label="터미널 보기">
+            <button type="button" id="equalizeRemotePanes" class="icon-control" data-icon="equalize" title="pane 크기 균등 분할" aria-label="pane 크기 균등 분할" hidden></button>
+            <button type="button" id="toggleRemoteViewer" class="icon-control" data-icon="files" title="파일 보기" aria-label="파일 보기" aria-expanded="false" aria-pressed="false" aria-controls="remoteViewer"></button>
+          </div>
+        </header>
+        <div id="panes"></div>
+      </section>
+      <div id="remoteViewerResize" class="remote-viewer-resize" role="separator" aria-orientation="vertical" aria-label="파일 보기 너비" tabindex="0" hidden></div>
+      <section id="remoteViewer" class="viewer" aria-label="파일 보기" hidden>
+        <header>
+          <button type="button" id="fileTab" aria-pressed="true">파일</button>
+          <button type="button" id="gitTab" aria-pressed="false">Git</button>
+          <button type="button" id="refreshViewer" aria-label="다시 불러오기">↻</button>
+          <button type="button" id="closeRemoteViewer" class="viewer-close" aria-label="파일 보기 닫기" title="파일 보기 닫기">×</button>
+        </header>
+        <form id="searchForm"><input id="search" aria-label="파일 내용 검색" placeholder="파일 내용 검색"><button>검색</button></form>
+        <div id="location"></div>
+        <div id="entries"></div>
+        <header id="paging" hidden>
+          <button id="prevPage" type="button">이전</button><span id="pageNumber"></span><button id="nextPage" type="button">다음</button>
+        </header>
+        <header id="previewHeader" hidden><strong id="previewTitle"></strong><span id="language"></span><button type="button" id="markdownToggle" hidden>소스 보기</button><button type="button" id="closePreview">목록만</button></header>
+        <div id="preview" hidden></div>
+      </section>
+    </div>
+  </section>
+  <p id="notice" role="alert" hidden></p>
+</main>
+<dialog id="workspaceAlertDialog" class="workspace-alert-dialog" aria-labelledby="workspaceAlertTitle">
+  <header>
+    <h2 id="workspaceAlertTitle">알림</h2>
+    <button type="button" id="clearWorkspaceAlerts">모두 읽음</button>
+    <button type="button" id="closeWorkspaceAlerts" class="icon-control" data-icon="closePane" title="알림 닫기" aria-label="알림 닫기"></button>
+  </header>
+  <div id="workspaceAlertList"></div>
+</dialog>
+<dialog id="registerDialog" aria-labelledby="registerTitle">
+  <form id="registerForm">
+    <h2 id="registerTitle">Windows SSH에 저장</h2>
+    <p>별칭을 지정하면 WinCMux와 VS Code에서 같은 연결을 선택할 수 있습니다.</p>
+    <label for="registerName">SSH 별칭</label>
+    <input id="registerName" placeholder="예: dev-server" maxlength="255" autocomplete="off" spellcheck="false" required>
+    <p id="registerError" role="alert" hidden></p>
+    <footer>
+      <button type="button" id="registerCancel">취소</button>
+      <button type="submit" id="registerSubmit">저장</button>
+    </footer>
+  </form>
+</dialog>
+<dialog id="authDialog" aria-labelledby="authTitle">
+  <form id="authForm">
+    <h2 id="authTitle">SSH 인증</h2>
+    <p id="authMessage"></p>
+    <pre id="authFingerprint" hidden></pre>
+    <div id="authFields"></div>
+    <label id="rememberLabel" hidden><input type="checkbox" id="rememberPassword"> 다음 연결에 비밀번호 사용</label>
+    <footer>
+      <button type="button" id="authCancel">취소</button>
+      <button type="button" id="skipPassphrase" hidden>이 키 건너뛰기</button>
+      <button type="submit" id="authSubmit">계속</button>
+    </footer>
+  </form>
+</dialog>
+<dialog id="splitLauncher" aria-labelledby="splitLauncherTitle">
+  <h2 id="splitLauncherTitle">분할 pane에서 실행</h2>
+  <p id="splitProject"></p>
+  <footer>
+    <button type="button" id="splitCancel">취소</button>
+    <button type="button" data-split-launch="shell">셸</button>
+    <button type="button" data-split-launch="claude">Claude Code</button>
+    <button type="button" data-split-launch="codex">Codex</button>
+  </footer>
+</dialog>
+<dialog id="directoryDialog" aria-labelledby="directoryTitle">
+  <h2 id="directoryTitle">원격 폴더 선택</h2>
+  <p id="browsePath"></p>
+  <div id="directoryList"></div>
+  <footer>
+    <button type="button" id="browseCancel">닫기</button>
+    <button type="button" id="browsePick">이 폴더 선택</button>
+  </footer>
+</dialog>
+<dialog id="dockerDialog" aria-labelledby="dockerTitle">
+  <h2 id="dockerTitle">Docker 컨테이너 접속</h2>
+  <input type="search" id="dockerFilter" placeholder="컨테이너 이름 또는 이미지 검색" aria-label="컨테이너 검색">
+  <div id="dockerList"></div>
+  <footer>
+    <button type="button" id="dockerRefresh">새로 고침</button>
+    <button type="button" id="dockerCancel">닫기</button>
+  </footer>
+</dialog>
+<dialog id="closeEnvironmentDialog" aria-labelledby="closeEnvironmentTitle">
+  <h2 id="closeEnvironmentTitle">Docker 작업환경 닫기</h2>
+  <p id="closeEnvironmentTarget"></p>
+  <p>이 탭의 터미널과 실행 중인 작업이 종료됩니다. Docker 컨테이너는 계속 실행됩니다.</p>
+  <footer>
+    <button type="button" id="cancelCloseEnvironment" autofocus>취소</button>
+    <button type="button" id="confirmCloseEnvironment">작업환경 닫기</button>
+  </footer>
+</dialog>
+<script src="./vendor/xterm.js"></script>
+<script src="./vendor/addon-fit.js"></script>
+<script src="./pane-icons.js"></script>
+<script src="./viewer-markdown.js"></script>
+<script src="./vendor/highlight/languages-list.js"></script>
+<script src="./viewer-highlighter.js"></script>
+<script src="./remote-agent-composer.js"></script>
+<script src="./workspace-viewer-panel.js"></script>
+<script src="./remote-pane-layout.js"></script>
+<script src="./remote-workspace-alerts.js"></script>
+<script src="./ssh-workspace.js"></script>
+<script src="./renderer.reminders.js"></script>
+</body>
+</html>

@@ -29,6 +29,12 @@ impl History {
     pub fn prompt_state(&self) -> crate::screen::PromptState {
         self.screen.prompt_state()
     }
+    pub fn agent_prompt_state(
+        &self,
+        agent: crate::screen::PromptAgent,
+    ) -> crate::screen::PromptState {
+        self.screen.agent_prompt_state(agent)
+    }
     pub fn append(&mut self, chunk: &str) -> usize {
         self.replies.push_str(&self.screen.process(chunk));
         self.end += chunk.len();
@@ -111,10 +117,10 @@ fn boundary_after(s: &str, mut index: usize) -> usize {
 }
 
 #[derive(Default)]
-struct Utf8Decoder(Vec<u8>);
+pub struct Utf8Decoder(Vec<u8>);
 
 impl Utf8Decoder {
-    fn push(&mut self, chunk: &[u8]) -> String {
+    pub fn push(&mut self, chunk: &[u8]) -> String {
         self.0.extend_from_slice(chunk);
         let mut rest = self.0.as_slice();
         let mut output = String::with_capacity(rest.len());
@@ -169,9 +175,6 @@ impl Spawned {
         hook_token: &str,
         hook_pipe: &str,
     ) -> Result<Self, String> {
-        let pair = native_pty_system()
-            .openpty(size(120, 30))
-            .map_err(string_error)?;
         let mut command = CommandBuilder::new(cmd);
         command.args(args);
         command.cwd(cwd);
@@ -190,6 +193,32 @@ impl Spawned {
         ] {
             command.env(key, std::env::var(key).unwrap_or_else(|_| fallback.into()));
         }
+        Self::spawn(command, workspace)
+    }
+
+    pub fn without_hooks(
+        cmd: &str,
+        args: &[String],
+        cwd: &Path,
+        remove_env: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<Self, String> {
+        let mut command = CommandBuilder::new(cmd);
+        command.args(args);
+        command.cwd(cwd);
+        for key in remove_env {
+            command.env_remove(key);
+        }
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        Self::spawn(command, "")
+    }
+
+    fn spawn(command: CommandBuilder, workspace: &str) -> Result<Self, String> {
+        let pair = native_pty_system()
+            .openpty(size(120, 30))
+            .map_err(string_error)?;
         let reader = pair.master.try_clone_reader().map_err(string_error)?;
         let writer = pair.master.take_writer().map_err(string_error)?;
         let child = pair.slave.spawn_command(command).map_err(string_error)?;

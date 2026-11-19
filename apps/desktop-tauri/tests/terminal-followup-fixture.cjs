@@ -1,9 +1,36 @@
+if (process.argv.includes('--nested-main')) {
+  const { spawn } = require('node:child_process');
+  const workers = Array.from({ length: 2 }, () =>
+    spawn(process.execPath, ['-e', 'setInterval(() => {}, 10000)'], { stdio: 'ignore', windowsHide: true }));
+  process.on('exit', () => workers.forEach(worker => worker.kill()));
+}
 process.stdin.setRawMode(true);
 process.stdin.setEncoding('utf8');
 let pending = '';
 const startupClaude = process.argv.includes('--startup-claude');
 const startupGemini = process.argv.includes('--startup-gemini');
-if (startupGemini) {
+if (process.argv.includes('--osc-codex')) {
+  const footer = process.argv.includes('--no-shortcut-footer') ? 'Model ready' : '? for shortcuts';
+  const ready = `\x1b[?2004h\x1b]7501;state=idle\x07\x1b[9;1H\x1b[2K\x1b[10;1H\x1b[2K› Ask Codex to do anything\x1b[15;1H${footer}\x1b[10;3H`;
+  process.stdout.write(ready);
+  process.stdin.on('data', data => {
+    pending += data;
+    if (pending.includes('#finish#')) {
+      pending = '';
+      process.stdout.write(ready);
+    }
+    pending = pending.replace(/\x1b\[200~|\x1b\[201~/g, '');
+    const enter = pending.indexOf('\r');
+    if (enter < 0) {
+      process.stdout.write('\x1b[10;1H\x1b[2K› ' + pending + '\x1b[10;4H');
+      return;
+    }
+    const prompt = pending.slice(0, enter);
+    pending = '';
+    process.stdout.write('\x1b[5;1H\x1b[2KRECEIVED:' + Buffer.from(prompt).toString('base64') +
+      '\x1b]7501;state=working\x07\x1b[9;1HWorking · esc to interrupt\x1b[10;1H\x1b[2K› Ask Codex to do anything\x1b[10;3H');
+  });
+} else if (startupGemini) {
   if (process.argv.includes('--mcp-child')) {
     const { spawn } = require('node:child_process');
     const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 10000)'], { stdio: 'ignore' });
@@ -41,15 +68,19 @@ if (startupGemini) {
     }
   });
 } else {
-process.stdout.write(startupClaude
-  ? '\x1b[?2004h\x1b[2J\x1b[1;1HClaude Code v2.1.326\x1b[10;1H────────────────────\x1b[11;1H❯ Try "write a test for <filepath>"\x1b[12;1H────────────────────\x1b[13;1H  ▸▸ auto mode on (shift+tab to cycle)\x1b[11;3H'
-  : '\x1b[?2004hCodex task running\r\n');
+const claudeComposer = '\x1b[?2004h\x1b[2J\x1b[1;1HClaude Code v2.1.328\x1b[10;1H────────────────────\x1b[11;1H❯ Try "fix lint errors"\x1b[12;1H────────────────────\x1b[13;1H  ▸▸ auto mode on (shift+tab to cycle)\x1b[11;3H';
+process.stdout.write(!startupClaude ? '\x1b[?2004hCodex task running\r\n'
+  : process.argv.includes('--defer-startup') ? '\x1b[?2004hClaude fixture loading\r\n' : claudeComposer);
 process.stdin.on('data', data => {
   pending += data;
   if (pending.includes('#exit#')) process.exit(0);
+  if (startupClaude && pending.includes('#startup#')) {
+    pending = pending.replace('#startup#', '');
+    process.stdout.write(claudeComposer);
+  }
   if (pending.includes('#finish#')) {
     pending = pending.replace('#finish#', '');
-    process.stdout.write('Task finished\r\nCogitated for 25s · done\x1b[10;1H› ');
+    process.stdout.write('Task finished\r\nCogitated for 25s · done\x1b[10;1H\x1b[2K› ');
   }
   if (pending.includes('#draft#')) {
     pending = pending.replace('#draft#', '');

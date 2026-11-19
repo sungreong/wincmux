@@ -941,20 +941,25 @@ li.active .ws-delete-btn {
 .workspace-viewer-header { min-width: 0; }
 .workspace-viewer-header strong { white-space: nowrap; }
 .workspace-viewer-header span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 12px; }
+.workspace-viewer-folder-bar { grid-row: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 5px 7px; border-bottom: 1px solid var(--border-default); }
+.workspace-viewer-folder-bar[hidden] { display: none; }
+.workspace-viewer-folder-bar span { flex: 1 1 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 11px; }
 .workspace-viewer button { background: var(--surface-input); color: var(--text-primary); border: 1px solid var(--border-default); border-radius: var(--radius-control); cursor: pointer; padding: 3px 7px; }
 .workspace-viewer button:hover:not(:disabled), .workspace-viewer-tabs button.active { background: var(--accent-surface); }
 .workspace-viewer button:disabled { opacity: .45; cursor: default; }
+.workspace-viewer-folder-bar button { padding: 3px 5px; font-size: 11px; white-space: nowrap; }
 .workspace-viewer-main { display: grid; grid-template-columns: clamp(140px, var(--viewer-nav-width, 38%), calc(100% - 180px)) 6px minmax(0, 1fr); min-width: 0; min-height: 0; overflow: hidden; }
-.workspace-viewer-sidebar { grid-column: 1; grid-row: 1; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; overflow: hidden; }
-.workspace-viewer-search { grid-row: 1; display: grid; gap: 5px; padding: 6px; border-bottom: 1px solid var(--border-default); }
+.workspace-viewer-sidebar { grid-column: 1; grid-row: 1; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; overflow: hidden; }
+.workspace-viewer-search { grid-row: 2; min-width: 0; display: grid; gap: 5px; padding: 6px; border-bottom: 1px solid var(--border-default); }
 .workspace-viewer-search[hidden] { display: none; }
 .workspace-viewer-search-line { display: flex; gap: 4px; min-width: 0; }
 .workspace-viewer-search-line input { flex: 1; width: 0; min-width: 0; padding: 3px 5px; border: 1px solid var(--border-default); border-radius: var(--radius-control); background: var(--surface-input); color: var(--text-primary); font-size: 11px; }
 .workspace-viewer-search-line button { padding: 3px 5px; font-size: 11px; }
 .workspace-viewer-search label { display: flex; align-items: center; gap: 4px; color: var(--text-secondary); font-size: 10px; }
-.workspace-viewer-tree { grid-row: 2; min-width: 0; min-height: 0; overflow: auto; padding: 4px; background: var(--surface-panel); }
+.workspace-viewer-search label > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-viewer-tree { grid-row: 3; min-width: 0; min-height: 0; overflow: auto; padding: 4px; background: var(--surface-panel); }
 .workspace-viewer-tree[hidden] { display: none; }
-.workspace-viewer-pager { grid-row: 3; display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 6px; border-top: 1px solid var(--border-default); color: var(--text-secondary); font-size: 11px; }
+.workspace-viewer-pager { grid-row: 4; display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 6px; border-top: 1px solid var(--border-default); color: var(--text-secondary); font-size: 11px; }
 .workspace-viewer-pager[hidden], .workspace-viewer-find[hidden] { display: none; }
 .workspace-viewer-inner-resize { grid-column: 2; grid-row: 1; cursor: col-resize; background: var(--border-default); touch-action: none; }
 .workspace-viewer .workspace-viewer-row { display: block; width: 100%; border: 0; border-radius: 3px; background: transparent; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font: 12px var(--font-ui); padding-top: 4px; padding-bottom: 4px; }
@@ -2149,55 +2154,6 @@ li.active .ws-delete-btn {
 .launch-settings-footer > span { margin-right: auto; font-size: var(--type-caption); color: var(--text-secondary); }
 .launch-save { background: var(--accent); color: var(--surface-terminal); }
 .launch-settings-error { color: var(--danger); margin: 0 24px 16px; font-size: var(--type-label); }
-.reminder-dialog { margin: auto; padding: 0; width: min(980px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow: auto; border: 1px solid var(--border-default); border-radius: var(--radius-dialog); background: var(--surface-panel); color: var(--text-primary); }
-.reminder-dialog::backdrop { background: rgb(0 0 0 / 65%); }
-.reminder-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 22px 24px; border-bottom: 1px solid var(--border-default); }
-.reminder-header h2 { font-size: var(--type-title); margin-bottom: 7px; }
-.reminder-header p, #reminderSource { font-size: var(--type-caption); color: var(--text-secondary); }
-.reminder-settings { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 24px; background: var(--surface-terminal); border-bottom: 1px solid var(--border-default); font-size: var(--type-label); }
-.reminder-settings label { display: flex; align-items: center; gap: 7px; }
-.reminder-settings input:not([type="checkbox"]) { width: 150px; padding: 6px 8px; border: 1px solid var(--border-default); border-radius: var(--radius-control); background: var(--surface-panel); color: var(--text-primary); }
-.reminder-settings small { color: var(--text-secondary); }
-.reminder-settings button { margin-left: auto; }
-.reminder-body { display: grid; grid-template-columns: minmax(260px, 42%) minmax(0, 1fr); min-height: 490px; }
-.reminder-list-panel { min-width: 0; padding: 18px 16px; border-right: 1px solid var(--border-default); }
-.reminder-list-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
-.reminder-list-actions label { display: flex; align-items: center; gap: 5px; color: var(--text-secondary); font-size: var(--type-caption); }
-.reminder-list { display: grid; gap: 8px; max-height: 520px; overflow-y: auto; align-content: start; }
-.reminder-row { display: grid; gap: 7px; min-width: 0; width: 100%; padding: 12px; text-align: left; background: transparent; border: 1px solid var(--border-default); border-radius: var(--radius-control); color: var(--text-primary); }
-.reminder-row[data-selected="true"] { background: var(--surface-selected); border-color: var(--accent); }
-.reminder-row-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
-.reminder-row-top strong { min-width: 0; overflow-wrap: anywhere; font-size: var(--type-label); }
-.reminder-status { flex: 0 0 auto; font-size: 10px; color: var(--accent); padding-top: 2px; }
-.reminder-row[data-status="needs_time"] .reminder-status { color: var(--warning); }
-.reminder-row-meta { color: var(--text-secondary); font-size: var(--type-caption); overflow-wrap: anywhere; }
-.reminder-row-due { color: var(--text-secondary); font-size: var(--type-caption); }
-.reminder-empty { color: var(--text-secondary); padding: 18px 6px; line-height: 1.7; font-size: var(--type-label); }
-.reminder-editor { display: flex; flex-direction: column; gap: 12px; padding: 22px 24px; min-width: 0; }
-.reminder-editor h3 { font-size: var(--type-body); }
-.reminder-editor label { display: grid; gap: 6px; color: var(--text-secondary); font-size: var(--type-label); }
-.reminder-editor input:not([type="checkbox"]), .reminder-editor textarea, .reminder-editor select { width: 100%; min-width: 0; padding: 8px 10px; background: var(--surface-terminal); color: var(--text-primary); border: 1px solid var(--border-default); border-radius: var(--radius-control); font: inherit; }
-.reminder-editor input:focus, .reminder-editor textarea:focus, .reminder-editor select:focus { border-color: var(--accent); outline: 1px solid var(--accent); }
-.reminder-editor textarea { resize: vertical; min-height: 66px; }
-.reminder-editor .reminder-attach { display: flex; align-items: center; gap: 7px; }
-.reminder-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.reminder-quick-times { display: flex; gap: 6px; margin-top: -4px; }
-.reminder-quick-times button { padding: 4px 8px; font-size: var(--type-caption); background: transparent; }
-.reminder-editor-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
-.reminder-editor-actions [data-action="delete"] { margin-right: auto; color: var(--danger); background: transparent; }
-.reminder-save { background: var(--accent); color: var(--surface-terminal); }
-.reminder-error { color: var(--danger); font-size: var(--type-label); }
-.reminder-footer { padding: 14px 24px; border-top: 1px solid var(--border-default); color: var(--text-secondary); font-size: var(--type-caption); line-height: 1.6; }
-.reminder-toast { position: fixed; z-index: 65000; top: 56px; right: 24px; width: min(380px, calc(100vw - 32px)); padding: 18px; border: 1px solid var(--accent); border-radius: var(--radius-container); background: var(--surface-panel); color: var(--text-primary); box-shadow: 0 12px 36px rgb(0 0 0 / 40%); }
-.reminder-toast[hidden] { display: none; }
-.reminder-toast strong { font-size: var(--type-body); }
-.reminder-toast p { font-size: var(--type-label); color: var(--text-secondary); margin: 10px 0; max-height: 100px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
-.reminder-toast > div { display: flex; gap: 8px; justify-content: flex-end; }
-@media (max-width: 760px) {
-  .reminder-body { grid-template-columns: 1fr; }
-  .reminder-list-panel { border-right: 0; border-bottom: 1px solid var(--border-default); }
-  .reminder-list { max-height: 180px; }
-}
 @media (max-width: 600px) {
   .launch-settings-body { grid-template-columns: 1fr; }
   .launch-settings-sidebar { border-right: 0; border-bottom: 1px solid var(--border-default); }
@@ -4111,23 +4067,12 @@ a { color: var(--accent); }
 .pane-followup-queue-row span { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .pane-followup-queue-row button { flex: none; min-height: 24px; padding: 1px 5px; }
 
-/* Keep the toolbar on one row while retaining the input under each terminal. */
-.toolbar { flex-wrap: nowrap; min-height: 32px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
-.toolbar > * { flex-shrink: 0; }
+.toolbar { flex-wrap: wrap; min-height: 32px; gap: 4px 7px; overflow: visible; }
+.toolbar-group { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; max-width: 100%; padding: 1px 3px; border: 1px solid var(--border-default); border-radius: var(--radius-control); }
+.toolbar-connections { background: var(--surface-panel); }
 .pane-composer:not([hidden]) { padding: 4px 6px; }
 .pane-followup-queue:not([hidden]) { max-height: 54px; gap: 2px; margin-bottom: 4px; padding-bottom: 4px; }
 .pane-followup-queue-row { min-height: 24px; }
-@media (max-width: 1350px) {
-  #toggleWorkspacePanelBtn .toolbar-btn-label,
-  #toggleNotificationPanelBtn .toolbar-btn-label,
-  #hiddenPanesBtn .toolbar-btn-label,
-  #equalizePanesBtn .toolbar-btn-label,
-  #shortcutHelpBtn .toolbar-btn-label,
-  #launchSettingsBtn .toolbar-btn-label,
-  #reminderBtn .toolbar-btn-label,
-  #conversationBtn .toolbar-btn-label { display: none; }
-  .toolbar-btn { min-width: 28px; justify-content: center; }
-}
 
 .mcp-settings-dialog { margin: auto; padding: 0; width: min(1020px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; border: 1px solid var(--border-default); border-radius: var(--radius-dialog); background: var(--surface-panel); color: var(--text-primary); }
 .mcp-settings-dialog::backdrop { background: rgb(0 0 0 / 65%); }
@@ -4147,6 +4092,7 @@ a { color: var(--accent); }
 #mcpSwitchText { color: var(--accent); }
 #mcpSettingsCommand { display: block; padding: 10px; overflow-wrap: anywhere; background: var(--surface-terminal); border: 1px solid var(--border-default); border-radius: var(--radius-control); }
 .mcp-settings-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.mcp-settings-main #mcpDevelopmentFolder { width: 100%; min-width: 0; padding: 7px 9px; color: var(--text-primary); background: var(--surface-input); border: 1px solid var(--border-default); border-radius: var(--radius-control); }
 #mcpAgentPrompt { margin: 0; padding: 10px; max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--surface-terminal); border: 1px solid var(--border-default); border-radius: var(--radius-control); color: var(--text-secondary); }
 #mcpSettingsTools { display: grid; gap: 8px; margin: 0; padding: 0; max-height: 300px; overflow: auto; list-style: none; }
 #mcpSettingsTools li { display: grid; gap: 3px; padding: 9px 11px; border: 1px solid var(--border-default); border-radius: var(--radius-control); }
@@ -4157,7 +4103,8 @@ a { color: var(--accent); }
 #mcpSettingsBtn[data-enabled="false"] .mcp-toolbar-state { color: var(--text-secondary); background: var(--surface-input); }
 .mcp-activity-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 #mcpActivityList { display: grid; gap: 4px; max-height: 220px; overflow: auto; margin: 0; padding: 0; list-style: none; }
-#mcpActivityList li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 7px; border: 1px solid var(--border-default); border-radius: var(--radius-control); font-size: var(--type-label); }
+#mcpActivityList li { display: grid; grid-template-columns: auto minmax(80px, .7fr) minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 7px; border: 1px solid var(--border-default); border-radius: var(--radius-control); font-size: var(--type-label); }
+#mcpActivityList .mcp-activity-workspace { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-secondary); }
 #mcpActivityList code { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 #mcpActivityList time { color: var(--text-tertiary); white-space: nowrap; }
 #mcpActivityList strong[data-outcome="success"] { color: var(--success); }

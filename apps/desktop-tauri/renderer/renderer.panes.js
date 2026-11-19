@@ -372,25 +372,6 @@ function bindQuickCommandPanelSafe(paneId, quickPanel, quickBtn) {
   }
 }
 
-const paneIcon = {
-  fontDown: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 15l4.5-10 4.5 10"/><path d="M5.5 11h6"/><path d="M14.5 13h3"/></svg>`,
-  fontUp: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 15l4.5-10 4.5 10"/><path d="M5.5 11h6"/><path d="M16 10v6"/><path d="M13 13h6"/></svg>`,
-  splitRight: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="2"/><path d="M10 4v12"/><path d="M13.5 10h2.5"/><path d="M14.75 8.75v2.5"/></svg>`,
-  splitDown: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="2"/><path d="M3 10h14"/><path d="M8.75 13h2.5"/><path d="M10 11.75v2.5"/></svg>`,
-  start: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 5.5v9l7-4.5-7-4.5z" fill="currentColor" stroke="none"/></svg>`,
-  restart: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 9.5a5.5 5.5 0 1 1-1.7-4"/><path d="M14 2.5v3.5h3.5"/></svg>`,
-  restore: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 11a5 5 0 1 0 1.4-4.2"/><path d="M3.5 7h3.8v-3.8"/></svg>`,
-  sessions: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5.5h10"/><path d="M5 10h10"/><path d="M5 14.5h6"/><circle cx="3" cy="5.5" r=".7" fill="currentColor" stroke="none"/><circle cx="3" cy="10" r=".7" fill="currentColor" stroke="none"/><circle cx="3" cy="14.5" r=".7" fill="currentColor" stroke="none"/></svg>`,
-  closeSession: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="5" width="12" height="10" rx="2"/><path d="M8 8.5l4 3"/><path d="M12 8.5l-4 3"/></svg>`,
-  closePane: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="4" width="12" height="12" rx="2"/><path d="M7.5 7.5l5 5"/><path d="M12.5 7.5l-5 5"/></svg>`,
-  hidePane: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 10s2.8-4.5 7.5-4.5 7.5 4.5 7.5 4.5-2.8 4.5-7.5 4.5S2.5 10 2.5 10z"/><path d="M3.5 3.5l13 13"/></svg>`,
-  movePane: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v14"/><path d="M7.5 5.5L10 3l2.5 2.5"/><path d="M7.5 14.5L10 17l2.5-2.5"/><path d="M3 10h14"/><path d="M5.5 7.5L3 10l2.5 2.5"/><path d="M14.5 7.5L17 10l-2.5 2.5"/></svg>`,
-  quick: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M11 2.5l-6 8h5l-1 7 6-8h-5l1-7z" fill="currentColor" stroke="none"/><circle cx="15.5" cy="4.5" r="1.2" fill="currentColor" stroke="none"/></svg>`,
-  auto: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5h10v10H5z"/><path d="M8 3h4"/><path d="M8 17h4"/><path d="M3 8v4"/><path d="M17 8v4"/></svg>`,
-  group: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5h8l2.5 2.5v8.5h-13v-11z"/><path d="M6 4.5v3h10.5"/><path d="M7 11h6"/><path d="M7 14h4"/></svg>`,
-  more: `<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="10" r="1.2" fill="currentColor" stroke="none"/><circle cx="10" cy="10" r="1.2" fill="currentColor" stroke="none"/><circle cx="15" cy="10" r="1.2" fill="currentColor" stroke="none"/></svg>`
-};
-
 function makeSplitResizableSafe(...args) {
   if (typeof globalThis.makeSplitResizable !== "function") {
     return;
@@ -2438,7 +2419,11 @@ function recordPaneInputPerf(view, sessionId, queued, sent, dropped, latency) {
 }
 
 function queuePaneInput(view, data) {
-  if (state.coreDisconnected || view.restoringSnapshot) return;
+  if (state.coreDisconnected || view.restoringSnapshot) {
+    view.pendingPromptWrite?.reject(new Error("터미널 연결을 확인할 수 없습니다. 다시 연결한 뒤 전송해 주세요."));
+    view.pendingPromptWrite = null;
+    return;
+  }
   // The core answers terminal device queries even when no renderer is attached.
   if (/^\x1b\[(?:\??\d+;\d+R|[?>][\d;]*c|0n)$/.test(data)) return;
   if (!view.sessionId || !data) {
@@ -2627,7 +2612,7 @@ function bindTerminalPrompt() {
     const ready = Boolean(view?.sessionId && !view.detached && isPaneViewAttached(view));
     editor.disabled = insert.disabled = insertSingleLine.disabled = expand.disabled = send.disabled = followup.disabled = !ready;
     targetLabel.textContent = view
-      ? `Pane ${view.paneId.slice(0, 8)} · ${ready ? "Ctrl+Enter로 전송 / 대기열" : "터미널을 먼저 실행하세요"}` : "";
+      ? `Pane ${view.paneId.slice(0, 8)} · ${ready ? "Ctrl+Enter로 전송 / 대기열 추가" : "터미널을 먼저 실행하세요"}` : "";
     if (form.parentElement !== composer) composer.appendChild(form);
     window.wincmuxFollowups?.bindComposer(view?.paneId, view?.sessionId);
     if (changed || moved) updateInsertActions();
@@ -2646,7 +2631,7 @@ function bindTerminalPrompt() {
     composing = false;
     showError("");
     targetLabel.textContent = `Terminal ${leafPanes().findIndex((p) => p.pane_id === view.paneId) + 1}`;
-    targetLabel.title = "Ctrl+Enter로 전송 / 대기열";
+    targetLabel.title = "Ctrl+Enter로 전송 / 대기열 추가";
     dialog.appendChild(form);
     dialog.showModal();
     updateInsertActions();
@@ -2716,31 +2701,48 @@ function bindTerminalPrompt() {
       writing = true;
       editor.readOnly = close.disabled = insert.disabled = insertSingleLine.disabled = expand.disabled = send.disabled = followup.disabled = true;
       if (shouldSubmit && editor.value.trim()) {
-        try {
+        const [agents, followups] = await Promise.all([
+          rpc("agent.list", { include_process_presence: true }), rpc("followup.list", { session_id: sessionId, queue_only: true })
+        ]);
+        validateTarget();
+        const agent = agents.items?.find((item) => item.session_id === sessionId);
+        const queued = followups.items?.some((item) => ["pending", "paused", "claimed"].includes(item.status)
+          && item.delivery_mode === "when_ready");
+        const recognized = agent && (agent.agent_process_attached || agent.source !== "none" || agent.hook?.active
+          || Number(agent.terminal_completed_count ?? 0) > 0);
+        if (queued || (recognized && (agent.terminal_ready !== true || agent.terminal_prompt_empty !== true))) {
           await rpc("followup.schedule", { session_id: sessionId, prompt: editor.value, delivery_mode: "when_ready" });
           view.promptDraft = "";
           editor.value = "";
           updateInsertActions();
           if (dialog.open) dialog.close();
           await window.wincmuxFollowups?.refresh();
-          setStatus("이 터미널의 대기열에 추가했습니다. 입력 가능하면 자동으로 전송합니다.");
+          setStatus("터미널이 입력 가능한 상태가 되면 대기열의 내용을 순서대로 전송합니다.");
           return;
-        } catch (err) {
-          if (!/no running Codex, Claude, or Gemini process was found/.test(err?.message ?? String(err))) throw err;
+        }
+        if (recognized && !agent.terminal_prompt_visible) {
+          throw new Error("에이전트 입력창이 아직 보이지 않습니다. 준비되면 다시 전송해 주세요.");
         }
       }
       if (data) {
         await write(data);
         pasted = true;
-        view.promptDraft = "";
-        editor.value = "";
-        updateInsertActions();
+        if (!shouldSubmit) {
+          view.promptDraft = "";
+          editor.value = "";
+          updateInsertActions();
+        }
       }
       if (shouldSubmit) {
         // Let the CLI finish processing paste before delivering a separate Enter.
         if (pasted) await new Promise((resolve) => setTimeout(resolve, 150));
         validateTarget();
         await write("\r");
+      }
+      if (shouldSubmit) {
+        view.promptDraft = "";
+        editor.value = "";
+        updateInsertActions();
       }
       if (dialog.open) dialog.close();
       setStatus(shouldSubmit ? "터미널에 입력을 제출했습니다." : "내용을 넣었습니다. 터미널 제출을 누르면 실행됩니다.");
@@ -3629,6 +3631,10 @@ function renderPaneSurface(force = false) {
     state.paneViews.set(paneId, view);
   }
 
+  const followupPanels = [...paneSurface.querySelectorAll(".pane-followup-panel")].map((panel) => {
+    panel.remove();
+    return panel;
+  });
   paneSurface.innerHTML = "";
   state.paneCards.clear();
   invalidatePaneSelectionStyleCache();
@@ -3679,6 +3685,12 @@ function renderPaneSurface(force = false) {
   }
 
   refreshPaneBindings();
+  for (const panel of followupPanels) {
+    const paneId = panel.dataset.paneId;
+    const card = state.paneCards.get(paneId);
+    if (card && state.paneSessions[paneId] === panel.dataset.sessionId) card.append(panel);
+  }
+  window.wincmuxFollowups?.reposition();
   applyPaneSelectionStyles();
   // Defer fit until after browser has applied layout, so xterm gets correct dimensions
   requestAnimationFrame(() => {

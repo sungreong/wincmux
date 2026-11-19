@@ -1,6 +1,7 @@
 (() => {
   const dialog = document.getElementById('mcpSettingsDialog');
   const enabled = document.getElementById('mcpSettingsEnabled');
+  const developmentFolder = document.getElementById('mcpDevelopmentFolder');
   const stateText = document.getElementById('mcpSettingsState');
   const error = document.getElementById('mcpSettingsError');
   const command = document.getElementById('mcpSettingsCommand');
@@ -26,6 +27,7 @@
   function render(settings) {
     lastSettings = settings;
     enabled.checked = settings.enabled === true;
+    developmentFolder.value = settings.development_folder ?? '';
     stateText.textContent = enabled.checked ? '켜짐 · MCP 도구 요청을 받습니다.' : '꺼짐 · MCP 도구 요청이 차단됩니다.';
     toolbarState.textContent = switchText.textContent = enabled.checked ? 'ON' : 'OFF';
     button.dataset.enabled = String(enabled.checked);
@@ -70,9 +72,13 @@
         const at = document.createElement('time');
         at.textContent = new Date(entry.at * 1000).toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
         const tool = document.createElement('code'); tool.textContent = entry.tool;
+        const workspace = document.createElement('span');
+        workspace.className = 'mcp-activity-workspace';
+        workspace.textContent = entry.workspace_name ?? '전체';
+        if (entry.workspace_id) workspace.title = entry.workspace_id;
         const outcome = document.createElement('strong'); outcome.dataset.outcome = entry.outcome;
         outcome.textContent = { success: '성공', blocked: '차단', failed: '실패' }[entry.outcome] ?? entry.outcome;
-        row.append(at, tool, outcome);
+        row.append(at, workspace, tool, outcome);
         activityList.append(row);
       }
     } catch (cause) { showError(cause); }
@@ -104,6 +110,23 @@
       enabled.disabled = false;
     }
   });
+  document.getElementById('mcpDevelopmentBrowse').addEventListener('click', async () => {
+    try {
+      const selected = await window.wincmux.pickFolder();
+      if (selected) developmentFolder.value = selected;
+    } catch (cause) { showError(cause); }
+  });
+  async function saveDevelopmentFolder(value) {
+    if (busy) return;
+    busy = true;
+    error.hidden = true;
+    try {
+      render(await rpc('mcp.settings.save', { development_folder: value }));
+    } catch (cause) { showError(cause); }
+    finally { busy = false; }
+  }
+  document.getElementById('mcpDevelopmentSave').addEventListener('click', () => void saveDevelopmentFolder(developmentFolder.value.trim()));
+  document.getElementById('mcpDevelopmentReset').addEventListener('click', () => void saveDevelopmentFolder(''));
   async function copyText(value, button) {
     try { await window.wincmux.clipboardWrite(value); button.textContent = '복사됨'; }
     catch (cause) { showError(cause); }

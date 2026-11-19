@@ -2,7 +2,15 @@
 
 mod assets;
 mod desktop;
+mod local_docker;
 mod remote;
+mod remote_agent;
+mod ssh_auth;
+mod ssh_config;
+mod ssh_credentials;
+mod ssh_terminal;
+mod ssh_viewer;
+mod ssh_window;
 mod toast;
 mod workspace_viewer;
 use desktop::Desktop;
@@ -117,6 +125,13 @@ async fn desktop_action(
         remote.context(params).await?;
         return Ok(json!({"ok":true}));
     }
+    if action == "open-remote-alert" {
+        let id = params["notification_id"]
+            .as_str()
+            .ok_or("알림을 선택하세요.")?;
+        ssh_window::open_remote_alert(app, &remote, id).await?;
+        return Ok(json!({"ok":true}));
+    }
     let desktop = Arc::clone(desktop.inner());
     tauri::async_runtime::spawn_blocking(move || {
         desktop
@@ -178,6 +193,7 @@ fn main() {
                 }),
             };
             let desktop = Desktop::new(data_dir.clone());
+            app.manage(ssh_window::WorkspaceWindows::new(data_dir.clone()));
             let pipe = std::env::var("WINCMUX_TAURI_PIPE").unwrap_or_else(|_| {
                 if cfg!(debug_assertions) {
                     r"\\.\pipe\wincmux-tauri-rpc-dev".to_owned()
@@ -228,7 +244,11 @@ fn main() {
             subscribe,
             unsubscribe,
             desktop_action,
-            take_activation
+            take_activation,
+            ssh_window::open_ssh_workspace,
+            ssh_window::open_docker_workspace,
+            ssh_window::ssh_workspace,
+            ssh_terminal::ssh_pty
         ])
         .build(tauri::generate_context!())
         .expect("WinCMux Tauri startup failed");

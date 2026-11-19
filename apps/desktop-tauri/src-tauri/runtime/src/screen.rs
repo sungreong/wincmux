@@ -60,10 +60,35 @@ pub struct Screen {
     parser: vt100::Parser<Callbacks>,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum PromptAgent {
+    #[default]
+    Unknown,
+    Claude,
+    Codex,
+}
+
+impl PromptAgent {
+    pub fn from_program(program: &str) -> Self {
+        let name = program
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match name.as_str() {
+            "claude" | "claude.exe" | "claude.cmd" => Self::Claude,
+            "codex" | "codex.exe" | "codex.cmd" => Self::Codex,
+            _ if name.starts_with("codex-") && name.ends_with(".exe") => Self::Codex,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct PromptState {
     pub visible: bool,
     pub empty: bool,
+    pub agent_composer: bool,
     pub startup_ready: bool,
     pub gemini_composer: bool,
     pub completion_visible: bool,
@@ -101,6 +126,10 @@ impl Screen {
         self.parser.screen().bracketed_paste()
     }
     pub fn prompt_state(&self) -> PromptState {
+        self.agent_prompt_state(PromptAgent::Unknown)
+    }
+
+    pub fn agent_prompt_state(&self, agent: PromptAgent) -> PromptState {
         let screen = self.parser.screen();
         let (cursor_row, cursor_col) = screen.cursor_position();
         let (_, cols) = screen.size();
@@ -116,6 +145,12 @@ impl Screen {
             .or_else(|| trimmed.strip_prefix('>'));
         match suffix {
             Some(rest) => {
+                let mut last = at;
+                let mut text = rest.to_owned();
+                while last + 1 < rows.len() && screen.row_wrapped(last as u16) {
+                    last += 1;
+                    text.push_str(&rows[last]);
+                }
                 let rule = |row: Option<&String>| {
                     row.is_some_and(|row| {
                         let text = row.trim();
@@ -124,34 +159,33 @@ impl Screen {
                 };
                 let claude_chrome = at > 0
                     && rule(rows.get(at - 1))
-                    && rule(rows.get(at + 1))
-                    && rows
-                        .iter()
-                        .take(at)
-                        .any(|row| row.contains("Claude Code v"))
-                    && rows
-                        .iter()
-                        .skip(at + 2)
-                        .take(3)
-                        .any(|row| row.contains("shift+tab to cycle"));
+                    && rule(rows.get(last + 1))
+                    && (agent == PromptAgent::Claude
+                        || rows
+                            .iter()
+                            .take(at)
+                            .any(|row| row.contains("Claude Code v")));
                 let placeholder_at_cursor = cursor_col as usize
                     <= line.chars().take_while(|ch| ch.is_whitespace()).count() + 2;
-                let placeholder = rest.trim().starts_with("Try \"")
-                    && rest.trim().ends_with('"')
-                    && placeholder_at_cursor;
-                let codex_chrome = rows
-                    .iter()
-                    .skip(at + 1)
-                    .take(8)
-                    .any(|row| row.contains("? for shortcuts"));
+                let text = text.trim();
+                let placeholder =
+                    text.starts_with("Try \"") && text.ends_with('"') && placeholder_at_cursor;
+                let codex_chrome = agent == PromptAgent::Codex && trimmed.starts_with('›')
+                    || rows
+                        .iter()
+                        .skip(last + 1)
+                        .take(8)
+                        .any(|row| row.contains("? for shortcuts"))
+                    || (trimmed.starts_with('›')
+                        && rows.iter().take(at).any(|row| row.contains("OpenAI Codex")));
                 let gemini_composer =
-                    placeholder_at_cursor && rest.trim() == "Type your message or @path/to/file";
-                let empty = rest.trim().is_empty()
+                    placeholder_at_cursor && text == "Type your message or @path/to/file";
+                let empty = text.is_empty()
                     || (claude_chrome && placeholder)
                     || gemini_composer
                     || (codex_chrome
                         && placeholder_at_cursor
-                        && rest.trim() == "Ask Codex to do anything");
+                        && text == "Ask Codex to do anything");
                 let done_lines: Vec<_> = rows
                     .iter()
                     .take(at)
@@ -169,6 +203,7 @@ impl Screen {
                 PromptState {
                     visible: true,
                     empty,
+                    agent_composer: claude_chrome || codex_chrome || gemini_composer,
                     startup_ready: empty && (claude_chrome || codex_chrome),
                     gemini_composer,
                     completion_visible: completion_fingerprint.is_some(),
@@ -273,6 +308,18 @@ mod tests {
         assert!(prompt.visible && prompt.empty && prompt.startup_ready);
         screen.process("\x1b[31;1H\x1b[2K› 내가 작성한 내용\x1b[31;12H");
         assert!(!screen.prompt_state().empty);
+    }
+    #[test]
+    fn known_codex_with_wrapped_placeholder_does_not_need_shortcuts_footer() {
+        let mut screen = Screen::default();
+        screen.resize(24, 15);
+        screen.process(
+            "\x1b[?2004h\x1b[8;1H› Ask Codex to do anything\x1b[12;1HModel ready\x1b[8;3H",
+        );
+        assert!(screen.agent_prompt_state(PromptAgent::Codex).empty);
+        assert!(!screen.prompt_state().empty);
+        screen.process("\x1b[8;1H\x1b[2K› 실제로 작성한 초안\x1b[8;3H");
+        assert!(!screen.agent_prompt_state(PromptAgent::Codex).empty);
     }
     #[test]
     fn gemini_placeholder_is_empty_but_a_typed_draft_is_not() {

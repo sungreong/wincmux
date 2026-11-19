@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="./vendor/highlight/github-dark.min.css" />
     <link rel="stylesheet" href="./design-tokens.css" />
     <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./workspace-reminders.css" />
   </head>
   <body>
     <div id="coreDisconnected" hidden role="alert">코어 연결 끊김 — 다시 연결 중입니다.</div>
@@ -50,19 +51,13 @@
 
       <main class="panel panel-center">
         <div class="toolbar">
+          <div class="toolbar-group" role="group" aria-label="워크스페이스와 pane">
           <button id="toggleWorkspacePanelBtn" class="toolbar-btn" title="Toggle workspace panel (Ctrl+B)">
             <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
               <rect x="1" y="2" width="14" height="12" rx="1.5"/>
               <line x1="5" y1="2" x2="5" y2="14"/>
             </svg>
             <span class="toolbar-btn-label">Workspaces</span>
-          </button>
-          <button id="toggleNotificationPanelBtn" class="toolbar-btn" title="Toggle notifications panel (Ctrl+Shift+N)">
-            <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-              <path d="M8 2a5 5 0 0 1 5 5v3l1 2H2l1-2V7a5 5 0 0 1 5-5z"/>
-              <path d="M6.5 13.5a1.5 1.5 0 0 0 3 0"/>
-            </svg>
-            <span class="toolbar-btn-label">Notifications</span>
           </button>
           <button id="hiddenPanesBtn" class="toolbar-btn" title="Show hidden terminals (Ctrl+Shift+H)">
             <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
@@ -80,6 +75,24 @@
             <span class="toolbar-btn-label">Equalize</span>
           </button>
           <button id="workspaceViewerBtn" class="toolbar-btn" type="button" title="워크스페이스 폴더와 Git 상태 보기" aria-expanded="false" aria-controls="workspaceViewer">▤ <span class="toolbar-btn-label">파일 보기</span></button>
+          </div>
+          <div class="toolbar-group toolbar-connections" role="group" aria-label="연결">
+          <button id="openSshWorkspace" class="toolbar-btn" type="button">원격 SSH</button>
+          <button id="openDockerWorkspace" class="toolbar-btn" type="button">로컬 Docker</button>
+          <button id="mcpSettingsBtn" class="toolbar-btn" type="button" title="MCP 사용 설정과 도구 목록" aria-haspopup="dialog"><span class="toolbar-btn-label">MCP</span><span id="mcpToolbarState" class="mcp-toolbar-state">…</span></button>
+          </div>
+          <div class="toolbar-group" role="group" aria-label="알림과 대화">
+          <button id="toggleNotificationPanelBtn" class="toolbar-btn" title="Toggle notifications panel (Ctrl+Shift+N)">
+            <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+              <path d="M8 2a5 5 0 0 1 5 5v3l1 2H2l1-2V7a5 5 0 0 1 5-5z"/>
+              <path d="M6.5 13.5a1.5 1.5 0 0 0 3 0"/>
+            </svg>
+            <span class="toolbar-btn-label">Notifications</span>
+          </button>
+          <button id="reminderBtn" class="toolbar-btn" title="수동 알림과 사용 한도 초기화 예약" aria-haspopup="dialog"><svg class="toolbar-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg><span class="toolbar-btn-label">예약 알림<span id="reminderCount"></span></span></button>
+          <button id="conversationBtn" class="toolbar-btn" title="프로젝트의 Claude·Codex 저장 대화 조회 및 재개" aria-haspopup="dialog"><svg class="toolbar-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v12H9l-5 4V5Z"/><path d="M8 9h8m-8 4h5"/></svg><span class="toolbar-btn-label">대화 이력</span></button>
+          </div>
+          <div class="toolbar-group" role="group" aria-label="설정과 표시">
           <button id="shortcutHelpBtn" class="toolbar-btn shortcut-help-btn" title="Show keyboard shortcuts (Ctrl+/)">
             <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
               <rect x="1.5" y="3" width="13" height="10" rx="1.6"/>
@@ -87,14 +100,10 @@
             </svg>
             <span class="toolbar-btn-label">Keys</span>
           </button>
-          <div class="toolbar-divider"></div>
           <button id="launchSettingsBtn" class="toolbar-btn" title="실행 도구 목록과 기본 명령어 관리" aria-haspopup="dialog">
             <svg class="toolbar-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m8 5-6 7 6 7m8-14 6 7-6 7M14 3l-4 18"/></svg>
             <span class="toolbar-btn-label">실행 설정</span>
           </button>
-          <button id="mcpSettingsBtn" class="toolbar-btn" type="button" title="MCP 사용 설정과 도구 목록" aria-haspopup="dialog"><span class="toolbar-btn-label">MCP</span><span id="mcpToolbarState" class="mcp-toolbar-state">…</span></button>
-          <button id="reminderBtn" class="toolbar-btn" title="수동 알림과 사용 한도 초기화 예약" aria-haspopup="dialog"><svg class="toolbar-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg><span class="toolbar-btn-label">예약 알림<span id="reminderCount"></span></span></button>
-          <button id="conversationBtn" class="toolbar-btn" title="프로젝트의 Claude·Codex 저장 대화 조회 및 재개" aria-haspopup="dialog"><svg class="toolbar-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v12H9l-5 4V5Z"/><path d="M8 9h8m-8 4h5"/></svg><span class="toolbar-btn-label">대화 이력</span></button>
           <div class="font-scale-group" title="Global terminal font size">
             <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
               <text x="1" y="11" font-size="9" font-family="sans-serif" stroke="none" fill="currentColor" font-weight="bold">A</text>
@@ -116,6 +125,7 @@
               </svg>
             </button>
           </div>
+          </div>
           <span id="selectedPaneLabel" class="muted toolbar-pane-label">Selected Pane: -</span>
           <div id="hiddenPanesPopover" class="hidden-panes-popover"></div>
         </div>
@@ -123,12 +133,13 @@
         <div id="groupBar" class="group-bar" aria-label="Pane groups"></div>
         <div id="workspaceContent" class="workspace-content">
           <div id="paneSurface" class="pane-surface"></div>
-          <div id="workspaceViewerResize" class="workspace-viewer-resize" hidden></div>
+          <div id="workspaceViewerResize" class="workspace-viewer-resize" role="separator" aria-orientation="vertical" aria-label="파일 보기 너비" tabindex="0" hidden></div>
           <section id="workspaceViewer" class="workspace-viewer" aria-label="워크스페이스 파일 뷰어" hidden>
             <header class="workspace-viewer-header"><strong>파일 보기</strong><span id="viewerRootName"></span><button id="viewerRefresh" type="button" title="새로고침">↻</button><button id="viewerClose" type="button" title="닫기">×</button></header>
             <div class="workspace-viewer-tabs"><button id="viewerFilesTab" type="button" class="active">파일</button><button id="viewerGitTab" type="button">Git</button><button id="viewerAgentsTab" type="button">Agent</button></div>
             <div id="viewerMain" class="workspace-viewer-main">
               <div class="workspace-viewer-sidebar">
+                <div id="viewerFolderBar" class="workspace-viewer-folder-bar"><span id="viewerFolderPath">워크스페이스 전체</span><button id="viewerFocusFolder" type="button" title="선택 폴더만 보기" disabled>폴더만 보기</button><button id="viewerParentFolder" type="button" title="상위 폴더로 이동" disabled>상위</button><button id="viewerWorkspaceRoot" type="button" title="워크스페이스 전체로 돌아가기" disabled>전체</button></div>
                 <form id="viewerSearchForm" class="workspace-viewer-search" role="search">
                   <div class="workspace-viewer-search-line"><input id="viewerSearchInput" aria-label="파일 이름 또는 경로 패턴" placeholder="*.py · **/test_*.py" spellcheck="false" /><button type="submit">검색</button><button id="viewerSearchClear" type="button" title="검색 지우기">×</button></div>
                   <div class="workspace-viewer-search-line"><input id="viewerContentInput" aria-label="파일 내용 검색" placeholder="파일 내용 검색 · 이름은 비워도 됨" spellcheck="false" /></div>
@@ -224,7 +235,7 @@
         <textarea id="terminalPromptText" aria-label="터미널에 보낼 글" placeholder="메시지 입력… (Ctrl+Enter로 전송 또는 대기열 추가)" rows="1" autofocus></textarea>
         <details class="terminal-prompt-help">
           <summary>입력 도움말</summary>
-          <p>Ctrl+Enter로 에이전트 입력 대기열에 추가합니다. 입력 가능하면 곧바로 전송합니다. ‘삽입만’은 Enter를 보내지 않습니다.</p>
+          <p>Ctrl+Enter는 앞선 작업이 있으면 대기열에 추가하고, 입력 가능하면 곧바로 전송합니다. ‘삽입만’은 Enter를 보내지 않습니다.</p>
           <p id="terminalPromptMultilineHint" hidden>여러 줄 붙여넣기를 지원하지 않는 세션에서는 ‘한 줄로 삽입’을 사용하세요.</p>
         </details>
         <p id="terminalPromptError" role="alert" hidden></p>
@@ -234,7 +245,7 @@
           <button id="terminalPromptInsert" type="submit">삽입만</button>
           <button id="terminalPromptSingleLine" type="submit" hidden>한 줄로 삽입</button>
           <button id="terminalPromptFollowup" type="button" title="이 터미널에 후속 입력 예약">후속 입력 예약</button>
-          <button id="terminalPromptSend" type="submit" title="내용을 넣고 Enter로 제출합니다. 입력창이 비어 있으면 터미널의 현재 입력을 제출합니다.">바로 전송</button>
+          <button id="terminalPromptSend" type="submit" title="작업 중이면 대기열에 추가합니다. 입력창이 비어 있으면 터미널의 현재 입력을 직접 제출합니다.">전송 / 대기열</button>
         </div>
       </form>
     </dialog>
@@ -243,12 +254,13 @@
       <header><div><h2 id="mcpSettingsTitle">MCP 설정</h2><p id="mcpSettingsState" role="status">상태 확인 중…</p></div><button id="mcpSettingsClose" type="button" aria-label="닫기">✕</button></header>
       <div class="mcp-settings-body">
         <div class="mcp-settings-main">
-          <label class="mcp-settings-toggle"><span><strong>WinCMux MCP 사용 <b id="mcpSwitchText">…</b></strong><small>끄면 등록된 MCP 클라이언트의 도구 요청을 차단합니다.</small></span><input id="mcpSettingsEnabled" type="checkbox" role="switch"></label>
-          <section><h3>연결 방법</h3><p>로컬 stdio 서버를 MCP 클라이언트에 등록하세요. TCP 포트는 사용하지 않습니다.</p><code id="mcpSettingsCommand"></code><div class="mcp-settings-actions"><button id="mcpSettingsCopy" type="button">Codex 명령 복사</button><button id="mcpSettingsInfoCopy" type="button">MCP 정보 복사</button></div></section>
+          <label class="mcp-settings-toggle"><span><strong>WinCMux MCP 사용 <b id="mcpSwitchText">…</b></strong><small>로컬 작업공간에 적용됩니다. 원격 SSH·컨테이너 작업공간에서는 MCP를 지원하지 않습니다.</small></span><input id="mcpSettingsEnabled" type="checkbox" role="switch"></label>
+          <section><h3>기본 개발 폴더</h3><p>작업 위치를 따로 지정하지 않으면 MCP가 이 폴더 아래에 새 폴더와 워크스페이스를 만듭니다. 기존 워크스페이스 이름을 지정하면 그 워크스페이스를 사용합니다.</p><input id="mcpDevelopmentFolder" aria-label="MCP 기본 개발 폴더" spellcheck="false"><div class="mcp-settings-actions"><button id="mcpDevelopmentBrowse" type="button">폴더 선택</button><button id="mcpDevelopmentSave" type="button">저장</button><button id="mcpDevelopmentReset" type="button">기본값 복원</button></div></section>
+          <section><h3>연결 방법</h3><p id="mcpNodeRequirement">MCP 서버에는 Node.js가 필요합니다. PowerShell에서 <code>node --version</code>으로 확인하세요. 명령을 찾을 수 없으면 Node.js를 설치한 뒤 MCP 클라이언트를 다시 여세요.</p><p>WinCMux를 실행한 상태에서 아래 명령으로 서버를 등록하세요. 연결에 TCP 포트는 필요하지 않습니다.</p><code id="mcpSettingsCommand"></code><div class="mcp-settings-actions"><button id="mcpSettingsCopy" type="button">Codex 명령 복사</button><button id="mcpSettingsInfoCopy" type="button">MCP 정보 복사</button></div></section>
           <section><h3>에이전트 등록 프롬프트</h3><p>아래 내용을 Codex·Claude·Gemini 등 사용하는 에이전트에게 전달할 수 있습니다.</p><pre id="mcpAgentPrompt"></pre><button id="mcpSettingsPromptCopy" type="button">등록 프롬프트 복사</button></section>
         </div>
         <div class="mcp-settings-side">
-          <section><div class="mcp-activity-head"><h3>최근 MCP 요청</h3><button id="mcpActivityRefresh" type="button">새로고침</button></div><p>도구 이름, 실행 시각, 결과만 기록합니다. 입력 내용은 저장하지 않습니다.</p><ol id="mcpActivityList" aria-label="최근 MCP 도구 호출"></ol></section>
+          <section><div class="mcp-activity-head"><h3>최근 MCP 요청</h3><button id="mcpActivityRefresh" type="button">새로고침</button></div><p>워크스페이스, 도구 이름, 실행 시각, 결과를 기록합니다. 입력 내용은 저장하지 않습니다.</p><ol id="mcpActivityList" aria-label="최근 MCP 도구 호출"></ol></section>
           <section><h3>지원 도구</h3><ul id="mcpSettingsTools"></ul></section>
         </div>
         <p id="mcpSettingsError" role="alert" hidden></p>
@@ -318,10 +330,12 @@
     <script src="./renderer.shared.js"></script>
     <script src="./renderer.launchers.js"></script>
     <script src="./renderer.layout.js"></script>
+    <script src="./pane-icons.js"></script>
     <script src="./renderer.panes.js"></script>
     <script src="./viewer-markdown.js"></script>
     <script src="./vendor/highlight/languages-list.js"></script>
     <script src="./viewer-highlighter.js"></script>
+    <script src="./workspace-viewer-panel.js"></script>
     <script src="./renderer.workspace-viewer.js"></script>
     <script src="./tauri-output.js"></script>
     <script src="./renderer.reminders.js"></script>
@@ -330,6 +344,7 @@
     <script src="./renderer.quickcmd.js"></script>
     <script src="./renderer.hidden.js"></script>
     <script src="./renderer.mcp.js"></script>
+    <script src="./launcher-ssh.js"></script>
     <script src="./renderer.js"></script>
   </body>
 </html>

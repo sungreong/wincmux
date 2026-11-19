@@ -95,6 +95,7 @@ pub struct Conversation {
     last_terminal_output: Option<Instant>,
     screen_prompt_visible: bool,
     screen_prompt_empty: bool,
+    screen_agent_composer: bool,
     screen_done_fingerprint: Option<u64>,
     submitted_done_fingerprint: Option<u64>,
     startup_ready_seen: bool,
@@ -286,6 +287,7 @@ impl Conversation {
     }
     pub fn hook_ready(&self, provider: &str, agent_id: &str) -> bool {
         self.hook_submit_state(provider, agent_id)
+            && self.screen_prompt_visible
             && (self.hook_event.as_deref() != Some("SessionStart") || self.initial_terminal_ready())
     }
     pub fn hook_submit_state(&self, provider: &str, agent_id: &str) -> bool {
@@ -314,21 +316,30 @@ impl Conversation {
         self.startup_ready_seen
             && !self.agent_turn_submitted
             && self.screen_prompt_visible
+            && self.screen_agent_composer
             && self
                 .last_terminal_output
                 .is_some_and(|at| at.elapsed() >= Duration::from_millis(1500))
     }
     pub fn terminal_submit_state(&self) -> bool {
-        self.terminal_complete_state()
-            || (self.explicit
-                && self.source == "osc7501"
+        self.terminal_submit_allowed(false)
+    }
+    pub fn terminal_pasted_followup_can_submit(&self) -> bool {
+        self.terminal_submit_allowed(true)
+    }
+    fn terminal_submit_allowed(&self, pasted: bool) -> bool {
+        if self.explicit && !self.hook_active {
+            return self.source == "osc7501"
                 && matches!(self.state, "done" | "idle")
                 && self.screen_prompt_visible
-                && self.screen_prompt_empty)
+                && (pasted || self.screen_prompt_empty);
+        }
+        self.terminal_complete_state()
             || (!self.hook_active
                 && self.startup_ready_seen
                 && !self.agent_turn_submitted
-                && self.screen_prompt_visible)
+                && self.screen_prompt_visible
+                && self.screen_agent_composer)
     }
     pub fn recognize_agent_process(&mut self) {
         self.assistant = true;
@@ -350,6 +361,7 @@ impl Conversation {
         self.approval.clear();
         self.screen_prompt_visible = false;
         self.screen_prompt_empty = false;
+        self.screen_agent_composer = false;
         self.set_state(
             "working",
             "pattern",
@@ -373,6 +385,7 @@ impl Conversation {
         }
         self.screen_prompt_visible = prompt.visible;
         self.screen_prompt_empty = prompt.visible && prompt.empty;
+        self.screen_agent_composer = prompt.visible && prompt.agent_composer;
         if self.gemini_session {
             if self.gemini_title == "ready"
                 && self.gemini_working_seen
@@ -540,7 +553,10 @@ impl Conversation {
         let keys = PASTE.replace_all(text, "");
         if keys.contains(['\r', '\n']) {
             self.submitted_done_fingerprint = self.screen_done_fingerprint;
-            if self.startup_ready_seen || (self.gemini_session && self.gemini_title == "ready") {
+            if self.screen_agent_composer
+                && (self.startup_ready_seen
+                    || (self.gemini_session && self.gemini_title == "ready"))
+            {
                 self.agent_turn_submitted = true;
                 self.startup_ready_seen = false;
             }
@@ -550,6 +566,7 @@ impl Conversation {
             self.approval.clear();
             self.screen_prompt_visible = false;
             self.screen_prompt_empty = false;
+            self.screen_agent_composer = false;
             if self.hook_active {
                 self.awaiting_prompt_hook = true;
                 self.set_state(
@@ -793,6 +810,11 @@ mod tests {
         d.hook("claude", "SessionStart", Some("agent-a"), None)
             .unwrap();
         d.hook("claude", "Stop", Some("agent-a"), None).unwrap();
+        d.observe_screen(PromptState {
+            visible: true,
+            empty: true,
+            ..Default::default()
+        });
         assert!(d.hook_ready("claude", "agent-a"));
         d.scheduled_input();
         assert!(!d.hook_ready("claude", "agent-a"));
@@ -813,6 +835,11 @@ mod tests {
         d.hook("codex", "SessionStart", Some("agent-a"), None)
             .unwrap();
         d.hook("codex", "Stop", Some("agent-a"), None).unwrap();
+        d.observe_screen(PromptState {
+            visible: true,
+            empty: true,
+            ..Default::default()
+        });
         assert!(d.hook_ready("codex", "agent-a"));
         d.input("new prompt\r");
         assert!(!d.hook_ready("codex", "agent-a"));
@@ -821,6 +848,11 @@ mod tests {
             .unwrap();
         d.hook("codex", "Stop", Some("agent-a"), Some("turn-2"))
             .unwrap();
+        d.observe_screen(PromptState {
+            visible: true,
+            empty: true,
+            ..Default::default()
+        });
         assert!(d.hook_ready("codex", "agent-a"));
     }
 
@@ -950,6 +982,22 @@ mod tests {
     }
 
     #[test]
+    fn explicit_idle_can_submit_the_queue_paste_but_busy_cannot() {
+        let mut detector = Conversation::new("codex.exe", &[]);
+        let mut screen = Screen::default();
+        detector.output("\x1b]7501;state=idle\x07");
+        screen.process("\x1b[27;1H› Ask Codex to do anything\x1b[30;1H? for shortcuts\x1b[27;3H");
+        detector.observe_screen(screen.prompt_state());
+        assert!(detector.terminal_submit_state());
+        screen.process("\x1b[27;1H\x1b[2K› Next prompt");
+        detector.observe_screen(screen.prompt_state());
+        assert!(!detector.terminal_submit_state());
+        assert!(detector.terminal_pasted_followup_can_submit());
+        detector.output("\x1b]7501;state=working\x07");
+        assert!(!detector.terminal_pasted_followup_can_submit());
+    }
+
+    #[test]
     fn mentioning_claude_in_shell_output_does_not_identify_an_agent() {
         let mut detector = Conversation::new("powershell.exe", &[]);
         let mut screen = crate::screen::Screen::default();
@@ -985,6 +1033,23 @@ mod tests {
         detector.input("first task\r");
         assert!(!detector.terminal_submit_state());
         assert!(!detector.terminal_ready());
+    }
+
+    #[test]
+    fn claude_trust_menu_enter_does_not_consume_first_prompt() {
+        let mut detector = Conversation::new("claude.exe", &[]);
+        let mut screen = crate::screen::Screen::default();
+        let composer = "\x1b[2J\x1b[1;1HClaude Code v2.1.328\x1b[10;1H────────────────────\x1b[11;1H❯ Try \"fix lint errors\"\x1b[12;1H────────────────────\x1b[13;1H  ⏵⏵ auto mode on (shift+tab to cycle)\x1b[11;3H";
+        screen.process(composer);
+        detector.observe_screen(screen.prompt_state());
+        screen.process("\x1b[2J\x1b[7;1H› No, exit\x1b[8;1H  Yes, I trust this folder\x1b[7;3H");
+        detector.observe_screen(screen.prompt_state());
+        assert!(!detector.terminal_submit_state());
+        detector.input("\r");
+        screen.process(composer);
+        detector.observe_screen(screen.prompt_state());
+        detector.last_terminal_output = Some(Instant::now() - Duration::from_secs(2));
+        assert!(detector.terminal_ready());
     }
 
     #[test]

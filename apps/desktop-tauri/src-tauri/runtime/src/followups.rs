@@ -2,17 +2,20 @@ use crate::store::{self, Result};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
-pub fn list(db: &Connection, workspace: Option<&str>, session: Option<&str>) -> Result<Value> {
-    let items = match (workspace, session) {
-        (Some(workspace), Some(session)) => store::rows(db,
-            "SELECT * FROM agent_followups WHERE workspace_id=? AND session_id=? ORDER BY created_at DESC LIMIT 100", params![workspace,session])?,
-        (None, Some(session)) => store::rows(db,
-            "SELECT * FROM agent_followups WHERE session_id=? ORDER BY created_at DESC LIMIT 100", [session])?,
-        (Some(workspace), None) => store::rows(db,
-            "SELECT * FROM agent_followups WHERE workspace_id=? ORDER BY created_at DESC LIMIT 100", [workspace])?,
-        (None, None) => store::rows(db,
-            "SELECT * FROM agent_followups ORDER BY created_at DESC LIMIT 100", [])?,
-    };
+pub fn list(
+    db: &Connection,
+    workspace: Option<&str>,
+    session: Option<&str>,
+    queue_only: bool,
+) -> Result<Value> {
+    let items = store::rows(
+        db,
+        "SELECT * FROM agent_followups
+         WHERE (?1 IS NULL OR workspace_id=?1) AND (?2 IS NULL OR session_id=?2)
+         AND (?3=0 OR status IN ('pending','paused','claimed','failed'))
+         ORDER BY created_at DESC,rowid DESC LIMIT 100",
+        params![workspace, session, queue_only],
+    )?;
     Ok(json!({"items":items}))
 }
 
@@ -55,9 +58,33 @@ pub fn cancel(db: &Connection, id: &str, now: i64) -> Result<Value> {
     if changed == 0 {
         return Err("follow-up cannot be cancelled".into());
     }
+    prune_completed(db, Some(id));
     status_result(db, id, "cancelled")
 }
 
+pub fn dismiss_failed(db: &Connection, id: &str) -> Result<Value> {
+    let row = by_id(db, id)?;
+    if db.execute(
+        "DELETE FROM agent_followups WHERE id=? AND status='failed'",
+        [id],
+    )? == 0
+    {
+        return Err("only failed follow-ups can be dismissed".into());
+    }
+    Ok(row)
+}
+
+pub(crate) fn prune_completed(db: &Connection, keep: Option<&str>) {
+    if let Err(err) = db.execute(
+        "DELETE FROM agent_followups WHERE status IN ('sent','cancelled')
+                AND (?1 IS NULL OR id!=?1)
+                AND id NOT IN (SELECT id FROM agent_followups WHERE status IN ('sent','cancelled')
+                               ORDER BY updated_at DESC,rowid DESC LIMIT 100)",
+        [keep],
+    ) {
+        crate::platform::log(&format!("completed follow-up cleanup failed: {err}"));
+    }
+}
 pub fn pause(db: &Connection, id: &str, now: i64) -> Result<Value> {
     change_status(db, id, "paused", "pending", now)
 }
@@ -134,6 +161,9 @@ pub fn finish(db: &Connection, id: &str, sent: bool, result: &str, now: i64) -> 
         "UPDATE agent_followups SET status=?,result=?,updated_at=? WHERE id=? AND status='claimed'",
         params![if sent { "sent" } else { "failed" }, result, now, id],
     )?;
+    if sent {
+        prune_completed(db, Some(id));
+    }
     Ok(())
 }
 
@@ -150,6 +180,61 @@ pub fn fail_agent(db: &Connection, sid: &str, now: i64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_followups_leave_the_queue_and_history_is_bounded() -> Result<()> {
+        let db = store::open(std::path::Path::new(":memory:"))?;
+        for now in 1..=105 {
+            let row = schedule(
+                &db,
+                "s",
+                "w",
+                "terminal",
+                "a",
+                (1, 1),
+                "prompt",
+                now,
+                now,
+                "when_ready",
+                0,
+            )?;
+            let id = row["id"].as_str().unwrap();
+            assert!(claim(&db, id, now)?);
+            finish(&db, id, true, "submitted", now)?;
+        }
+        assert!(list(&db, None, Some("s"), true)?["items"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM agent_followups", [], |row| row
+                .get::<_, u64>(0))?,
+            100
+        );
+        let row = schedule(
+            &db,
+            "s",
+            "w",
+            "terminal",
+            "a",
+            (1, 1),
+            "recoverable",
+            106,
+            106,
+            "when_ready",
+            0,
+        )?;
+        let id = row["id"].as_str().unwrap();
+        assert!(claim(&db, id, 106)?);
+        finish(&db, id, false, "draft still present", 106)?;
+        assert_eq!(list(&db, None, Some("s"), true)?["items"][0]["id"], id);
+        assert_eq!(dismiss_failed(&db, id)?["status"], "failed");
+        assert!(list(&db, None, Some("s"), true)?["items"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        Ok(())
+    }
 
     #[test]
     fn restart_never_replays_claimed_or_orphaned_followups() -> Result<()> {
@@ -230,7 +315,10 @@ mod tests {
             pause(&db, paused["id"].as_str().unwrap(), 10)?;
         }
         let db = store::open(&path)?;
-        let items = list(&db, None, None)?["items"].as_array().unwrap().clone();
+        let items = list(&db, None, None, false)?["items"]
+            .as_array()
+            .unwrap()
+            .clone();
         assert_eq!(items.len(), 2);
         assert!(items.iter().all(|item| item["status"] == "failed"));
         assert!(items

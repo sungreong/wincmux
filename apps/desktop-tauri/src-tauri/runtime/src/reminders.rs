@@ -86,7 +86,7 @@ pub fn pending_count(db: &Connection) -> usize {
 pub fn list(db: &Connection) -> Result<Value> {
     cleanup_auto(db)?;
     Ok(
-        json!({"items":store::rows(db,"SELECT r.*,w.name AS workspace_name FROM reminders r JOIN workspaces w ON w.id=r.workspace_id WHERE r.status!='deleted' ORDER BY CASE r.status WHEN 'needs_time' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,COALESCE(r.due_at,0),r.created_at DESC LIMIT 300",[])?,"settings":settings(db)?}),
+        json!({"items":store::rows(db,"SELECT r.*,w.name AS workspace_name FROM reminders r JOIN workspaces w ON w.id=r.workspace_id WHERE r.status!='deleted' ORDER BY CASE r.status WHEN 'needs_time' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,COALESCE(r.due_at,0),r.created_at DESC LIMIT 300",[])?,"remote_workspaces":store::rows(db,"SELECT id,name,path FROM workspaces WHERE id LIKE 'remote:%' ORDER BY last_active DESC",[])?,"settings":settings(db)?}),
     )
 }
 
@@ -152,12 +152,15 @@ pub fn save(db: &Connection, p: &Value, now: i64) -> Result<Value> {
     }
     let sid = p["session_id"].as_str().filter(|s| !s.is_empty());
     if let Some(sid) = sid {
-        if store::row(
-            db,
-            "SELECT id FROM sessions WHERE id=? AND workspace_id=?",
-            params![sid, workspace],
-        )?
-        .is_null()
+        let remote = workspace.starts_with("remote:");
+        if (remote && uuid::Uuid::parse_str(sid).is_err())
+            || (!remote
+                && store::row(
+                    db,
+                    "SELECT id FROM sessions WHERE id=? AND workspace_id=?",
+                    params![sid, workspace],
+                )?
+                .is_null())
         {
             return Err("알림 대상 세션이 이 워크스페이스에 없습니다.".into());
         }
@@ -196,7 +199,7 @@ pub fn delete(db: &Connection, id: &str) -> Result<Value> {
     Ok(json!({"ok":true}))
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct QuotaNotice {
     pub provider: String,
     pub kind: String,

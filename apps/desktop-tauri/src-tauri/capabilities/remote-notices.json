@@ -1,0 +1,6 @@
+{
+  "identifier": "remote-notices",
+  "description": "SSH and Docker workspaces receive local notification and reminder updates.",
+  "windows": ["ssh-workspace", "docker-workspace"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

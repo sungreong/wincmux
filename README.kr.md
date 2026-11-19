@@ -1,6 +1,6 @@
 # WinCMux
 
-[English](README.md) · [최신 설치 파일](https://github.com/sungreong/wincmux/releases/tag/v0.2.94) · [변경 이력](CHANGELOG.kr.md) · [Windows 빌드](../../actions) · [성능 평가](docs/evaluation.md)
+[English](README.md) · [최신 Windows x64 설치 파일](https://github.com/sungreong/wincmux/releases/latest) · [변경 이력](CHANGELOG.kr.md) · [Windows 빌드](../../actions) · [성능 평가](docs/evaluation.md)
 
 WinCMux는 Codex CLI, Claude Code, PowerShell 등을 여러 pane에서 쓰는 Windows 터미널 앱입니다. Tauri·WebView2·xterm.js 화면을 Rust와 Windows ConPTY에 연결합니다. 설치된 앱은 자체 코어를 실행하는 데 Node.js가 필요 없습니다.
 
@@ -17,7 +17,31 @@ WinCMux는 Codex CLI, Claude Code, PowerShell 등을 여러 pane에서 쓰는 Wi
 
 ![한글과 여러 줄 초안을 표시한 WinCMux 입력창](assets/prompt-editor.png)
 
-**Ctrl+Enter**로 추가한 대기열은 각 입력창 바로 위에 표시됩니다. 에이전트가 없는 일반 터미널에서는 기존처럼 바로 제출합니다. **삽입만**은 내용을 넣고 제출을 기다립니다. 입력창을 비운 상태에서 **터미널 제출**을 누르면 터미널의 현재 입력을 제출합니다.
+대기열은 각 입력창 바로 위에 표시됩니다. 제출하거나 취소한 항목은 목록에서 바로 사라지며, 실패 항목은 입력창으로 복원하거나 지울 수 있습니다. 에이전트가 없는 일반 터미널에서는 **Ctrl+Enter**로 바로 제출합니다. **삽입만**은 내용을 넣고 제출을 기다립니다. 입력창을 비운 채 **터미널 제출**을 누르면 터미널에 작성된 내용을 제출합니다.
+
+## 로컬 Docker
+
+상단 **로컬 Docker**를 열고 이 PC에서 실행 중인 Linux 컨테이너를 선택합니다. 폴더 아이콘으로 컨테이너 내부 프로젝트를 열면 터미널과 파일·Git 보기가 그 폴더를 사용합니다. 마지막에 연 컨테이너와 폴더는 이 PC에 저장됩니다. 컨테이너 검색 창의 **새로 고침**으로 실행 중인 대상을 다시 불러올 수 있습니다.
+
+## 원격 SSH 작업공간
+
+상단의 **원격 SSH**에서 Windows의 `%USERPROFILE%\.ssh\config`에 등록한 별칭을 고르거나, **직접 입력**에서 호스트·사용자·포트와 선택 사항인 개인 키를 지정합니다. **연결 테스트**의 결과는 설정 화면에 표시됩니다. **연결**에 성공하면 원격 작업공간이 열리고 서버가 저장 목록에 추가됩니다. 신규 서버 키는 관리자에게 받은 지문과 비교한 후 신뢰하세요. 실제 연결에서 **다음 연결에 비밀번호 사용**을 선택하면 로그인에 성공한 비밀번호를 Windows 자격 증명 관리자에 저장합니다.
+
+**VS Code에서 SSH 설정 열기**로 `config`를 편집할 수 있습니다. WinCMux 창으로 돌아오거나 **목록 새로 고침**을 누르면 별칭 목록이 업데이트됩니다. 직접 입력한 연결은 테스트에 성공한 뒤 **Windows SSH에 저장**으로 별칭을 추가할 수 있습니다.
+
+연결 후 폴더 아이콘으로 작업 폴더를 엽니다. 대상 옆의 **Docker 컨테이너 접속** 아이콘에서 컨테이너와 내부 폴더를 고르면 별도 탭에서 선택한 도구가 새로 실행됩니다. Docker 탭의 **닫기**는 해당 탭의 터미널을 종료합니다. 실행 중인 컨테이너와 SSH 서버 연결은 유지됩니다. **폴더 저장** 아이콘을 누르면 다음 SSH 연결 때 그 위치를 다시 엽니다.
+
+**+ Claude Code**와 **+ Codex**는 선택한 환경에 설치된 CLI를 새 터미널에서 실행합니다. 메시지를 전송하면 터미널의 입력 상태를 확인하고, 작업 중이면 해당 pane의 대기열에서 다음 입력 시점을 기다립니다.
+
+SSH와 로컬 Docker의 pane은 창 높이에 맞춰 조절됩니다. 출력은 pane 안에서 스크롤되고 하단 입력창은 제자리에 표시됩니다. pane 아이콘으로 오른쪽·아래 분할, 글자 크기 조절, 파일 보기, 닫기를 실행합니다. `Ctrl+Alt+Q`로 선택한 pane을 닫을 수도 있습니다. 상단 종 아이콘은 작업 완료·입력 요청·사용 한도 알림을, 시계 아이콘은 예약 알림을 엽니다.
+
+**VS Code에서 열기**는 Windows SSH 별칭과 VS Code의 Remote - SSH 확장을 사용합니다. 컨테이너 작업공간이면 VS Code에서 **Dev Containers: Attach to Running Container**를 실행해 같은 컨테이너를 선택합니다. WinCMux의 Docker 접속에는 원격 계정의 Docker 접근 권한과 대상 컨테이너의 `sh`가 필요합니다.
+
+## MCP 제어
+
+MCP는 로컬 작업공간에서 사용할 수 있습니다. 원격 SSH와 Docker 컨테이너는 별도 창에서 열리며 세션 제어와 화면 캡처의 범위에서 제외됩니다.
+
+상단 **MCP**에서 로컬 서버 연결 명령과 지원 도구를 확인할 수 있습니다. MCP 클라이언트에서 워크스페이스·터미널 pane을 조회하고, 그룹 생성·이름 변경·삭제, 그룹에서 터미널 열기, pane 분할·선택, 터미널 출력 읽기와 후속 입력 예약을 할 수 있습니다. 연결 방법과 도구 인수는 [MCP 도구 안내](bridge/mcp/README.md)를 참고하세요.
 
 ## 파일·Git·Agent 보기
 
@@ -36,7 +60,7 @@ WinCMux는 Codex CLI, Claude Code, PowerShell 등을 여러 pane에서 쓰는 Wi
 
 ## 백그라운드 코어와 창 닫기
 
-화면과 실행 코어를 분리했습니다. 창의 X에서 **창만 닫기**를 선택하면 터미널·셸·에이전트·개발 서버는 `wincmux-core.exe`에서 계속 실행됩니다. 다시 열면 기존 작업과 터미널 화면에 연결됩니다. 화면이 닫힌 동안에는 전용 WebView2를 유지하지 않습니다.
+로컬 Windows 터미널은 화면과 실행 코어가 분리되어 있습니다. 메인 창의 X에서 **창만 닫기**를 선택하면 로컬 터미널·셸·에이전트·개발 서버는 `wincmux-core.exe`에서 계속 실행됩니다. 다시 열면 기존 작업과 터미널 화면에 연결됩니다. SSH와 Docker의 연결된 터미널 세션은 각 작업공간 창에서 관리합니다.
 
 | 상황 | 동작 |
 |---|---|
@@ -104,7 +128,7 @@ DB는 `%APPDATA%\WinCMux-Tauri\wincmux.db`에 저장됩니다. 이전 SQLite DB�
 
 [아키텍처](docs/architecture.md) · [기능](docs/features.md) · [JSON-RPC 브리지](bridge/README.md)
 
-창을 닫아도 터미널 작업은 백그라운드 코어에서 계속 실행됩니다. 다시 열면 기존 작업에 연결됩니다. 모든 작업을 끝내려면 **완전히 종료** 또는 트레이 메뉴를 사용하세요. 업데이트·삭제 전에 실행 중인 터미널을 종료해야 합니다. [구조 설명](docs/architecture.md)을 참고하세요.
+업데이트·삭제 전에 실행 중인 터미널을 종료하세요. 모든 로컬 작업을 끝내려면 **완전히 종료** 또는 트레이 메뉴를 사용합니다. [구조 설명](docs/architecture.md)
 
 ## 참고 자료
 

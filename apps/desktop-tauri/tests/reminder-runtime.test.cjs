@@ -82,8 +82,9 @@ test('manual and detected reminders persist, deduplicate and fire without a UI o
       } else {
         assert.equal(before[0].provider,provider);
         await client.rpc('session.write',{session_id:sid,data:`#quota:${provider}#`});
-        await until(async()=> (await client.rpc('reminder.list')).items.find(r=>r.id===before[0].id)?.status==='sent','detected due '+provider);
-        assert.equal((await client.rpc('reminder.list')).items.filter(r=>r.session_id===sid).length,1,'repaint does not duplicate');
+        await until(async()=> (await client.rpc('notify.unread',{})).items.some(n=>n.kind==='reminder_due'&&n.session_id===sid),'detected due '+provider);
+        assert.equal((await client.rpc('reminder.list')).items.filter(r=>r.session_id===sid).length,0,'expired automatic reminder is removed');
+        assert.equal((await client.rpc('notify.unread',{})).items.filter(n=>n.kind==='reminder_due'&&n.session_id===sid).length,1,'repaint does not duplicate delivery');
       }
       await client.rpc('session.close',{session_id:sid});
     }

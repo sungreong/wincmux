@@ -1711,7 +1711,7 @@ function renderNotifications() {
 
     const label = document.createElement("div");
     label.className = "notif-group-title";
-    label.textContent = `${workspaceNameById(workspaceId)} (${entries.length})`;
+    label.textContent = `${entries[0]?.row.workspace_name || workspaceNameById(workspaceId)} (${entries.length})`;
 
     const markBtn = document.createElement("button");
     markBtn.className = "notif-group-mark";

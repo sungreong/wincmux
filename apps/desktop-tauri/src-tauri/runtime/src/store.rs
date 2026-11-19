@@ -30,11 +30,11 @@ pub fn open(path: &Path) -> Result<Connection> {
     db.execute_batch(&schema.base)?;
     let current: u32 =
         db.query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))?;
-    if current > 15 {
+    if current > 17 {
         return Err(format!("unsupported database schema version: {current}").into());
     }
-    if current < 15 && existed && path.to_string_lossy() != ":memory:" {
-        let backup = path.with_extension(format!("pre-v15-{}.bak", id()));
+    if current < 17 && existed && path.to_string_lossy() != ":memory:" {
+        let backup = path.with_extension(format!("pre-v17-{}.bak", id()));
         db.backup(rusqlite::DatabaseName::Main, &backup, None)?;
     }
     for (version, statements) in schema.migrations {
@@ -53,6 +53,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     }
     db.execute("UPDATE agent_followups SET status='failed',result='delivery interrupted before confirmation',updated_at=strftime('%s','now') WHERE status='claimed'", [])?;
     db.execute("UPDATE agent_followups SET status='failed',result='target session ended when core restarted',updated_at=strftime('%s','now') WHERE status IN ('pending','paused')", [])?;
+    crate::followups::prune_completed(&db, None);
     db.execute(
         &format!("UPDATE sessions SET status='exited', ended_at={NOW} WHERE status='running'"),
         [],
@@ -219,8 +220,22 @@ pub fn dispatch(db: &Connection, method: &str, p: &Value) -> Result<Value> {
         }
         "health.check" => Ok(json!({"status":"ok"})),
         "workspace.list" => Ok(
-            json!({"workspaces":rows(db,"SELECT * FROM workspaces ORDER BY pinned DESC, sort_order, last_active DESC",[])?}),
+            json!({"workspaces":rows(db,"SELECT * FROM workspaces WHERE id NOT LIKE 'remote:%' ORDER BY pinned DESC, sort_order, last_active DESC",[])?}),
         ),
+        "remote_project.register" => {
+            let id = text(p, "id")?;
+            let backend = text(p, "backend")?;
+            let path = text(p, "path")?;
+            if !matches!(backend, "ssh" | "docker")
+                || !id.starts_with(&format!("remote:{backend}:"))
+                || !path.starts_with('/')
+            {
+                return Err("invalid remote notification project".into());
+            }
+            db.execute(&format!("INSERT INTO workspaces(id,name,path,backend,last_active) VALUES(?,?,?,?,{NOW}) ON CONFLICT(id) DO UPDATE SET name=excluded.name,last_active=excluded.last_active"),
+                params![id, text(p,"name")?, path, backend])?;
+            Ok(ok)
+        }
         "workspace.create" => {
             let tx = db.unchecked_transaction()?;
             let id = id();
@@ -421,11 +436,9 @@ pub fn dispatch(db: &Connection, method: &str, p: &Value) -> Result<Value> {
         "ai.session.delete" => Ok(
             json!({"ok":true,"deleted":db.execute("DELETE FROM ai_sessions WHERE id=?",[text(p,"ai_session_id")?])?}),
         ),
-        "notify.get" => Ok(
-            json!({"notification":row(db,"SELECT * FROM notifications WHERE id=?",[text(p,"notification_id")?])?}),
-        ),
+        "notify.get" => Ok(json!({"notification":notification(db,text(p,"notification_id")?)?})),
         "notify.unread" => {
-            let items = rows(db,"SELECT * FROM notifications WHERE read_at IS NULL AND (?1 IS NULL OR workspace_id=?1) ORDER BY created_at DESC",[p["workspace_id"].as_str()])?;
+            let items = rows(db,"SELECT n.*, w.name AS workspace_name, w.path AS workspace_path FROM notifications n JOIN workspaces w ON w.id=n.workspace_id WHERE n.read_at IS NULL AND (?1 IS NULL OR n.workspace_id=?1) AND (?2 IS NULL OR (w.id LIKE 'remote:%' AND w.backend=?2)) ORDER BY n.created_at DESC",params![p["workspace_id"].as_str(),p["remote_backend"].as_str()])?;
             Ok(json!({"count":items.len(),"items":items}))
         }
         "notify.mark_read" => {
@@ -436,7 +449,7 @@ pub fn dispatch(db: &Connection, method: &str, p: &Value) -> Result<Value> {
             Ok(ok)
         }
         "notify.clear" => {
-            db.execute(&format!("UPDATE notifications SET read_at={NOW} WHERE read_at IS NULL AND (?1 IS NULL OR workspace_id=?1)"),[p["workspace_id"].as_str()])?;
+            db.execute(&format!("UPDATE notifications SET read_at={NOW} WHERE read_at IS NULL AND (?1 IS NULL OR workspace_id=?1) AND (?2 IS NULL OR workspace_id IN (SELECT id FROM workspaces WHERE id LIKE 'remote:%' AND backend=?2))"),params![p["workspace_id"].as_str(),p["remote_backend"].as_str()])?;
             Ok(ok)
         }
         "notify.delivery_ack" => {
@@ -503,6 +516,10 @@ pub fn dispatch(db: &Connection, method: &str, p: &Value) -> Result<Value> {
     }
 }
 
+fn notification(db: &Connection, id: &str) -> Result<Value> {
+    row(db, "SELECT n.*,w.name AS workspace_name,w.path AS workspace_path FROM notifications n JOIN workspaces w ON w.id=n.workspace_id WHERE n.id=?", [id])
+}
+
 pub fn add_notification(db: &Connection, p: &Value) -> Result<(Value, bool)> {
     let ws = text(p, "workspace_id")?;
     let title = text(p, "title")?;
@@ -528,10 +545,7 @@ pub fn add_notification(db: &Connection, p: &Value) -> Result<(Value, bool)> {
                   VALUES(?,?,?,?,?,?,?,?,?,{NOW},?,?,?)"),
         params![id,ws,sid,p["pane_id"].as_str(),kind,p["source_kind"].as_str().unwrap_or("cli"),title,body,p["level"].as_str().unwrap_or("info"),dedup,dedup,p["source"].as_str().unwrap_or("cli")],
     )?;
-    Ok((
-        row(db, "SELECT * FROM notifications WHERE id=?", [id])?,
-        false,
-    ))
+    Ok((notification(db, &id)?, false))
 }
 
 #[cfg(test)]
@@ -585,7 +599,7 @@ mod tests {
             )?;
             reminder_id = reminder["id"].as_str().unwrap().to_owned();
             db.execute_batch(
-                "DELETE FROM schema_versions WHERE version=15; DROP TABLE mcp_activity; DELETE FROM schema_versions WHERE version=14; DROP TABLE mcp_settings; DELETE FROM schema_versions WHERE version=13; DELETE FROM schema_versions WHERE version=12; DROP INDEX idx_agent_followups_due; DROP TABLE agent_followups; DELETE FROM schema_versions WHERE version=11; DROP INDEX idx_notifications_scheduled_delivery; ALTER TABLE reminders DROP COLUMN observed_at; DELETE FROM schema_versions WHERE version=10;",
+                "DELETE FROM schema_versions WHERE version=17; DELETE FROM schema_versions WHERE version=16; DELETE FROM schema_versions WHERE version=15; DROP TABLE mcp_activity; DELETE FROM schema_versions WHERE version=14; DROP TABLE mcp_settings; DELETE FROM schema_versions WHERE version=13; DELETE FROM schema_versions WHERE version=12; DROP INDEX idx_agent_followups_due; DROP TABLE agent_followups; DELETE FROM schema_versions WHERE version=11; DROP INDEX idx_notifications_scheduled_delivery; ALTER TABLE reminders DROP COLUMN observed_at; DELETE FROM schema_versions WHERE version=10;",
             )?;
         }
         let db = open(&path)?;
@@ -599,11 +613,11 @@ mod tests {
         assert_eq!(
             db.query_row("SELECT MAX(version) FROM schema_versions", [], |r| r
                 .get::<_, u32>(0))?,
-            15
+            17
         );
         assert!(std::fs::read_dir(&root)?
             .filter_map(|e| e.ok())
-            .any(|e| e.file_name().to_string_lossy().contains("pre-v15")));
+            .any(|e| e.file_name().to_string_lossy().contains("pre-v17")));
         Ok(())
     }
 
@@ -615,7 +629,7 @@ mod tests {
         {
             let db = open(&path)?;
             db.execute("INSERT INTO agent_followups(id,workspace_id,session_id,provider,agent_id,anchor_pid,anchor_started,prompt,due_at,status,created_at,updated_at) VALUES('old','ws','session','codex','agent',1,1,'Retained prompt',1,'pending',1,1)", [])?;
-            db.execute_batch("ALTER TABLE agent_followups DROP COLUMN completion_after; ALTER TABLE agent_followups DROP COLUMN delivery_mode; DELETE FROM schema_versions WHERE version=15; DROP TABLE mcp_activity; DELETE FROM schema_versions WHERE version=14; DROP TABLE mcp_settings; DELETE FROM schema_versions WHERE version=13; DELETE FROM schema_versions WHERE version=12;")?;
+            db.execute_batch("ALTER TABLE agent_followups DROP COLUMN completion_after; ALTER TABLE agent_followups DROP COLUMN delivery_mode; DELETE FROM schema_versions WHERE version=17; DELETE FROM schema_versions WHERE version=16; DELETE FROM schema_versions WHERE version=15; DROP TABLE mcp_activity; DELETE FROM schema_versions WHERE version=14; DROP TABLE mcp_settings; DELETE FROM schema_versions WHERE version=13; DELETE FROM schema_versions WHERE version=12;")?;
         }
         let db = open(&path)?;
         let row = row(&db, "SELECT prompt,status,delivery_mode,completion_after FROM agent_followups WHERE id='old'", [])?;
@@ -636,6 +650,10 @@ mod tests {
         {
             let db = open(&path)?;
             db.execute("UPDATE mcp_settings SET enabled=0 WHERE id=1", [])?;
+            db.execute(
+                "UPDATE mcp_settings SET development_folder=?1 WHERE id=1",
+                [root.to_string_lossy().as_ref()],
+            )?;
         }
         let db = open(&path)?;
         let enabled: bool =
@@ -643,6 +661,12 @@ mod tests {
                 row.get(0)
             })?;
         assert!(!enabled);
+        let folder: String = db.query_row(
+            "SELECT development_folder FROM mcp_settings WHERE id=1",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(folder, root.to_string_lossy());
         drop(db);
         std::fs::remove_dir_all(root)?;
         Ok(())

@@ -14,6 +14,7 @@ process.stdin.on('data', data => {
       prompt: 'must never reach WinCMux', tool_input: { secret: 'must never reach WinCMux' } };
     const result = spawnSync(core, ['--agent-hook', 'codex', hook[1]], { input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true });
     process.stdout.write(`HOOK_EXIT:${hook[1]}:${result.status}\r\n`);
+    if (hook[1] === 'Stop') process.stdout.write('\x1b[10;1H\x1b[2K› \x1b[10;3H');
   }
   if (pending.includes('#paste-on#')) {
     pending = pending.replace('#paste-on#', '');

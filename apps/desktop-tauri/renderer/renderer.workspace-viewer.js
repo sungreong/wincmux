@@ -1,7 +1,7 @@
 // A small, on-demand companion pane. It creates no terminal and loads only open folders.
 (() => {
   const $v = (id) => document.getElementById(id);
-  const viewer = { open: false, tab: "files", workspaceId: null, selected: null, copied: null, previewText: null, markdownText: null, markdownSource: false, generation: 0, listGeneration: 0, highlightGeneration: 0, gitPage: 0, codeLines: [], findMatches: [], findIndex: -1, expandedByWorkspace: new Map(), agentCollapsedByWorkspace: new Map(), searchFolder: null };
+  const viewer = { open: false, tab: "files", workspaceId: null, selected: null, copied: null, previewText: null, markdownText: null, markdownSource: false, generation: 0, listGeneration: 0, highlightGeneration: 0, gitPage: 0, codeLines: [], findMatches: [], findIndex: -1, expandedByWorkspace: new Map(), agentCollapsedByWorkspace: new Map(), searchFolder: null, focusFolder: "" };
   const expanded = () => {
     if (!viewer.expandedByWorkspace.has(viewer.workspaceId)) viewer.expandedByWorkspace.set(viewer.workspaceId, new Set());
     return viewer.expandedByWorkspace.get(viewer.workspaceId);
@@ -19,9 +19,33 @@
     else { viewer.selected = null; viewer.previewText = null; updateActions(); }
   };
   const updateScope = () => {
-    $v("viewerSearchScope").disabled = !viewer.searchFolder;
-    if (!viewer.searchFolder) $v("viewerSearchScope").checked = false;
-    $v("viewerScopeName").textContent = viewer.searchFolder ? `(${viewer.searchFolder})` : "";
+    const scope = viewer.focusFolder || viewer.searchFolder;
+    $v("viewerSearchScope").disabled = !scope;
+    if (!scope) $v("viewerSearchScope").checked = false;
+    $v("viewerScopeName").textContent = scope ? `(${scope})` : "";
+    $v("viewerScopeName").title = scope || "";
+  };
+  const updateFolderBar = () => {
+    $v("viewerFolderBar").hidden = viewer.tab !== "files";
+    $v("viewerFolderPath").textContent = viewer.focusFolder || "워크스페이스 전체";
+    $v("viewerFolderPath").title = $v("viewerFolderPath").textContent;
+    $v("viewerFocusFolder").disabled = viewer.tab !== "files" || !viewer.selected?.directory || viewer.selected.relativePath === viewer.focusFolder;
+    $v("viewerParentFolder").disabled = !viewer.focusFolder;
+    $v("viewerWorkspaceRoot").disabled = !viewer.focusFolder;
+  };
+  const focusFolder = (path) => {
+    viewer.focusFolder = path;
+    viewer.selected = null;
+    viewer.previewText = null;
+    viewer.markdownText = null;
+    viewer.searchFolder = path || null;
+    $v("viewerSearchScope").checked = Boolean(path);
+    $v("viewerPreviewTitle").textContent = "파일을 선택하세요";
+    $v("viewerPreview").replaceChildren();
+    $v("viewerFindBar").hidden = true;
+    updateScope();
+    updateActions();
+    if (viewer.open && viewer.tab === "files") void loadFiles();
   };
   const message = (text) => { $v("viewerMessage").textContent = text; };
   const workspace = () => selectedWorkspace();
@@ -217,6 +241,7 @@
 
   function updateActions() {
     const selected = viewer.selected;
+    updateFolderBar();
     $v("viewerCopyPath").disabled = !selected;
     $v("viewerCopyContent").disabled = viewer.previewText == null;
     $v("viewerCopyFile").disabled = !selected || selected.directory;
@@ -356,7 +381,7 @@
       const result = await call("viewer-search", {
         pattern,
         contentQuery: $v("viewerContentInput").value.trim(),
-        scopePath: $v("viewerSearchScope").checked ? viewer.searchFolder : "",
+        scopePath: $v("viewerSearchScope").checked ? (viewer.focusFolder || viewer.searchFolder) : "",
         includeExcluded: $v("viewerSearchIncludeExcluded").checked
       });
       if (viewer.workspaceId !== wsId || viewer.tab !== "files" || !viewer.open || viewer.listGeneration !== listGeneration) return;
@@ -411,10 +436,11 @@
     const wsId = ws.id;
     const listGeneration = ++viewer.listGeneration;
     try {
-      const result = await call("viewer-list", { relativePath: "" });
+      const folder = viewer.focusFolder;
+      const result = await call("viewer-list", { relativePath: folder });
       if (viewer.workspaceId !== wsId || !viewer.open || viewer.tab !== "files" || viewer.listGeneration !== listGeneration) return;
       tree.replaceChildren();
-      const root = { name: ws.name || ws.path, relativePath: "", directory: true };
+      const root = { name: folder ? folder.split("/").pop() : ws.name || ws.path, relativePath: folder, directory: true };
       const rootRow = document.createElement("button");
       rootRow.className = "workspace-viewer-row workspace-viewer-root";
       rootRow.textContent = `▾ 📁 ${root.name}`;
@@ -601,6 +627,7 @@
     $v("viewerAgentList").hidden = tab !== "agents";
     $v("viewerGitPager").hidden = tab !== "git";
     $v("viewerSearchForm").hidden = tab !== "files";
+    updateFolderBar();
     $v("viewerPreviewTitle").textContent = "파일을 선택하세요";
     $v("viewerPreview").replaceChildren();
     $v("viewerFindBar").hidden = true;
@@ -615,11 +642,10 @@
 
   function setOpen(open) {
     viewer.open = open;
-    $v("workspaceContent").classList.toggle("viewer-open", open);
-    $v("workspaceViewer").hidden = !open;
-    $v("workspaceViewerResize").hidden = !open;
-    $v("workspaceViewerBtn").setAttribute("aria-expanded", String(open));
-    $v("workspaceViewerBtn").setAttribute("aria-pressed", String(open));
+    window.wincmuxViewerPanel.setOpen({
+      button: $v("workspaceViewerBtn"), content: $v("workspaceContent"),
+      panel: $v("workspaceViewer"), divider: $v("workspaceViewerResize")
+    }, open);
     if (open) {
       viewer.workspaceId = workspace()?.id ?? null;
       $v("viewerRootName").textContent = workspace()?.name ?? "";
@@ -670,6 +696,13 @@
     $v("workspaceViewerBtn").addEventListener("click", () => setOpen(!viewer.open));
     $v("viewerClose").addEventListener("click", () => setOpen(false));
     $v("viewerRefresh").addEventListener("click", refresh);
+    $v("viewerFocusFolder").addEventListener("click", () => {
+      if (viewer.selected?.directory) focusFolder(viewer.selected.relativePath);
+    });
+    $v("viewerParentFolder").addEventListener("click", () => {
+      if (viewer.focusFolder) focusFolder(viewer.focusFolder.split("/").slice(0, -1).join("/"));
+    });
+    $v("viewerWorkspaceRoot").addEventListener("click", () => focusFolder(""));
     $v("viewerFilesTab").addEventListener("click", () => setTab("files"));
     $v("viewerGitTab").addEventListener("click", () => setTab("git"));
     $v("viewerAgentsTab").addEventListener("click", () => setTab("agents"));
@@ -727,19 +760,7 @@
         if (viewer.tab === "files") await loadFiles();
       } catch (error) { showError(error); }
     });
-    const splitter = $v("workspaceViewerResize");
-    splitter.addEventListener("pointerdown", (event) => {
-      splitter.setPointerCapture(event.pointerId);
-      const move = (ev) => {
-        const rect = $v("workspaceContent").getBoundingClientRect();
-        const width = Math.min(Math.max(rect.right - ev.clientX, 260), Math.max(260, rect.width - 300));
-        $v("workspaceContent").style.setProperty("--viewer-width", `${width}px`);
-        globalThis.fitAllPanes?.();
-      };
-      const end = () => { splitter.removeEventListener("pointermove", move); splitter.removeEventListener("pointerup", end); };
-      splitter.addEventListener("pointermove", move);
-      splitter.addEventListener("pointerup", end);
-    });
+    window.wincmuxViewerPanel.bindViewerWidth($v("workspaceContent"), $v("workspaceViewer"), $v("workspaceViewerResize"), () => globalThis.fitAllPanes?.());
     const innerSplitter = $v("viewerInnerResize");
     innerSplitter.addEventListener("pointerdown", (event) => {
       innerSplitter.setPointerCapture(event.pointerId);
@@ -758,6 +779,7 @@
     viewer.workspaceId = workspace()?.id ?? null;
     viewer.copied = null;
     viewer.searchFolder = null;
+    viewer.focusFolder = "";
     viewer.gitPage = 0;
     updateScope();
     ++viewer.generation;

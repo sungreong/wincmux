@@ -1,6 +1,6 @@
 # WinCMux
 
-[한국어](README.kr.md) · [Latest installer](https://github.com/sungreong/wincmux/releases/tag/v0.2.94) · [Changelog](CHANGELOG.md) · [Windows builds](../../actions) · [Performance evaluation](docs/evaluation.md)
+[한국어](README.kr.md) · [Latest Windows x64 installer](https://github.com/sungreong/wincmux/releases/latest) · [Changelog](CHANGELOG.md) · [Windows builds](../../actions) · [Performance evaluation](docs/evaluation.md)
 
 WinCMux is a Windows terminal workspace for Codex CLI, Claude Code, PowerShell, and other CLI tools. It uses Tauri, WebView2, xterm.js, and a Rust core built on Windows ConPTY. The installed app runs its core without Node.js.
 
@@ -16,7 +16,31 @@ WinCMux is a Windows terminal workspace for Codex CLI, Claude Code, PowerShell, 
 
 ![WinCMux Korean prompt editor with a multiline draft](assets/prompt-editor.png)
 
-The per-pane queue appears above the editor and submits messages in order. For a terminal without an agent, **Ctrl+Enter** submits directly. **삽입만** only pastes the draft; **터미널 제출** submits the terminal's existing input.
+The per-pane queue appears above the editor and submits messages in order. Submitted and cancelled entries disappear immediately. Failed entries can be restored to the editor or dismissed. In a terminal without an agent, **Ctrl+Enter** submits directly. **삽입만** pastes the draft. With an empty editor, **터미널 제출** submits the terminal's existing input.
+
+## Local Docker workspaces
+
+Open **로컬 Docker** to list the running Linux containers on this PC. Choose a container and use the folder icon to open a project folder inside it. The terminal, file viewer, content search, and Git views use that folder. WinCMux saves the last container and folder on this PC. Refresh the list from the container picker when the engine or containers change.
+
+## Remote SSH workspaces
+
+Open **원격 SSH** from the toolbar. Choose an alias from Windows OpenSSH's `%USERPROFILE%\.ssh\config`, or enter the host, username, port, and optional private key. **연결 테스트** reports the test result on the setup screen. **연결** opens the remote workspace and adds the server to the saved list. The password prompt can remember a successful password in Windows Credential Manager when connecting.
+
+Use **VS Code에서 SSH 설정 열기** to edit `config`. Alias changes appear when WinCMux regains focus or you click **목록 새로 고침**. After testing a manual connection, use **Windows SSH에 저장** to register it as an alias.
+
+After connecting, pick a server folder or use **Docker 컨테이너 접속** beside the target selector to open a container in its own tab. Closing that tab ends its attached terminals. The container and SSH connection stay running. Use the **폴더 저장** icon to reopen the same location on the next SSH connection. The remote account needs access to `docker`, and the container must provide `sh`.
+
+The **+ Claude Code** and **+ Codex** buttons start the corresponding CLI installed in the selected environment. Prompt input waits for the agent's terminal to accept the next message.
+
+SSH and local Docker panes fit the window height. Output scrolls inside the pane, with the composer below it. Pane icons split right or down, adjust the font, open the file viewer for the pane's folder, and close the pane. `Ctrl+Alt+Q` closes the focused pane. The bell opens completion, input-request, and usage-limit alerts. The clock opens scheduled reminders.
+
+**VS Code에서 열기** opens the workspace on the same Windows SSH alias with the VS Code Remote - SSH extension. For a container workspace, use **Dev Containers: Attach to Running Container** in the VS Code remote window.
+
+## MCP control
+
+MCP tools and screen capture are available for local workspaces. SSH and container workspaces open in a separate desktop window outside that scope.
+
+Open **MCP** in the toolbar to copy the local server command and inspect supported tools. An MCP client can list workspaces and terminal panes, create and rename groups, open a visible PowerShell or agent terminal directly in a group, split or focus a pane, read terminal output, and queue follow-up prompts. See the [MCP tool guide](bridge/mcp/README.md) for tool arguments and connection steps.
 
 ## Workspace viewer
 
@@ -34,7 +58,7 @@ Select a workspace and click **파일 보기** in the toolbar. The viewer opens 
 
 ## Background core and window closing
 
-The desktop and execution core have independent lifetimes. Choosing **Close window** from the X dialog ends the UI while `wincmux-core.exe` keeps shells, agents and development servers running. Reopening reconnects to the same jobs and terminal screen. Dedicated WebView2 processes are released while the UI is closed.
+Local Windows terminals run in the background core. Choosing **Close window** from the main window's X dialog ends the UI while `wincmux-core.exe` keeps local shells, agents and development servers running. Reopening reconnects to the same jobs and terminal screen. SSH and Docker terminal connections belong to their workspace windows.
 
 | Situation | Behavior |
 |---|---|
@@ -102,7 +126,7 @@ The database lives at `%APPDATA%\WinCMux-Tauri\wincmux.db`. To carry over a prev
 
 [Architecture](docs/architecture.md) · [Features](docs/features.md) · [JSON-RPC bridge](bridge/README.md)
 
-Windows background runtime: closing the window keeps live terminals running. Reopen to reconnect; use **완전히 종료** or the tray menu to end all jobs. Finish running terminals before installing or uninstalling an update. See [architecture](docs/architecture.md).
+Finish running terminals before installing or uninstalling an update. In the main window, use **완전히 종료** or the tray menu to end local Windows terminal jobs. See [architecture](docs/architecture.md).
 
 ## References
 

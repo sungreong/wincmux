@@ -8,6 +8,7 @@ const orderedFiles = [
   "renderer.shared.js",
   "renderer.launchers.js",
   "renderer.layout.js",
+  "pane-icons.js",
   "renderer.panes.js",
   "viewer-markdown.js",
   "viewer-highlighter.js",

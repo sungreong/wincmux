@@ -145,7 +145,7 @@ test('a fresh Claude composer sends a queued prompt before any completion', { ti
     const script = path.resolve(__dirname, 'terminal-followup-fixture.cjs').replaceAll("'", "''");
     await client.rpc('session.write', { session_id: sid, data: `& '${agent.replaceAll("'", "''")}' '${script}' --startup-claude\r` });
     const tail = async () => (await client.rpc('session.tail', { session_id: sid })).output;
-    await until(async () => (await tail()).includes('Claude Code v2.1.326'), 'Claude initial screen');
+    await until(async () => (await tail()).includes('Claude Code v'), 'Claude initial screen');
     const row = await client.rpc('followup.schedule', { session_id: sid, prompt: 'Hello on startup', delivery_mode: 'when_ready' });
     const status = async () => (await client.rpc('followup.list', { session_id: sid })).items.find(item => item.id === row.id)?.status;
     await until(async () => (await status()) === 'sent', 'first prompt sent without Stop', 12000).catch(async error => {
@@ -153,6 +153,45 @@ test('a fresh Claude composer sends a queued prompt before any completion', { ti
     });
     await until(async () => (await tail()).includes(`RECEIVED:${Buffer.from('Hello on startup').toString('base64')}`), 'Claude received first prompt');
     await client.rpc('session.close', { session_id: sid });
+    await client.rpc('runtime.shutdown');
+  } finally {
+    client?.close();
+    if (core.exitCode === null) core.kill();
+  }
+});
+
+test('Codex queues through a pasted draft redraw and waits until the next turn', { timeout: 25000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wincmux-codex-redraw-'));
+  const pipe = '\\\\.\\pipe\\wincmux-codex-redraw-' + randomUUID();
+  const agent = path.join(root, 'codex.exe');
+  fs.copyFileSync(process.execPath, agent);
+  const core = spawn(exe, ['--data-dir', root, '--pipe', pipe, '--no-tray'], { windowsHide: true, stdio: 'ignore' });
+  let client;
+  try {
+    client = await until(() => connect(pipe).catch(() => null), 'core');
+    const ws = (await client.rpc('workspace.create', { name: 'Codex redraw', path: root, backend: 'custom' })).workspace.id;
+    const sid = (await client.rpc('session.run', {
+      workspace_id: ws, cmd: agent, args: [path.join(__dirname, 'terminal-followup-fixture.cjs'), '--osc-codex'], cwd: root
+    })).session.session_id;
+    const call = (method, params = {}) => client.rpc(method, { session_id: sid, ...params });
+    const schedule = prompt => call('followup.schedule', { prompt, delivery_mode: 'when_ready' });
+    const receipt = async prompt => (await call('session.tail')).output.includes('RECEIVED:' + Buffer.from(prompt).toString('base64'));
+    const status = async id => (await call('followup.list')).items.find(item => item.id === id);
+    const first = await schedule('First Codex input');
+    const second = await schedule('Second Codex input');
+    await until(async () => {
+      const row = await status(first.id);
+      if (row?.status === 'failed') throw Error(row.result);
+      return await receipt('First Codex input');
+    }, 'first Codex input accepted after the paste redraw').catch(async error => {
+      const agent = (await call('agent.list')).items.find(item => item.session_id === sid);
+      throw Error(`${error.message}; detector=${JSON.stringify(agent)}; status=${(await status(first.id))?.status}; tail=${JSON.stringify((await call('session.tail')).output.slice(-1500))}`);
+    });
+    assert.equal((await status(second.id)).status, 'pending');
+    assert.equal(await receipt('Second Codex input'), false);
+    await call('session.write', { data: '#finish#' });
+    await until(() => receipt('Second Codex input'), 'second Codex input accepted after idle');
+    await call('session.close');
     await client.rpc('runtime.shutdown');
   } finally {
     client?.close();

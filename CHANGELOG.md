@@ -2,6 +2,63 @@
 
 [README](README.md) · [GitHub Releases](https://github.com/sungreong/wincmux/releases)
 
+## 0.2.105 — Remote pane height and Docker detach
+
+- SSH and local Docker terminal output scrolls within the pane, keeping its header and composer in view when the window shrinks.
+- Close the focused remote pane with `Ctrl+Alt+Q`. Closing a Docker tab ends its attached terminals and leaves the container running.
+- Submitted and cancelled prompts leave the visible queue immediately. Composer placeholders are recognized even when the terminal footer changes.
+- Folder navigation and search use separate rows in narrow file viewers.
+
+For the full set of changes since the previous public release, see [the 0.2.105 release notes](docs/releases/0.2.105.md).
+
+## 0.2.104 — SSH and Docker toolbar and alerts
+
+- The connected toolbar takes less space and reuses local pane controls.
+- SSH and local Docker workspaces report Claude Code and Codex completions, input requests, and usage limits.
+- Remote workspaces use the same reminder editor and scheduler. An alert can take you to its pane when the session is still open.
+
+## 0.2.103 — SSH and Docker environments and pane splits
+
+- SSH setup has separate Connect and Test connection actions. Successful connections appear in the saved list.
+- Open Windows SSH config in VS Code and register a tested manual connection as an SSH alias.
+- SSH hosts and Docker project folders open in separate tabs. A new environment starts a fresh session with the selected tool.
+- Split panes right or down and resize them in both SSH and local Docker workspaces.
+- Open or collapse the file viewer independently of the terminal.
+
+## 0.2.102 — Remote workspace and toolbar
+
+- Added Claude Code and Codex launchers, terminal state, queued input, and scheduled follow-ups to SSH and Docker workspaces.
+- Open a Docker container and select its project folder while keeping the SSH host panes open.
+- The file list fills the viewer when the preview is closed. Toolbar groups wrap to fit the window.
+
+## 0.2.101 — MCP setup guidance
+
+The MCP connection dialog explains how to check for Node.js. The default development folder follows the current Windows Documents location, including redirected folders.
+
+## 0.2.100 — Codex queue submission
+
+Queued Codex prompts still receive Enter when the composer redraws the pasted text. If Codex stops accepting input before submission, WinCMux leaves the draft in the terminal and asks the user to check it before retrying.
+
+## 0.2.99 — First input no longer waits for a completed turn
+
+Messages submitted while the agent is starting wait for the prompt to become ready. Messages added during work continue to send one at a time as the agent becomes ready. Follow-ups explicitly scheduled after completion still wait for a completion signal.
+
+## 0.2.98 — nested Codex process detection
+
+Queued input now recognizes the nearest Codex process when the CLI has child Codex helper processes. Previously the presence of multiple Codex processes incorrectly produced “no running Codex, Claude, or Gemini process was found” and left the composer blocked. The queue remains bound to one parent agent process and still rejects equally near, ambiguous agents.
+
+## 0.2.97 — ordered agent input
+
+The pane composer checks the live agent state, attached process, and existing queue before submission. During active work it queues new input and sends one item after each completion; an idle agent receives input immediately. If scheduling fails, the draft remains in the composer. The explicit terminal submit button still sends the terminal's own input.
+
+## 0.2.96 — Delivery and MCP workspace improvements
+
+Codex and Claude composer readiness is detected more reliably, and a failed direct send keeps the draft. Follow-up history shows sent and failed items and can restore their text. The file viewer can focus on one folder and return to its parent or the workspace root. MCP accepts an exact workspace name or path for terminal and group operations and attaches new terminals to visible panes. The default development folder is under Documents and can be changed in MCP settings. Workspaces created through MCP refresh the open app, and recent MCP activity shows workspace names.
+
+## 0.2.95 — MCP group control
+
+The local MCP server can rename and delete pane groups, focus a pane, and open a visible terminal directly in a chosen group. It reuses an empty pane or splits an occupied one. Group and focus changes made through MCP refresh the open app. A group deletion moves its running terminals to another group or Default.
+
 ## 0.2.94 — viewer, groups, and reminders
 
 The workspace viewer pages large Git change lists, searches file contents, and previews Markdown. Code previews show the detected language and offer language and in-file search. Bundled syntax highlighting also handles Windows line endings. New terminals ask which tool to run; panes created or split inside a group stay there. Duplicate usage-limit reminders are consolidated and completed automatic reminders leave the list. [Download the Windows x64 installer](https://github.com/sungreong/wincmux/releases/tag/v0.2.94).

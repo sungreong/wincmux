@@ -2,6 +2,7 @@ use crate::{
     detector::{missing_conversation, Conversation, Notice, Resume},
     followups,
     reminders::{self, LimitDetector},
+    screen::PromptAgent,
     store::{self, id, text, Result, NOW},
     terminal::{hidden_command, History, Spawned, Terminal},
 };
@@ -50,6 +51,7 @@ impl Filter {
 struct LiveSession {
     terminal: Arc<Terminal>,
     detector: Conversation,
+    prompt_agent: PromptAgent,
     quota: LimitDetector,
     hook_token: String,
     hook_anchor: Option<(u32, u64)>,
@@ -219,11 +221,19 @@ impl Core {
         match method {
             "runtime.info" => Ok(self.runtime_info()),
             "mcp.settings.get" => {
-                let enabled = self.db.lock().unwrap().query_row(
-                    "SELECT enabled FROM mcp_settings WHERE id=1",
+                let (enabled, configured): (bool, String) = self.db.lock().unwrap().query_row(
+                    "SELECT enabled,development_folder FROM mcp_settings WHERE id=1",
                     [],
-                    |row| row.get::<_, bool>(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )?;
+                let development_folder = if configured.is_empty() {
+                    crate::platform::documents_folder()
+                        .join("WinCMux MCP Development")
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    configured
+                };
                 let tools: Value =
                     serde_json::from_str(include_str!("../../../../../bridge/mcp/tools.json"))?;
                 let server_path = std::env::current_exe()?
@@ -237,22 +247,38 @@ impl Core {
                     })
                     .map(|path| path.to_string_lossy().into_owned());
                 Ok(
-                    json!({"enabled":enabled,"transport":"stdio","tools":tools,"server_path":server_path}),
+                    json!({"enabled":enabled,"transport":"stdio","tools":tools,"server_path":server_path,"development_folder":development_folder}),
                 )
             }
             "mcp.settings.save" => {
-                let enabled = p["enabled"].as_bool().ok_or("enabled must be a boolean")?;
-                self.db
-                    .lock()
-                    .unwrap()
-                    .execute("UPDATE mcp_settings SET enabled=?1 WHERE id=1", [enabled])?;
-                self.emit("mcp.settings.changed", json!({"enabled":enabled}));
-                Ok(json!({"enabled":enabled}))
+                if let Some(enabled) = p["enabled"].as_bool() {
+                    self.db
+                        .lock()
+                        .unwrap()
+                        .execute("UPDATE mcp_settings SET enabled=?1 WHERE id=1", [enabled])?;
+                }
+                if let Some(folder) = p["development_folder"].as_str() {
+                    let configured = if folder.trim().is_empty() {
+                        String::new()
+                    } else {
+                        store::path(folder)?.to_string_lossy().into_owned()
+                    };
+                    self.db.lock().unwrap().execute(
+                        "UPDATE mcp_settings SET development_folder=?1 WHERE id=1",
+                        [configured],
+                    )?;
+                }
+                if p["enabled"].as_bool().is_none() && p["development_folder"].as_str().is_none() {
+                    return Err("enabled or development_folder is required".into());
+                }
+                let result = self.rpc("mcp.settings.get", json!({}))?;
+                self.emit("mcp.settings.changed", json!({"enabled":result["enabled"],"development_folder":result["development_folder"]}));
+                Ok(result)
             }
             "mcp.activity.list" => {
                 let items = store::rows(
                     &self.db.lock().unwrap(),
-                    "SELECT at,tool,outcome FROM mcp_activity ORDER BY id DESC LIMIT 50",
+                    "SELECT at,tool,outcome,workspace_id,workspace_name FROM mcp_activity ORDER BY id DESC LIMIT 50",
                     [],
                 )?;
                 Ok(json!({"items":items}))
@@ -270,9 +296,28 @@ impl Core {
                     return Err("invalid MCP activity".into());
                 }
                 let db = self.db.lock().unwrap();
+                let workspace_id = p["workspace_id"]
+                    .as_str()
+                    .or_else(|| p["result_workspace_id"].as_str());
+                let workspace = if let Some(workspace_id) = workspace_id {
+                    store::rows(
+                        &db,
+                        "SELECT id,name FROM workspaces WHERE id=?",
+                        [workspace_id],
+                    )?
+                } else if let Some(session_id) = p["session_id"].as_str() {
+                    store::rows(&db, "SELECT w.id,w.name FROM workspaces w JOIN sessions s ON s.workspace_id=w.id WHERE s.id=?", [session_id])?
+                } else if let Some(followup_id) = p["followup_id"].as_str() {
+                    store::rows(&db, "SELECT w.id,w.name FROM workspaces w JOIN agent_followups f ON f.workspace_id=w.id WHERE f.id=?", [followup_id])?
+                } else {
+                    Vec::new()
+                };
+                let workspace = workspace.first();
                 db.execute(
-                    "INSERT INTO mcp_activity(at,tool,outcome) VALUES(?1,?2,?3)",
-                    params![chrono::Utc::now().timestamp(), tool, outcome],
+                    "INSERT INTO mcp_activity(at,tool,outcome,workspace_id,workspace_name) VALUES(?1,?2,?3,?4,?5)",
+                    params![chrono::Utc::now().timestamp(), tool, outcome,
+                        workspace.and_then(|item| item["id"].as_str()),
+                        workspace.and_then(|item| item["name"].as_str())],
                 )?;
                 db.execute("DELETE FROM mcp_activity WHERE id NOT IN (SELECT id FROM mcp_activity ORDER BY id DESC LIMIT 200)", [])?;
                 Ok(ok)
@@ -350,6 +395,7 @@ impl Core {
 
             "agent.list" => {
                 let sessions = self.sessions.lock().unwrap();
+                let check_process = p["include_process_presence"] == true;
                 let items: Vec<_> = sessions
                     .running
                     .iter()
@@ -357,6 +403,11 @@ impl Core {
                         let mut state = live.detector.snapshot();
                         state["session_id"] = json!(sid);
                         state["workspace_id"] = json!(live.terminal.workspace);
+                        if check_process {
+                            state["agent_process_attached"] =
+                                json!(crate::platform::terminal_agent_anchor(live.terminal.pid)
+                                    .is_some());
+                        }
                         state
                     })
                     .collect();
@@ -451,6 +502,7 @@ impl Core {
                 &self.db.lock().unwrap(),
                 p["workspace_id"].as_str(),
                 p["session_id"].as_str(),
+                p["queue_only"] == true,
             ),
             "followup.schedule" => {
                 let _change = self.changes.lock().unwrap();
@@ -530,6 +582,12 @@ impl Core {
                 };
                 self.emit("followup.changed", result.clone());
                 Ok(result)
+            }
+            "followup.dismiss" => {
+                let _change = self.changes.lock().unwrap();
+                let row = followups::dismiss_failed(&self.db.lock().unwrap(), text(&p, "id")?)?;
+                self.emit("followup.changed", row.clone());
+                Ok(row)
             }
             "followup.send_now" => {
                 let id = text(&p, "id")?;
@@ -628,7 +686,18 @@ impl Core {
                     self.close_session(&id)?;
                 }
                 self.git.lock().unwrap().due.remove(workspace);
-                store::dispatch(&self.db.lock().unwrap(), method, &p)
+                let result = store::dispatch(&self.db.lock().unwrap(), method, &p)?;
+                self.emit("workspace.list_changed", json!({"workspace_id":workspace}));
+                Ok(result)
+            }
+            "workspace.create" | "workspace.rename" | "workspace.describe" | "workspace.pin"
+            | "workspace.reorder" => {
+                let result = store::dispatch(&self.db.lock().unwrap(), method, &p)?;
+                self.emit(
+                    "workspace.list_changed",
+                    json!({"workspace_id":result["workspace"]["id"].as_str().or(p["id"].as_str())}),
+                );
+                Ok(result)
             }
             "workspace.activate" => {
                 let ws = text(&p, "workspace_id")?.to_owned();
@@ -645,6 +714,11 @@ impl Core {
                 Ok(ok)
             }
             "notify.push" => self.notify(p),
+            "notify.mark_read" | "notify.clear" => {
+                let result = store::dispatch(&self.db.lock().unwrap(), method, &p)?;
+                self.emit("notify.read_changed", p);
+                Ok(result)
+            }
             "conversation.list" | "conversation.resolve" => {
                 let workspace = {
                     let db = self.db.lock().unwrap();
@@ -668,6 +742,19 @@ impl Core {
                 }
             }
             "reminder.list" => reminders::list(&self.db.lock().unwrap()),
+            "reminder.remote_quota" => {
+                let workspace = text(&p, "workspace_id")?;
+                let sid = text(&p, "session_id")?;
+                if !(workspace.starts_with("remote:ssh:")
+                    || workspace.starts_with("remote:docker:"))
+                    || uuid::Uuid::parse_str(sid).is_err()
+                {
+                    return Err("invalid remote reminder target".into());
+                }
+                let notice = serde_json::from_value(p["notice"].clone())?;
+                self.register_quota_reminder(workspace, sid, &notice)?;
+                Ok(ok)
+            }
             "reminder.settings.get" => reminders::settings(&self.db.lock().unwrap()),
             "reminder.save" | "reminder.cancel" | "reminder.delete" | "reminder.settings.save" => {
                 let result = {
@@ -682,8 +769,17 @@ impl Core {
                 self.emit("notify.reminders_changed", json!({}));
                 Ok(result)
             }
-            "group.create" | "session.group.set" | "layout.split" | "pane.session.bind" => {
-                let workspace_id = text(&p, "workspace_id")?.to_owned();
+            "group.create" | "group.rename" | "group.delete" | "session.group.set"
+            | "layout.split" | "layout.focus" | "pane.session.bind" => {
+                let workspace_id = if method == "group.rename" || method == "group.delete" {
+                    self.db.lock().unwrap().query_row(
+                        "SELECT workspace_id FROM pane_groups WHERE id=?",
+                        [text(&p, "group_id")?],
+                        |row| row.get::<_, String>(0),
+                    )?
+                } else {
+                    text(&p, "workspace_id")?.to_owned()
+                };
                 let result = store::dispatch(&self.db.lock().unwrap(), method, &p)?;
                 self.emit(
                     "workspace.structure_changed",
@@ -748,6 +844,7 @@ impl Core {
             LiveSession {
                 terminal: Arc::clone(&spawned.terminal),
                 detector: Conversation::new(cmd, &args),
+                prompt_agent: PromptAgent::from_program(cmd),
                 quota: LimitDetector::new(cmd, &args),
                 hook_token,
                 hook_anchor: None,
@@ -792,7 +889,12 @@ impl Core {
             .map(|session| {
                 session.quota.output(&output, Instant::now());
                 let (notice, resume) = session.detector.output(&output);
-                let prompt = session.terminal.history.lock().unwrap().prompt_state();
+                let prompt = session
+                    .terminal
+                    .history
+                    .lock()
+                    .unwrap()
+                    .agent_prompt_state(session.prompt_agent);
                 let screen_notice = session.detector.observe_screen(prompt);
                 (notice.or(screen_notice), resume)
             });
@@ -1196,6 +1298,22 @@ impl Core {
             )?;
             return Ok(());
         }
+        if terminal_mode {
+            let detected = crate::platform::process_identity(anchor.0)
+                .map_or(PromptAgent::Unknown, |identity| {
+                    PromptAgent::from_program(&identity.image)
+                });
+            if detected != PromptAgent::Unknown && detected != live.prompt_agent {
+                live.prompt_agent = detected;
+                let state = live
+                    .terminal
+                    .history
+                    .lock()
+                    .unwrap()
+                    .agent_prompt_state(detected);
+                live.detector.observe_screen(state);
+            }
+        }
         let ready = if terminal_mode {
             live.detector.terminal_ready()
         } else {
@@ -1203,6 +1321,17 @@ impl Core {
         };
         if !force && !ready {
             return Ok(());
+        }
+        if !force && terminal_mode && delivery_mode == "when_ready" {
+            let state = live
+                .terminal
+                .history
+                .lock()
+                .unwrap()
+                .agent_prompt_state(live.prompt_agent);
+            if !state.visible || !state.empty {
+                return Ok(());
+            }
         }
         if !force
             && delivery_mode == "after_completion"
@@ -1233,13 +1362,18 @@ impl Core {
         }
         let prompt = text(row, "prompt")?;
         let terminal = Arc::clone(&live.terminal);
-        let prompt_state = terminal.history.lock().unwrap().prompt_state();
-        let has_draft = terminal_mode && prompt_state.visible && !prompt_state.empty;
+        let prompt_agent = live.prompt_agent;
+        let prompt_state = || {
+            terminal
+                .history
+                .lock()
+                .unwrap()
+                .agent_prompt_state(prompt_agent)
+        };
+        let state = prompt_state();
+        let has_draft = terminal_mode && state.visible && !state.empty;
         let clear_key = if has_draft {
-            let image = crate::platform::process_identity(anchor.0)
-                .map(|identity| identity.image.to_ascii_lowercase())
-                .unwrap_or_default();
-            Some(if image == "claude.exe" {
+            Some(if prompt_agent == PromptAgent::Claude {
                 "\x13"
             } else {
                 "\x03"
@@ -1257,11 +1391,14 @@ impl Core {
                     if !alive() {
                         break Err("agent exited while clearing draft".to_owned());
                     }
-                    if terminal.history.lock().unwrap().prompt_state().empty {
+                    if prompt_state().empty {
                         break Ok(());
                     }
                     if Instant::now() >= deadline {
-                        break Err("agent did not clear or stash its draft".to_owned());
+                        break Err(
+                            "터미널의 기존 초안이 남아 있습니다. 내용을 확인한 뒤 다시 보내세요."
+                                .to_owned(),
+                        );
                     }
                     thread::sleep(Duration::from_millis(30));
                 }
@@ -1271,11 +1408,7 @@ impl Core {
         };
         let outcome = if let Err(err) = cleared {
             Err(err)
-        } else if !alive()
-            || (terminal_mode
-                && (!force || has_draft)
-                && !terminal.history.lock().unwrap().prompt_state().empty)
-        {
+        } else if !alive() || (terminal_mode && (!force || has_draft) && !prompt_state().empty) {
             Err("agent prompt was not empty before paste".into())
         } else if let Err(err) = terminal.write(&format!("\x1b[200~{prompt}\x1b[201~")) {
             Err(format!("paste failed: {err}"))
@@ -1288,7 +1421,7 @@ impl Core {
                         && (if terminal_mode {
                             crate::platform::terminal_agent_anchor(live.terminal.pid)
                                 == Some(anchor)
-                                && (force || live.detector.terminal_submit_state())
+                                && (force || live.detector.terminal_pasted_followup_can_submit())
                         } else {
                             live.hook_anchor == Some(anchor)
                                 && (force || live.detector.hook_submit_state(provider, agent_id))
@@ -1303,10 +1436,7 @@ impl Core {
                         && live.terminal.history.lock().unwrap().bracketed_paste()
                 });
             if !valid {
-                if alive() {
-                    let _ = terminal.write("\x03");
-                }
-                Err("agent changed before submit; pasted draft interrupted".into())
+                Err("terminal state changed after paste; check its draft before retrying".into())
             } else {
                 let result = terminal
                     .write("\r")
@@ -1383,27 +1513,10 @@ impl Core {
             })
             .collect();
         for (sid, workspace, notice) in candidates {
-            let result = {
-                let db = self.db.lock().unwrap();
-                reminders::register_auto(
-                    &db,
-                    &workspace,
-                    &sid,
-                    &notice,
-                    chrono::Utc::now().timestamp(),
-                )
-            };
-            match result {
-                Ok(Some(notification)) => {
-                    self.emit("notify.created",json!({"workspace_id":notification["workspace_id"],"session_id":notification["session_id"],"notification":notification}));
-                    self.emit("notify.reminders_changed", json!({}));
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    crate::platform::log(&format!("quota reminder error: {err}"));
-                    if let Some(live) = self.sessions.lock().unwrap().running.get_mut(&sid) {
-                        live.quota.retry(notice);
-                    }
+            if let Err(err) = self.register_quota_reminder(&workspace, &sid, &notice) {
+                crate::platform::log(&format!("quota reminder error: {err}"));
+                if let Some(live) = self.sessions.lock().unwrap().running.get_mut(&sid) {
+                    live.quota.retry(notice);
                 }
             }
         }
@@ -1437,6 +1550,26 @@ impl Core {
                 self.emit("notify.created",json!({"workspace_id":notification["workspace_id"],"session_id":notification["session_id"],"notification":notification}));
             }
         }
+    }
+
+    fn register_quota_reminder(
+        &self,
+        workspace: &str,
+        sid: &str,
+        notice: &reminders::QuotaNotice,
+    ) -> Result<()> {
+        let notification = reminders::register_auto(
+            &self.db.lock().unwrap(),
+            workspace,
+            sid,
+            notice,
+            chrono::Utc::now().timestamp(),
+        )?;
+        if let Some(notification) = notification {
+            self.emit("notify.created", json!({"workspace_id":notification["workspace_id"],"session_id":notification["session_id"],"notification":notification}));
+            self.emit("notify.reminders_changed", json!({}));
+        }
+        Ok(())
     }
 
     fn announce(&self, sid: &str, workspace: &str, notice: Notice) -> Result<Value> {
@@ -1511,6 +1644,60 @@ pub fn git_info(path: &Path) -> Value {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn mcp_development_folder_can_be_set_and_reset() -> Result<()> {
+        let core = Core::new(Path::new(":memory:"))?;
+        let initial = core.rpc("mcp.settings.get", json!({}))?;
+        assert_eq!(
+            initial["development_folder"],
+            crate::platform::documents_folder()
+                .join("WinCMux MCP Development")
+                .to_string_lossy()
+                .as_ref()
+        );
+        let folder = std::env::current_dir()?;
+        core.rpc("mcp.settings.save", json!({"development_folder":folder}))?;
+        let saved = core.rpc("mcp.settings.get", json!({}))?;
+        assert_eq!(
+            saved["development_folder"],
+            folder.to_string_lossy().as_ref()
+        );
+        assert!(core
+            .rpc(
+                "mcp.settings.save",
+                json!({"development_folder":folder.join("not-a-real-folder")})
+            )
+            .is_err());
+        core.rpc("mcp.settings.save", json!({"development_folder":""}))?;
+        assert_eq!(
+            core.rpc("mcp.settings.get", json!({}))?["development_folder"],
+            initial["development_folder"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_activity_names_its_workspace() -> Result<()> {
+        let core = Core::new(Path::new(":memory:"))?;
+        let workspace = core.rpc(
+            "workspace.create",
+            json!({
+                "name":"MCP Activity Test", "path":std::env::current_dir()?, "backend":"custom"
+            }),
+        )?;
+        let id = workspace["workspace"]["id"].as_str().unwrap();
+        core.rpc(
+            "mcp.activity.record",
+            json!({
+                "tool":"wincmux_list_terminals", "outcome":"success", "workspace_id":id
+            }),
+        )?;
+        let activity = core.rpc("mcp.activity.list", json!({}))?;
+        assert_eq!(activity["items"][0]["workspace_id"], id);
+        assert_eq!(activity["items"][0]["workspace_name"], "MCP Activity Test");
+        Ok(())
+    }
 
     #[test]
     fn workspace_delete_confirms_live_sessions_and_closes_them() -> Result<()> {

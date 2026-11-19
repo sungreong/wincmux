@@ -1,7 +1,7 @@
 (() => {
   const drafts = new Map();
   let setupPromise;
-  const statuses = { pending: '대기', paused: '일시 정지', claimed: '전송 중', sent: '입력 제출', cancelled: '취소', failed: '전송 안 됨' };
+  const statuses = { pending: '대기', paused: '일시 정지', claimed: '전송 중', sent: '터미널 제출 · 수신 미확인', cancelled: '취소', failed: '전송 안 됨' };
   const localValue = date => {
     const pad = n => String(n).padStart(2, '0');
     return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
@@ -35,16 +35,27 @@
     const pad = n => String(n).padStart(2, '0');
     return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())} 이후`;
   };
+  const dismissButton = (item, refresh) => {
+    const button = document.createElement('button');
+    button.type = 'button'; button.textContent = '지우기';
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      try { await rpc('followup.dismiss', { id: item.id }); await refresh(); }
+      catch (error) { setStatus(String(error?.message ?? error), true); button.disabled = false; }
+    });
+    return button;
+  };
   async function refreshQueue() {
     const target = queue();
     const sessionId = target?.dataset.sessionId;
     const request = ++queueRequest;
     if (!sessionId) { if (target) { target.hidden = true; target.replaceChildren(); } return; }
     try {
-      const { items = [] } = await rpc('followup.list', { session_id: sessionId });
+      const { items = [] } = await rpc('followup.list', { session_id: sessionId, queue_only: true });
       if (request !== queueRequest || target.dataset.sessionId !== sessionId) return;
       const active = items.filter(item => ['pending', 'paused', 'claimed'].includes(item.status)).reverse();
-      const visible = active;
+      const recent = items.filter(item => item.status === 'failed').slice(0, 3);
+      const visible = [...active, ...recent];
       target.replaceChildren();
       target.hidden = !visible.length;
       for (const item of visible) {
@@ -53,6 +64,10 @@
         if (item.delivery_mode === 'at_time') status.title = `예약 시각: ${dueLabel(item)}`;
         const prompt = document.createElement('span'); prompt.textContent = item.prompt;
         row.append(status, prompt);
+        if (item.result) {
+          const detail = document.createElement('small'); detail.textContent = item.result;
+          row.append(detail);
+        }
         if (item.status === 'pending' || item.status === 'paused') {
           row.append(forceButton(item, refreshQueue));
           const toggle = document.createElement('button'); toggle.type = 'button'; toggle.textContent = item.status === 'pending' ? '일시 정지' : '재개';
@@ -60,6 +75,21 @@
           const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = '취소';
           cancel.addEventListener('click', async () => { await rpc('followup.cancel', { id: item.id }); await refreshQueue(); });
           row.append(toggle, cancel);
+        } else if (item.status === 'failed') {
+          const restore = document.createElement('button');
+          restore.type = 'button'; restore.textContent = '입력창에 복원';
+          restore.addEventListener('click', () => {
+            const editor = document.getElementById('terminalPromptText');
+            if (!editor || editor.value.trim()) {
+              setStatus('입력창에 작성 중인 내용이 있습니다. 내용을 확인한 뒤 복원해 주세요.', true);
+              return;
+            }
+            editor.value = item.prompt;
+            editor.dispatchEvent(new Event('input', { bubbles: true }));
+            editor.focus();
+            setStatus('입력창에 내용을 복원했습니다. 터미널 상태를 확인한 뒤 전송해 주세요.');
+          });
+          row.append(restore, dismissButton(item, refreshQueue));
         }
         target.append(row);
       }
@@ -113,7 +143,7 @@
   async function refreshPanel(panel) {
     if (!panel.isConnected || panel.hidden) return;
     try {
-      const result = await rpc('followup.list', { session_id: panel.dataset.sessionId });
+      const result = await rpc('followup.list', { session_id: panel.dataset.sessionId, queue_only: true });
       if (!panel.isConnected || panel.hidden) return;
       const list = panel.querySelector('.followup-list');
       list.replaceChildren();
@@ -146,7 +176,7 @@
             catch (err) { showError(panel, err); }
           });
           row.append(toggle, cancel);
-        }
+        } else if (item.status === 'failed') row.append(dismissButton(item, () => refreshPanel(panel)));
         list.append(row);
       }
     } catch (err) { showError(panel, err); }

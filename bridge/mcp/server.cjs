@@ -7,13 +7,15 @@ const readline = require('node:readline');
 const { execFile } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 
-let version = '0.2.94';
+let version = '0.2.105';
 try { version = require('../../package.json').version; } catch { /* Bundled resource has no package.json. */ }
 const pipe = process.env.WINCMUX_TAURI_PIPE || '\\\\.\\pipe\\wincmux-tauri-rpc';
 const OBJECT = { type: 'object', additionalProperties: false };
 const required = (properties, names) => ({ ...OBJECT, properties, required: names });
 const sid = { type: 'string', description: 'session_id returned by wincmux_list_terminals' };
 const wid = { type: 'string', description: 'Workspace ID returned by wincmux_list_workspaces' };
+const workspaceText = { type: 'string', description: 'Exact workspace name or folder path supplied by the user; duplicate names are rejected' };
+const workspaceSelector = { workspace_id: wid, workspace: workspaceText };
 const tool = (name, description, inputSchema, readOnlyHint) => ({
   name, description, inputSchema, annotations: { readOnlyHint }
 });
@@ -21,22 +23,30 @@ const tool = (name, description, inputSchema, readOnlyHint) => ({
 const tools = [
   tool('wincmux_status', 'Show the running WinCMux core version and instance status.', OBJECT, true),
   tool('wincmux_list_workspaces', 'List WinCMux workspaces and their IDs and project paths.', OBJECT, true),
-  tool('wincmux_create_workspace', 'Add an existing local folder as a WinCMux workspace.',
-    required({ name: { type: 'string', minLength: 1 }, path: { type: 'string', minLength: 1 } }, ['name', 'path']), false),
+  tool('wincmux_create_workspace', 'Create a workspace at an explicit existing folder, or create a new folder under the configured MCP development folder when path is omitted.',
+    required({ name: { type: 'string', minLength: 1 }, path: { type: 'string', minLength: 1 } }, ['name']), false),
   tool('wincmux_list_groups', 'List pane groups and terminal assignments in one workspace.',
-    required({ workspace_id: wid }, ['workspace_id']), true),
+    required(workspaceSelector, []), true),
   tool('wincmux_create_group', 'Create a named pane group in a workspace.',
-    required({ workspace_id: wid, name: { type: 'string', minLength: 1, maxLength: 32 }, color: { type: 'string', pattern: '^#[0-9a-fA-F]{6}$' } }, ['workspace_id', 'name']), false),
+    required({ ...workspaceSelector, name: { type: 'string', minLength: 1, maxLength: 32 }, color: { type: 'string', pattern: '^#[0-9a-fA-F]{6}$' } }, ['name']), false),
+  tool('wincmux_rename_group', 'Rename a non-default pane group in a workspace.',
+    required({ ...workspaceSelector, group_id: { type: 'string' }, name: { type: 'string', minLength: 1, maxLength: 32 } }, ['group_id', 'name']), false),
+  tool('wincmux_delete_group', 'Delete a non-default pane group. Its terminals keep running and move to the selected group or Default.',
+    required({ ...workspaceSelector, group_id: { type: 'string' }, move_to_group_id: { type: 'string' } }, ['group_id']), false),
   tool('wincmux_list_terminals', 'List panes and terminal sessions, including running state and agent readiness. Optionally select one workspace.',
-    { ...OBJECT, properties: { workspace_id: wid } }, true),
+    { ...OBJECT, properties: { workspace_id: wid, workspace: workspaceText } }, true),
   tool('wincmux_split_pane', 'Split a terminal pane horizontally or vertically. An existing terminal stays in the first child pane; use the second pane_id to start another terminal.',
-    required({ workspace_id: wid, pane_id: { type: 'string' }, direction: { type: 'string', enum: ['horizontal', 'vertical'] } }, ['workspace_id', 'pane_id', 'direction']), false),
+    required({ ...workspaceSelector, pane_id: { type: 'string' }, direction: { type: 'string', enum: ['horizontal', 'vertical'] } }, ['pane_id', 'direction']), false),
+  tool('wincmux_focus_pane', 'Select a leaf pane in a workspace.',
+    required({ ...workspaceSelector, pane_id: { type: 'string' } }, ['pane_id']), false),
   tool('wincmux_move_terminal_to_group', 'Assign an existing terminal session to a pane group in the same workspace.',
-    required({ workspace_id: wid, session_id: sid, group_id: { type: 'string' } }, ['workspace_id', 'session_id', 'group_id']), false),
+    required({ ...workspaceSelector, session_id: sid, group_id: { type: 'string' } }, ['session_id', 'group_id']), false),
   tool('wincmux_read_terminal', 'Read the visible text grid of a terminal and a bounded recent raw output tail. The grid requires the updated core.',
     required({ session_id: sid, max_bytes: { type: 'integer', minimum: 1, maximum: 16000 } }, ['session_id']), true),
-  tool('wincmux_start_terminal', 'Start a PowerShell terminal in a workspace, optionally launching Claude, Codex, or Gemini there. pane_id binds it to an empty pane; group_id assigns its pane group. Without pane_id it remains accessible by session_id.',
-    required({ workspace_id: wid, agent: { type: 'string', enum: ['powershell', 'claude', 'codex', 'gemini'] }, pane_id: { type: 'string' }, group_id: { type: 'string' } }, ['workspace_id']), false),
+  tool('wincmux_start_terminal', 'Start a visible PowerShell terminal in a workspace, optionally launching Claude, Codex, or Gemini. Without pane_id, reuse an empty pane or split a pane and show the new terminal.',
+    required({ workspace_id: wid, workspace: workspaceText, agent: { type: 'string', enum: ['powershell', 'claude', 'codex', 'gemini'] }, pane_id: { type: 'string' }, group_id: { type: 'string' } }, []), false),
+  tool('wincmux_start_group_terminal', 'Open a visible terminal in a pane group. Reuse an empty pane or split a pane, then assign the new terminal to the requested group.',
+    required({ workspace_id: wid, workspace: workspaceText, group_id: { type: 'string' }, agent: { type: 'string', enum: ['powershell', 'claude', 'codex', 'gemini'] }, direction: { type: 'string', enum: ['horizontal', 'vertical'] } }, ['group_id']), false),
   tool('wincmux_terminal_input', 'Type text directly into a running terminal. Set enter=true to press Enter in the same write. This sends immediately, including while an agent is busy; use wincmux_queue_followup to wait.',
     required({ session_id: sid, text: { type: 'string', maxLength: 16000 }, enter: { type: 'boolean' } }, ['session_id', 'text']), false),
   tool('wincmux_press_key', 'Press Enter, Escape, Tab, Ctrl+C, or an arrow in a running terminal.',
@@ -48,7 +58,7 @@ const tools = [
   tool('wincmux_send_followup_now', 'Submit one pending or paused follow-up to its bound terminal immediately, without waiting for readiness or scheduled time. The agent may process it later.',
     required({ id: { type: 'string', description: 'Follow-up ID from wincmux_list_followups' } }, ['id']), false),
   tool('wincmux_list_followups', 'List queued and recently sent follow-up prompts, optionally for one terminal.',
-    { ...OBJECT, properties: { session_id: sid, workspace_id: wid } }, true),
+    { ...OBJECT, properties: { session_id: sid, ...workspaceSelector } }, true),
   tool('wincmux_capture_window', 'Capture the visible WinCMux application window as PNG. The image data is Base64 in MCP image.data or in the base64 JSON response. The window must be restored.',
     { ...OBJECT, properties: { format: { type: 'string', enum: ['image', 'base64'] }, pid: { type: 'integer', minimum: 1 } } }, true),
 ];
@@ -56,6 +66,18 @@ const tools = [
 function string(value, name) {
   if (typeof value !== 'string' || !value.trim()) throw Error(`${name} is required`);
   return value;
+}
+const workspacePathKey = value => path.resolve(value).replace(/^\\\\\?\\/, '').toLocaleLowerCase();
+async function resolveWorkspace(args) {
+  if (!args.workspace_id && !args.workspace) throw Error('workspace_id or workspace name/path is required');
+  const workspaces = (await coreCall('workspace.list')).workspaces;
+  const query = String(args.workspace_id ?? args.workspace).trim().toLocaleLowerCase();
+  const matches = workspaces.filter(item => args.workspace_id
+    ? item.id === query
+    : item.name.toLocaleLowerCase() === query || workspacePathKey(item.path) === workspacePathKey(args.workspace));
+  if (!matches.length) throw Error(`workspace not found: ${args.workspace_id ?? args.workspace}`);
+  if (matches.length > 1) throw Error(`workspace name is ambiguous; specify its full folder path: ${args.workspace}`);
+  return matches[0];
 }
 
 function coreCall(method, params = {}) {
@@ -123,34 +145,68 @@ async function dispatchTool(name, args = {}) {
   if (!settings.enabled && name !== 'wincmux_status') throw Error('WinCMux MCP is turned off in the app settings');
   switch (name) {
     case 'wincmux_status': return settings.enabled
-      ? { ...(await coreCall('runtime.info')), mcp_enabled: true }
+      ? { ...(await coreCall('runtime.info')), mcp_enabled: true, development_folder: settings.development_folder ?? null }
       : { mcp_enabled: false, transport: 'stdio' };
     case 'wincmux_list_workspaces': return coreCall('workspace.list');
-    case 'wincmux_create_workspace': return coreCall('workspace.create', {
-      name: string(args.name, 'name'), path: string(args.path, 'path'), backend: 'custom'
-    });
+    case 'wincmux_create_workspace': {
+      const name = string(args.name, 'name').trim();
+      let folder = args.path;
+      if (folder === undefined) {
+        if (!settings.development_folder) throw Error('configure the MCP development folder in the updated WinCMux app');
+        if (name === '.' || name === '..' || /[<>:"/\\|?*\x00-\x1f]/.test(name) || /[. ]$/.test(name))
+          throw Error('name cannot be used as a folder name');
+        const root = path.resolve(settings.development_folder);
+        folder = path.resolve(root, name);
+        if (path.dirname(folder).toLocaleLowerCase() !== root.toLocaleLowerCase()) throw Error('folder must stay inside the MCP development folder');
+        fs.mkdirSync(folder, { recursive: true });
+      } else {
+        folder = string(folder, 'path');
+      }
+      const existing = (await coreCall('workspace.list')).workspaces.find(item => workspacePathKey(item.path) === workspacePathKey(folder));
+      if (existing) return { workspace: existing, reused: true };
+      return coreCall('workspace.create', { name, path: folder, backend: 'custom' });
+    }
     case 'wincmux_list_groups': {
-      const workspace_id = string(args.workspace_id, 'workspace_id');
-      const exists = (await coreCall('workspace.list')).workspaces.some(workspace => workspace.id === workspace_id);
-      if (!exists) throw Error('workspace_id not found');
+      const workspace = await resolveWorkspace(args);
+      const workspace_id = workspace.id;
       const [groups, assignments] = await Promise.all([
         coreCall('group.list', { workspace_id }), coreCall('session.group.list', { workspace_id })
       ]);
-      return { workspace_id, groups: groups.groups, assignments: assignments.bindings };
+      return { workspace_id, workspace_name: workspace.name, groups: groups.groups, assignments: assignments.bindings };
     }
     case 'wincmux_create_group': {
-      const workspace_id = string(args.workspace_id, 'workspace_id');
+      const workspace = await resolveWorkspace(args);
+      const workspace_id = workspace.id;
       const name = string(args.name, 'name').trim();
       if (name.length > 32) throw Error('name must be at most 32 characters');
       if (args.color !== undefined && !/^#[0-9a-fA-F]{6}$/.test(args.color)) throw Error('color must be #RRGGBB');
-      if (!(await coreCall('workspace.list')).workspaces.some(workspace => workspace.id === workspace_id))
-        throw Error('workspace_id not found');
-      return coreCall('group.create', { workspace_id, name, ...(args.color ? { color: args.color } : {}) });
+      return { ...(await coreCall('group.create', { workspace_id, name, ...(args.color ? { color: args.color } : {}) })), workspace_id, workspace_name: workspace.name };
+    }
+    case 'wincmux_rename_group':
+    case 'wincmux_delete_group': {
+      const workspace = await resolveWorkspace(args);
+      const workspace_id = workspace.id;
+      const group_id = string(args.group_id, 'group_id');
+      const groups = (await coreCall('group.list', { workspace_id })).groups;
+      const group = groups.find(item => item.id === group_id);
+      if (!group) throw Error('group_id not found in workspace');
+      if (group.name === 'Default') throw Error('Default group cannot be modified');
+      if (name === 'wincmux_rename_group') {
+        const newName = string(args.name, 'name').trim();
+        if (newName.length > 32) throw Error('name must be at most 32 characters');
+        await coreCall('group.rename', { group_id, name: newName });
+        return { ok: true, workspace_id, workspace_name: workspace.name, group_id, name: newName };
+      }
+      if (args.move_to_group_id !== undefined &&
+          (!groups.some(item => item.id === args.move_to_group_id) || args.move_to_group_id === group_id))
+        throw Error('move_to_group_id must be another group in workspace');
+      const move_to_group_id = args.move_to_group_id ?? groups.find(item => item.name === 'Default')?.id;
+      await coreCall('group.delete', { group_id, ...(move_to_group_id ? { move_to_group_id } : {}) });
+      return { ok: true, workspace_id, workspace_name: workspace.name, group_id, move_to_group_id: move_to_group_id ?? null };
     }
     case 'wincmux_list_terminals': {
       const workspaces = (await coreCall('workspace.list')).workspaces;
-      const chosen = args.workspace_id ? workspaces.filter(ws => ws.id === args.workspace_id) : workspaces;
-      if (args.workspace_id && !chosen.length) throw Error('workspace_id not found');
+      const chosen = args.workspace_id || args.workspace ? [await resolveWorkspace(args)] : workspaces;
       const agents = (await coreCall('agent.list')).items;
       const result = await Promise.all(chosen.map(async workspace => {
         const [sessions, bindings, layout, groups, groupBindings] = await Promise.all([
@@ -175,13 +231,13 @@ async function dispatchTool(name, args = {}) {
           panes: layout.panes.filter(pane => typeof pane === 'string' || !pane.split).map(pane => {
             const id = typeof pane === 'string' ? pane : pane.pane_id;
             const session = bySession.get(byPane.get(id));
-            return { pane_id: id, is_focused: pane.is_focused === true,
+            return { pane_id: id, workspace_name: workspace.name, is_focused: pane.is_focused === true,
               session_id: session?.id ?? null, status: session?.status ?? 'empty',
               command: session?.spawn_cmd ?? null, agent: session ? byAgent.get(session.id) ?? null : null,
               ...groupFields(session) };
           }),
           sessions: sessions.sessions.filter(session => session.status === 'running').map(session => ({
-            session_id: session.id, command: session.spawn_cmd, cwd: session.spawn_cwd,
+            session_id: session.id, workspace_name: workspace.name, command: session.spawn_cmd, cwd: session.spawn_cwd,
             agent: byAgent.get(session.id) ?? null, ...groupFields(session),
           })),
         };
@@ -189,22 +245,31 @@ async function dispatchTool(name, args = {}) {
       return { workspaces: result };
     }
     case 'wincmux_split_pane': {
-      const workspace_id = string(args.workspace_id, 'workspace_id');
+      const workspace = await resolveWorkspace(args);
+      const workspace_id = workspace.id;
       const pane_id = string(args.pane_id, 'pane_id');
       if (!['horizontal', 'vertical'].includes(args.direction)) throw Error('invalid direction');
-      if (!(await coreCall('workspace.list')).workspaces.some(workspace => workspace.id === workspace_id))
-        throw Error('workspace_id not found');
       const layout = await coreCall('layout.list', { workspace_id });
       if (!layout.panes.some(pane => pane.pane_id === pane_id && !pane.split)) throw Error('pane_id is not a terminal pane');
       const result = await coreCall('layout.split', { workspace_id, pane_id, direction: args.direction });
-      return { workspace_id, original_pane_id: pane_id, first_pane_id: result.pane_ids[0], second_pane_id: result.pane_ids[1] };
+      return { workspace_id, workspace_name: workspace.name, original_pane_id: pane_id, first_pane_id: result.pane_ids[0], second_pane_id: result.pane_ids[1] };
+    }
+    case 'wincmux_focus_pane': {
+      const workspace = await resolveWorkspace(args);
+      const workspace_id = workspace.id;
+      const pane_id = string(args.pane_id, 'pane_id');
+      const layout = await coreCall('layout.list', { workspace_id });
+      if (!layout.panes.some(pane => pane.pane_id === pane_id && !pane.split)) throw Error('pane_id is not a terminal pane');
+      await coreCall('layout.focus', { workspace_id, pane_id });
+      return { ok: true, workspace_id, workspace_name: workspace.name, pane_id };
     }
     case 'wincmux_move_terminal_to_group': {
-      const workspace_id = string(args.workspace_id, 'workspace_id');
+      const workspace = await resolveWorkspace(args);
+      const workspace_id = workspace.id;
       const session_id = string(args.session_id, 'session_id');
       const group_id = string(args.group_id, 'group_id');
       await coreCall('session.group.set', { workspace_id, session_id, group_id });
-      return { ok: true, workspace_id, session_id, group_id };
+      return { ok: true, workspace_id, workspace_name: workspace.name, session_id, group_id };
     }
     case 'wincmux_read_terminal': {
       const session_id = string(args.session_id, 'session_id');
@@ -219,11 +284,16 @@ async function dispatchTool(name, args = {}) {
       return { session_id, screen, recent_output: tail.output, end_offset: tail.end_offset };
     }
     case 'wincmux_start_terminal': {
-      const workspace_id = string(args.workspace_id, 'workspace_id');
+      const workspace = await resolveWorkspace(args);
+      const workspace_id = workspace.id;
       const agent = args.agent ?? 'powershell';
       if (!['powershell', 'claude', 'codex', 'gemini'].includes(agent)) throw Error('invalid agent');
-      const workspace = (await coreCall('workspace.list')).workspaces.find(item => item.id === workspace_id);
-      if (!workspace) throw Error('workspace_id not found');
+      if (args.pane_id === undefined) {
+        const groups = await coreCall('group.list', { workspace_id });
+        const group_id = args.group_id ?? groups.groups.find(group => group.name === 'Default')?.id ?? groups.groups[0]?.id;
+        if (!group_id) throw Error('workspace has no pane group');
+        return dispatchTool('wincmux_start_group_terminal', { workspace_id, group_id, agent });
+      }
       if (args.group_id !== undefined) {
         const group_id = string(args.group_id, 'group_id');
         const groups = await coreCall('group.list', { workspace_id });
@@ -259,7 +329,35 @@ async function dispatchTool(name, args = {}) {
         await coreCall('session.close', { session_id }).catch(() => {});
         throw error;
       }
-      return { session_id, workspace_id, pane_id: args.pane_id ?? null, group_id: args.group_id ?? null, launched: agent };
+      return { session_id, workspace_id, workspace_name: workspace.name, pane_id: args.pane_id ?? null, group_id: args.group_id ?? null, launched: agent };
+    }
+    case 'wincmux_start_group_terminal': {
+      const workspace_id = (await resolveWorkspace(args)).id;
+      const group_id = string(args.group_id, 'group_id');
+      const direction = args.direction ?? 'vertical';
+      const agent = args.agent ?? 'powershell';
+      if (!['horizontal', 'vertical'].includes(direction)) throw Error('invalid direction');
+      if (!['powershell', 'claude', 'codex', 'gemini'].includes(agent)) throw Error('invalid agent');
+      const listed = await dispatchTool('wincmux_list_terminals', { workspace_id });
+      if (!listed.workspaces[0].groups.some(group => group.id === group_id)) throw Error('group_id not found in workspace');
+      const panes = listed.workspaces[0].panes;
+      const empty = panes.find(pane => pane.status !== 'running');
+      let pane_id = empty?.pane_id;
+      let split = null;
+      if (!pane_id) {
+        const source = panes.find(pane => pane.group_id === group_id) ?? panes.find(pane => pane.is_focused) ?? panes[0];
+        if (!source) throw Error('workspace has no terminal pane');
+        split = await dispatchTool('wincmux_split_pane', { workspace_id, pane_id: source.pane_id, direction });
+        pane_id = split.second_pane_id;
+      }
+      try {
+        const started = await dispatchTool('wincmux_start_terminal', { workspace_id, group_id, pane_id, agent });
+        const focused = await coreCall('layout.focus', { workspace_id, pane_id }).then(() => true, () => false);
+        return { ...started, split_from_pane_id: split?.original_pane_id ?? null, focused };
+      } catch (error) {
+        if (split) await coreCall('layout.close', { workspace_id, pane_id }).catch(() => {});
+        throw error;
+      }
     }
     case 'wincmux_terminal_input': {
       const session_id = string(args.session_id, 'session_id');
@@ -302,10 +400,14 @@ async function dispatchTool(name, args = {}) {
         ...(delivery_mode === 'at_time' ? { due_at: args.due_at } : {}) });
     }
     case 'wincmux_send_followup_now': return coreCall('followup.send_now', { id: string(args.id, 'id') });
-    case 'wincmux_list_followups': return coreCall('followup.list', {
-      ...(args.session_id ? { session_id: string(args.session_id, 'session_id') } : {}),
-      ...(args.workspace_id ? { workspace_id: string(args.workspace_id, 'workspace_id') } : {})
-    });
+    case 'wincmux_list_followups': {
+      const workspace = args.workspace_id || args.workspace ? await resolveWorkspace(args) : null;
+      const listed = await coreCall('followup.list', {
+        ...(args.session_id ? { session_id: string(args.session_id, 'session_id') } : {}),
+        ...(workspace ? { workspace_id: workspace.id } : {})
+      });
+      return { ...listed, ...(workspace ? { workspace_id: workspace.id, workspace_name: workspace.name } : {}) };
+    }
     case 'wincmux_capture_window': {
       if (args.pid !== undefined && (!Number.isInteger(args.pid) || args.pid < 1)) throw Error('pid must be a positive integer');
       if (args.format !== undefined && !['image', 'base64'].includes(args.format)) throw Error('format must be image or base64');
@@ -319,13 +421,22 @@ async function dispatchTool(name, args = {}) {
 
 async function callTool(name, args = {}) {
   let outcome = 'success';
-  try { return await dispatchTool(name, args); }
+  let result;
+  try { result = await dispatchTool(name, args); return result; }
   catch (error) {
     outcome = /turned off/.test(error.message) ? 'blocked' : 'failed';
     throw error;
   } finally {
     if (tools.some(tool => tool.name === name)) {
-      await coreCall('mcp.activity.record', { tool: name, outcome }).catch(() => {});
+      let workspace_id = result?.workspace_id ?? result?.workspace?.id ?? args?.workspace_id;
+      if (!workspace_id && args?.workspace && outcome !== 'blocked') {
+        workspace_id = await resolveWorkspace(args).then(workspace => workspace.id, () => null);
+      }
+      await coreCall('mcp.activity.record', { tool: name, outcome,
+        ...(workspace_id ? { workspace_id } : {}),
+        ...(args?.session_id ? { session_id: args.session_id } : {}),
+        ...(name === 'wincmux_send_followup_now' && args?.id ? { followup_id: args.id } : {})
+      }).catch(() => {});
     }
   }
 }

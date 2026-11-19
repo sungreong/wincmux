@@ -88,6 +88,15 @@
     "15": [
       "CREATE TABLE mcp_activity (id INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER NOT NULL,tool TEXT NOT NULL,outcome TEXT NOT NULL CHECK(outcome IN ('success','blocked','failed')))",
       "INSERT OR IGNORE INTO schema_versions(version,applied_at) VALUES(15,strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
+    ],
+    "16": [
+      "ALTER TABLE mcp_settings ADD COLUMN development_folder TEXT NOT NULL DEFAULT ''",
+      "INSERT OR IGNORE INTO schema_versions(version,applied_at) VALUES(16,strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
+    ],
+    "17": [
+      "ALTER TABLE mcp_activity ADD COLUMN workspace_id TEXT",
+      "ALTER TABLE mcp_activity ADD COLUMN workspace_name TEXT",
+      "INSERT OR IGNORE INTO schema_versions(version,applied_at) VALUES(17,strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
     ]
   }
 }

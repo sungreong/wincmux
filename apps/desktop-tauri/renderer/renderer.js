@@ -400,6 +400,15 @@ function handleStreamEvent(event) {
     return;
   }
   const params = event.params ?? {};
+  if (event.method === "workspace.list_changed") {
+    const previous = state.selectedWorkspaceId;
+    void loadWorkspaces().then(() => {
+      if (previous && previous !== state.selectedWorkspaceId && state.selectedWorkspaceId) {
+        return switchWorkspace(state.selectedWorkspaceId);
+      }
+    }).catch((error) => setStatus(`Workspace refresh failed: ${String(error?.message ?? error)}`, true));
+    return;
+  }
   if (event.method === "workspace.structure_changed") {
     scheduleStructureRefresh(params);
     return;
@@ -434,6 +443,16 @@ function handleStreamEvent(event) {
       state.notifications = [row, ...state.notifications];
       scheduleNotificationUiRefresh();
     }
+    return;
+  }
+  if (event.method === "notify.read_changed") {
+    state.notifications = state.notifications.filter(row => {
+      if (params.notification_id) return row.id !== params.notification_id;
+      if (params.workspace_id) return row.workspace_id !== params.workspace_id;
+      if (params.remote_backend) return !row.workspace_id?.startsWith(`remote:${params.remote_backend}:`);
+      return false;
+    });
+    scheduleNotificationUiRefresh();
     return;
   }
   if (event.method === "session.output") {
@@ -538,6 +557,13 @@ async function openNotificationById(notificationId, notificationHint = null) {
   }
   const resolved = state.notifications.find((item) => item.id === notificationId) ?? notificationHint;
   if (!resolved) {
+    return;
+  }
+  if (/^remote:(ssh|docker):/.test(resolved.workspace_id ?? "")) {
+    await window.__TAURI__.core.invoke("desktop_action", { action:"open-remote-alert", params:{ notification_id:notificationId } });
+    await rpc("notify.mark_read", { notification_id: notificationId });
+    await dismissNativeNotifications({ ids: [notificationId] });
+    await loadUnread();
     return;
   }
 
