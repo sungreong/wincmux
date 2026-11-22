@@ -4,11 +4,17 @@ WinCMux는 터미널 출력과 OSC 7501로 에이전트 상태를 추정합니�
 
 ## 선택 사항: 훅 연결
 
+새 로컬 워크스페이스를 만들 때 Hook 등록을 선택하면 해당 폴더의 `.claude/settings.local.json`과 `.codex/hooks.json`에 필요한 이벤트가 추가됩니다. 각 워크스페이스의 **⋯ → H** 또는 터미널의 **후속 입력 예약 → Hook 등록**에서도 등록할 수 있습니다. WinCMux에서 Claude·Codex 실행 명령을 선택하면 빠진 Hook을 해당 에이전트 설정에 추가합니다. 기존 설정과 다른 Hook 항목은 유지되며, 같은 항목을 다시 추가하지 않습니다. 실행 중인 에이전트는 새 세션에서 확인하세요.
+
+전역 설정에 수동으로 등록하려면 다음 방법을 사용합니다.
+
 1. 사용할 터미널 아래 입력창의 **후속 입력 예약** 버튼을 누르고 **Codex·Claude 훅 연결 방법**을 펼칩니다. 실행 중인 `wincmux-core.exe`의 실제 경로가 들어간 JSON을 복사합니다.
 2. Codex는 `%USERPROFILE%\.codex\hooks.json`, Claude Code는 `%USERPROFILE%\.claude\settings.json`의 기존 `hooks` 객체에 해당 이벤트 항목을 **병합**합니다. 다른 훅이나 설정을 지우지 않습니다. 앱은 이 설정 파일을 직접 수정하지 않습니다.
 3. Codex가 훅 신뢰 확인을 표시하면 명령과 경로를 검토하고 승인합니다. 새 WinCMux 터미널에서 에이전트를 실행해 한 번 대화합니다. pane 상태 툴팁에 훅 제공자·수신 횟수·최근 이벤트가 나타나면 연결됐습니다. 수신 전에는 화면/OSC 추정 상태로 표시합니다.
 
 훅은 입력 JSON에서 세션 ID, 턴 ID, 이벤트 이름만 읽어 로컬 코어 파이프로 보냅니다. 프롬프트, 도구 입력, 응답 내용은 전송하지 않습니다. 코어는 세션 토큰과 훅 프로세스의 터미널 자손 관계를 확인합니다. 에이전트 훅 명령이 실패해도 에이전트 작업을 멈추지 않습니다.
+
+Hook이 실제 수신되면 pane와 워크스페이스에 작업 중·입력 필요·완료·오류 상태를 반영합니다. 권한 요청에는 입력 필요 알림을, 턴 완료에는 완료 알림을, Claude 작업 실패에는 오류 알림을 만듭니다. 승인 후 도구가 끝나면 작업 중으로 돌아가며, 해당 Hook 입력 필요 알림과 Windows 알림을 정리합니다. Claude Code의 `Notification(permission_prompt)`은 즉시 권한 Hook이 나오지 않는 요청을 보완합니다.
 
 Codex 훅 형식과 신뢰 절차는 [Codex Hooks](https://learn.chatgpt.com/docs/hooks), Claude Code 설정 및 이벤트는 [Claude Code Hooks](https://code.claude.com/docs/en/hooks)를 따릅니다. CLI 버전이나 실행 환경에 따라 훅이 실행되지 않을 수 있으므로 실제 수신 표시로 확인합니다.
 

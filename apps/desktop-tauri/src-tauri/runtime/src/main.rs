@@ -50,6 +50,14 @@ async fn run() -> Result<()> {
                     if payload["hook_event_name"].as_str() != Some(event) {
                         return Ok(());
                     }
+                    let signal = if provider == "claude" && event == "Notification" {
+                        if payload["notification_type"] != "permission_prompt" {
+                            return Ok(());
+                        }
+                        "PermissionRequest"
+                    } else {
+                        event
+                    };
                     let agent_id = payload["session_id"]
                         .as_str()
                         .or_else(|| payload["thread-id"].as_str());
@@ -64,7 +72,7 @@ async fn run() -> Result<()> {
                     {
                         let hook_process = platform::process_identity(std::process::id());
                         let _ = tokio::time::timeout(Duration::from_secs(2), connection.request("agent.hook", json!({
-                            "session_id":sid,"token":token,"provider":provider,"event":event,
+                            "session_id":sid,"token":token,"provider":provider,"event":signal,
                             "agent_id":agent_id,"turn_id":turn_id,
                             "hook_pid":std::process::id(),"hook_started":hook_process.map(|p| p.started)
                         }))).await;

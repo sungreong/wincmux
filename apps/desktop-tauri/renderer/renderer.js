@@ -319,6 +319,7 @@ function scheduleSessionRefresh() {
   state.streamRefreshTimer = setTimeout(async () => {
     state.streamRefreshTimer = null;
     await loadSessions();
+    await loadWorkspaces();
     cleanupHiddenSessionsForWorkspace(state.selectedWorkspaceId, true);
     paneApi.normalizePaneSessions();
     paneApi.refreshPaneBindings();
@@ -446,6 +447,7 @@ function handleStreamEvent(event) {
     return;
   }
   if (event.method === "notify.read_changed") {
+    if (params.notification_id) void dismissNativeNotifications({ ids: [params.notification_id] });
     state.notifications = state.notifications.filter(row => {
       if (params.notification_id) return row.id !== params.notification_id;
       if (params.workspace_id) return row.workspace_id !== params.workspace_id;
@@ -845,10 +847,6 @@ async function startSessionForPane(paneId, options = {}) {
       return null;
     }
   }
-  if (existing && force) {
-    await rpc("session.close", { session_id: existing }).catch(() => {});
-    delete state.paneSessions[paneId];
-  }
   const dormant = dormantPaneSession(paneId);
   const restoreFromDormant = !cmd && restoreDormant && Boolean(dormant?.spawn_cmd);
   let effectiveCmd = cmd;
@@ -862,6 +860,21 @@ async function startSessionForPane(paneId, options = {}) {
       effectiveArgs = [];
     }
     effectiveCwd = dormant.spawn_cwd ?? undefined;
+  }
+  if (effectiveCmd && !silent && !options.hookPromptChecked) {
+    const provider = workspaceHookProvider(effectiveCmd);
+    if (provider) {
+      const choice = await window.wincmuxHookRegistration.promptForLaunch(ws, provider);
+      if (choice === 'cancel') {
+        const view = state.paneViews.get(paneId);
+        if (view && !view.sessionId) setPaneOverlay(view, 'empty', '어떤 도구로 시작할까요?', '프로젝트 폴더에서 바로 실행합니다.');
+        return null;
+      }
+    }
+  }
+  if (existing && force) {
+    await rpc("session.close", { session_id: existing }).catch(() => {});
+    delete state.paneSessions[paneId];
   }
   paneApi.markPaneStarting(
     paneId,
@@ -1271,6 +1284,19 @@ async function onCreateWorkspace() {
     });
     rememberWorkspacePath(pathValue);
     state.selectedWorkspaceId = created?.workspace?.id ?? null;
+    if (state.selectedWorkspaceId) {
+      const workspaceId = state.selectedWorkspaceId;
+      const providers = ['claude', 'codex'];
+      const missing = await Promise.all(providers.map(async provider => {
+        try { return !(await rpc('workspace.hooks.status', { workspace_id: workspaceId, provider })).registered; }
+        catch { return true; }
+      }));
+      if (missing.some(Boolean) && window.confirm('이 워크스페이스에 Claude Code·Codex 상태 감지 Hook을 등록하시겠습니까?\n기존 Hook은 유지됩니다.')) {
+        for (const [index, provider] of providers.entries()) {
+          if (missing[index]) await ensureWorkspaceHook(workspaceId, provider);
+        }
+      }
+    }
     await loadWorkspaces();
     if (state.selectedWorkspaceId) {
       await switchWorkspace(state.selectedWorkspaceId);
@@ -1278,6 +1304,7 @@ async function onCreateWorkspace() {
     wsNameInput.value = "";
     lastAutoWorkspaceName = "";
     wsPathInput.value = pathValue;
+    setWorkspaceCreateOpen(false);
     setStatus(`Workspace created: ${name}`);
   } finally {
     workspaceCreatePending = false;
@@ -3353,6 +3380,29 @@ function bindNotepadEvents() {
 
 function bindEvents() {
   toggleWorkspaceCreateBtn?.addEventListener("click", () => toggleWorkspaceCreate());
+  workspaceSearchInput?.addEventListener("input", () => updateWorkspaceSidebarOptions({ query: workspaceSearchInput.value }));
+  workspaceFavoriteOnly?.addEventListener("change", () => updateWorkspaceSidebarOptions({ favorites: workspaceFavoriteOnly.checked }));
+  workspaceRunningOnly?.addEventListener("change", () => updateWorkspaceSidebarOptions({ running: workspaceRunningOnly.checked }));
+  workspaceUnreadOnly?.addEventListener("change", () => updateWorkspaceSidebarOptions({ unread: workspaceUnreadOnly.checked }));
+  workspaceSortSelect?.addEventListener("change", () => updateWorkspaceSidebarOptions({ sort: workspaceSortSelect.value }));
+  workspacePageSize?.addEventListener("change", () => updateWorkspaceSidebarOptions({ pageSize: Number(workspacePageSize.value) }));
+  workspacePagePrevious?.addEventListener("click", () => { state.workspaceSidebarOptions.page -= 1; renderWorkspaces(); });
+  workspacePageNext?.addEventListener("click", () => { state.workspaceSidebarOptions.page += 1; renderWorkspaces(); });
+  workspaceCurrentJump?.addEventListener("click", () => {
+    const options = state.workspaceSidebarOptions;
+    if (workspaceCurrentJump.dataset.folder) {
+      state.workspaceFolderCollapsed[workspaceCurrentJump.dataset.folder] = false;
+      localStorage.setItem(STORAGE_KEYS.workspaceFolderCollapsed, JSON.stringify(state.workspaceFolderCollapsed));
+    }
+    if (Number(workspaceCurrentJump.dataset.page) >= 0) options.page = Number(workspaceCurrentJump.dataset.page);
+    else {
+      Object.assign(options, { query: "", favorites: false, running: false, unread: false, page: 0 });
+      workspaceLastRenderedSelection = null;
+      const { page, ...saved } = options;
+      localStorage.setItem(STORAGE_KEYS.workspaceSidebarOptions, JSON.stringify(saved));
+    }
+    renderWorkspaces();
+  });
   workspaceSimpleBtn?.addEventListener("click", () => setWorkspaceListMode("simple"));
   workspaceCompactBtn?.addEventListener("click", () => setWorkspaceListMode("compact"));
   workspaceDetailBtn?.addEventListener("click", () => setWorkspaceListMode("detail"));

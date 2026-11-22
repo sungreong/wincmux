@@ -5,6 +5,7 @@ mod desktop;
 mod local_docker;
 mod remote;
 mod remote_agent;
+mod remote_conversations;
 mod ssh_auth;
 mod ssh_config;
 mod ssh_credentials;
@@ -111,6 +112,44 @@ async fn take_activation(remote: State<'_, Arc<Remote>>) -> Result<Value, String
         remote.rpc("client.activation_ack", json!({})).await?;
     }
     Ok(activation.unwrap_or(Value::Null))
+}
+
+fn validated_terminal_url(value: &str) -> Result<String, String> {
+    if value.len() > 8192 || value.trim() != value || value.chars().any(char::is_control) {
+        return Err("올바른 웹 주소가 아닙니다.".into());
+    }
+    let url = tauri::Url::parse(value).map_err(|_| "올바른 웹 주소가 아닙니다.")?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("HTTP 또는 HTTPS 링크만 열 수 있습니다.".into());
+    }
+    Ok(url.to_string())
+}
+
+#[tauri::command]
+fn open_terminal_url(url: String) -> Result<(), String> {
+    let url = validated_terminal_url(&url)?;
+    use windows::{
+        core::{w, PCWSTR},
+        Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+    };
+    let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR(wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    let code = result.0 as isize;
+    if code <= 32 {
+        return Err(format!(
+            "기본 브라우저로 링크를 열지 못했습니다 (Windows 오류 {code})."
+        ));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -245,6 +284,7 @@ fn main() {
             unsubscribe,
             desktop_action,
             take_activation,
+            open_terminal_url,
             ssh_window::open_ssh_workspace,
             ssh_window::open_docker_workspace,
             ssh_window::ssh_workspace,
@@ -258,6 +298,27 @@ fn main() {
 #[cfg(test)]
 mod activation_tests {
     use super::*;
+    #[test]
+    fn terminal_links_allow_web_urls_only() {
+        assert_eq!(
+            validated_terminal_url("http://localhost:9012/path?x=1").unwrap(),
+            "http://localhost:9012/path?x=1"
+        );
+        assert_eq!(
+            validated_terminal_url("https://example.com/docs").unwrap(),
+            "https://example.com/docs"
+        );
+        for value in [
+            "file:///C:/secret",
+            "javascript:alert(1)",
+            "ftp://example.com",
+            "https://",
+            " https://example.com",
+            "https://example.com\n",
+        ] {
+            assert!(validated_terminal_url(value).is_err(), "{value}");
+        }
+    }
     #[test]
     fn notification_uri_only_accepts_a_notification_uuid() {
         let id = "30ae6541-c5a7-47ab-bc93-354686339f5b";

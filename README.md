@@ -11,6 +11,8 @@ WinCMux is a Windows terminal workspace for Codex CLI, Claude Code, PowerShell, 
 - Run independent terminals in split panes and organize them into workspaces and groups. New and split panes stay in their group. Hide and reattach running panes.
 - Write in the editor below the selected pane. Press **Ctrl+Enter** or **전송 / 대기열** to queue a message for that pane's agent. It sends when the agent is ready and otherwise waits for completion. Drafts follow each pane through selection and splitting.
 - Select a wrapped URL and press **Ctrl+C** to copy one address. Ordinary multiline selections retain their line breaks.
+- Click plain HTTP/HTTPS URLs or OSC 8 hyperlinks in local, SSH, and Docker terminals to open them in the Windows default browser.
+- The top toolbar uses a single row of icon buttons with hover descriptions and shortcuts. Use **Display settings** to choose Korean or English, adjust the main terminal font size, and enable optional WebGL rendering. The language choice is saved and shared across the main, Docker, and SSH windows. WebGL starts off and falls back to the built-in renderer if unavailable.
 - Reopen recorded sessions, resume Codex and Claude conversations, receive Windows notifications, and manage workspace instructions, text snippets, and images.
 - Schedule a one-time follow-up when an agent is ready or at a chosen time. Hooks are optional; when connected, their completion signal takes priority. See [detection and delivery conditions](docs/agent-hooks.md).
 
@@ -30,7 +32,15 @@ Use **VS Code에서 SSH 설정 열기** to edit `config`. Alias changes appear w
 
 After connecting, pick a server folder or use **Docker 컨테이너 접속** beside the target selector to open a container in its own tab. Closing that tab ends its attached terminals. The container and SSH connection stay running. Use the **폴더 저장** icon to reopen the same location on the next SSH connection. The remote account needs access to `docker`, and the container must provide `sh`.
 
-The **+ Claude Code** and **+ Codex** buttons start the corresponding CLI installed in the selected environment. Prompt input waits for the agent's terminal to accept the next message.
+Docker **+ Shell** starts Bash when available in the container, enabling Tab filename completion; otherwise it uses `sh`. Open a new shell or run `exec bash -i` in an existing one to switch.
+
+In SSH and local Docker tabs, use a pane's **Move** icon (Ctrl+Alt+P) to place its terminal to the left, right, above, or below another pane. Use **균등 배분** above the panes to restore equal split sizes.
+
+In the SSH and local Docker file viewer, the file or Git list stays in a left sidebar while the selected file or search results appear on the right.
+
+Use **+ Claude Code**, **+ Codex**, or **+ Gemini** to start an agent in the selected environment. Prompt input waits for the agent's terminal to accept the next message. If WinCMux cannot find the CLI, it shows the official install command, required tools, and a version check. **Install in shell** opens a terminal in that SSH server or Docker container and runs the installer and version check. You can still copy the command for manual installation, then use **Retry** to start the agent. Installation needs internet access. Gemini CLI also needs Node.js 20 or later and npm. [Claude Code setup](https://code.claude.com/docs/en/setup) · [Codex CLI installation](https://learn.chatgpt.com/docs/codex/cli) · [Gemini CLI installation](https://geminicli.com/docs/get-started/installation/)
+
+Use **대화 이력** above the terminals to find and resume Claude or Codex conversations stored in the selected Docker container or SSH server. Search, date filters, sorting, favorites, hiding, compact view, and pagination are available. The environment needs Python 3 for discovery; original transcript files are never changed.
 
 SSH and local Docker panes fit the window height. Output scrolls inside the pane, with the composer below it. Pane icons split right or down, adjust the font, open the file viewer for the pane's folder, and close the pane. `Ctrl+Alt+Q` closes the focused pane. The bell opens completion, input-request, and usage-limit alerts. The clock opens scheduled reminders.
 

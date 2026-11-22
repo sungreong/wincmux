@@ -8,6 +8,8 @@
     <link rel="stylesheet" href="./vendor/highlight/github-dark.min.css" />
     <link rel="stylesheet" href="./design-tokens.css" />
     <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./terminal-search.css" />
+    <link rel="stylesheet" href="./i18n.css" />
     <link rel="stylesheet" href="./workspace-reminders.css" />
   </head>
   <body>
@@ -17,27 +19,39 @@
         <h2>Workspaces</h2>
 
         <div class="workspace-toolbar" aria-label="Workspace controls">
-          <button id="toggleWorkspaceCreateBtn" class="workspace-toggle-btn" aria-expanded="false" aria-controls="workspaceCreateFields">
-            <span>Add workspace</span>
-            <span class="workspace-toggle-icon">▾</span>
-          </button>
+          <button id="toggleWorkspaceCreateBtn" class="workspace-toggle-btn" type="button" title="워크스페이스 추가" aria-label="워크스페이스 추가" aria-expanded="false" aria-controls="workspaceCreateFields"><svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2 6h6l2 2h8v9H2zM2 6V4h6l2 2"/><path d="M14 3v6M11 6h6"/></svg></button>
           <div class="workspace-view-toggle" aria-label="Workspace list density">
-            <button id="workspaceSimpleBtn" type="button" aria-label="한 줄로 보기" title="이름만 한 줄로 표시">한줄</button>
-            <button id="workspaceCompactBtn" type="button" aria-label="요약 보기" title="이름과 상태 요약 표시">요약</button>
-            <button id="workspaceDetailBtn" type="button" aria-label="상세 보기" title="경로와 브랜치까지 표시">상세</button>
+            <button id="workspaceSimpleBtn" type="button" aria-label="한 줄로 보기" title="이름만 한 줄로 표시"><svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M3 10h14"/></svg></button>
+            <button id="workspaceCompactBtn" type="button" aria-label="요약 보기" title="이름과 상태 요약 표시"><svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M3 7h14M3 13h9"/><circle cx="16" cy="13" r="1" fill="currentColor" stroke="none"/></svg></button>
+            <button id="workspaceDetailBtn" type="button" aria-label="상세 보기" title="경로와 브랜치까지 표시"><svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M3 5h14M3 10h11M3 15h8"/><circle cx="16" cy="15" r="1" fill="currentColor" stroke="none"/></svg></button>
           </div>
+        </div>
+
+        <div class="workspace-list-tools">
+          <label class="workspace-search"><svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg><input id="workspaceSearchInput" type="search" placeholder="워크스페이스 검색" aria-label="워크스페이스 검색" autocomplete="off" /></label>
+          <details id="workspaceFilterMenu" class="workspace-filter-menu">
+            <summary title="필터와 정렬" aria-label="필터와 정렬"><svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4h16l-6 7v5l-4 2v-7z"/></svg></summary>
+            <div class="workspace-filter-popover">
+              <label><input id="workspaceFavoriteOnly" type="checkbox" /> 즐겨찾기만</label>
+              <label><input id="workspaceRunningOnly" type="checkbox" /> 실행 중만</label>
+              <label><input id="workspaceUnreadOnly" type="checkbox" /> 미확인만</label>
+              <label for="workspaceSortSelect">정렬</label>
+              <select id="workspaceSortSelect" aria-label="워크스페이스 정렬"><option value="manual">기본 순서</option><option value="recent">최근 사용</option><option value="name">이름순</option></select>
+            </div>
+          </details>
         </div>
 
         <div id="workspaceCreateFields" class="workspace-form" aria-label="Add workspace" hidden>
           <div class="workspace-name-row">
             <input id="wsNameInput" placeholder="New workspace name" aria-label="워크스페이스 이름" />
-            <button id="pickFolderBtn" class="workspace-icon-btn" type="button" aria-label="폴더 찾아보기" title="폴더 찾아보기">📂</button>
-            <button id="createWorkspaceBtn" class="workspace-create-btn workspace-icon-btn" type="button" aria-label="워크스페이스 생성" title="워크스페이스 생성">➕</button>
+            <button id="pickFolderBtn" class="workspace-icon-btn" type="button" aria-label="폴더 찾아보기" title="폴더 찾아보기"><svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2 6h6l2 2h8v9H2zM2 6V4h6l2 2"/></svg></button>
+            <button id="createWorkspaceBtn" class="workspace-create-btn workspace-icon-btn" type="button" aria-label="워크스페이스 생성" title="워크스페이스 생성"><svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="10" cy="10" r="7"/><path d="M10 6v8M6 10h8"/></svg></button>
           </div>
           <input id="wsPathInput" placeholder="Workspace folder path" aria-label="워크스페이스 폴더 경로" title="워크스페이스 폴더 경로" spellcheck="false" />
         </div>
 
-        <ul id="workspaceList"></ul>
+        <div class="workspace-list-region"><button id="workspaceCurrentJump" class="workspace-current-jump" type="button" hidden></button><ul id="workspaceList"></ul></div>
+        <div id="workspacePager" class="workspace-pager" hidden><span id="workspacePageStatus"></span><button id="workspacePagePrevious" type="button" title="이전 페이지" aria-label="이전 페이지">‹</button><button id="workspacePageNext" type="button" title="다음 페이지" aria-label="다음 페이지">›</button><select id="workspacePageSize" title="페이지당 워크스페이스" aria-label="페이지당 워크스페이스"><option value="15">15개</option><option value="30">30개</option><option value="50">50개</option></select></div>
 
         <div class="workspace-notepad">
           <div class="notepad-header">
@@ -52,79 +66,61 @@
       <main class="panel panel-center">
         <div class="toolbar">
           <div class="toolbar-group" role="group" aria-label="워크스페이스와 pane">
-          <button id="toggleWorkspacePanelBtn" class="toolbar-btn" title="Toggle workspace panel (Ctrl+B)">
-            <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <button id="toggleWorkspacePanelBtn" class="toolbar-btn" type="button" title="Toggle workspace panel (Ctrl+B)" aria-label="Toggle workspace panel (Ctrl+B)">
+            <svg class="toolbar-btn-icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
               <rect x="1" y="2" width="14" height="12" rx="1.5"/>
               <line x1="5" y1="2" x2="5" y2="14"/>
             </svg>
             <span class="toolbar-btn-label">Workspaces</span>
           </button>
-          <button id="hiddenPanesBtn" class="toolbar-btn" title="Show hidden terminals (Ctrl+Shift+H)">
-            <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <button id="hiddenPanesBtn" class="toolbar-btn" type="button" title="Show hidden terminals (Ctrl+Shift+H)" aria-label="Show hidden terminals (Ctrl+Shift+H)">
+            <svg class="toolbar-btn-icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
               <path d="M1 8 C4 4 12 4 15 8"/>
               <line x1="2" y1="3" x2="14" y2="13"/>
             </svg>
             <span class="toolbar-btn-label">Hidden (0)</span>
+            <span id="hiddenPanesCount" class="toolbar-count" hidden></span>
           </button>
-          <button id="equalizePanesBtn" class="toolbar-btn" title="Reset all pane splits to equal size (Ctrl+Shift+E)">
-            <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <button id="equalizePanesBtn" class="toolbar-btn" type="button" title="Reset all pane splits to equal size (Ctrl+Shift+E)" aria-label="Reset all pane splits to equal size (Ctrl+Shift+E)">
+            <svg class="toolbar-btn-icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
               <rect x="1" y="2" width="14" height="12" rx="1.5"/>
               <line x1="6" y1="2" x2="6" y2="14"/>
               <line x1="11" y1="2" x2="11" y2="14"/>
             </svg>
             <span class="toolbar-btn-label">Equalize</span>
           </button>
-          <button id="workspaceViewerBtn" class="toolbar-btn" type="button" title="워크스페이스 폴더와 Git 상태 보기" aria-expanded="false" aria-controls="workspaceViewer">▤ <span class="toolbar-btn-label">파일 보기</span></button>
+          <button id="workspaceViewerBtn" class="toolbar-btn" type="button" title="워크스페이스 폴더와 Git 상태 보기" aria-label="워크스페이스 폴더와 Git 상태 보기" aria-expanded="false" aria-controls="workspaceViewer"><svg class="toolbar-btn-icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 4.5h5l1.5 1.5h6.5v7.5h-13z"/><path d="M1.5 4.5V2.5h5l1.5 2"/><path d="M5 9h6M5 11h4"/></svg><span class="toolbar-btn-label">파일 보기</span></button>
           </div>
           <div class="toolbar-group toolbar-connections" role="group" aria-label="연결">
-          <button id="openSshWorkspace" class="toolbar-btn" type="button">원격 SSH</button>
-          <button id="openDockerWorkspace" class="toolbar-btn" type="button">로컬 Docker</button>
-          <button id="mcpSettingsBtn" class="toolbar-btn" type="button" title="MCP 사용 설정과 도구 목록" aria-haspopup="dialog"><span class="toolbar-btn-label">MCP</span><span id="mcpToolbarState" class="mcp-toolbar-state">…</span></button>
+          <button id="openSshWorkspace" class="toolbar-btn" type="button" title="원격 SSH" aria-label="원격 SSH"><svg class="toolbar-btn-icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="2.5" width="13" height="10" rx="1.5"/><path d="m4 5.5 2 2-2 2M7.5 9.5h3M5 14h6"/></svg><span class="toolbar-btn-label">원격 SSH</span></button>
+          <button id="openDockerWorkspace" class="toolbar-btn" type="button" title="로컬 Docker" aria-label="로컬 Docker"><svg class="toolbar-btn-icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="3" height="3" rx=".3"/><rect x="6.5" y="5" width="3" height="3" rx=".3"/><rect x="11" y="5" width="3" height="3" rx=".3"/><path d="M1.5 10h13l-1.5 3H4zM6.5 2h3v3"/></svg><span class="toolbar-btn-label">로컬 Docker</span></button>
+          <button id="mcpSettingsBtn" class="toolbar-btn" type="button" title="MCP 사용 설정과 도구 목록" aria-label="MCP 사용 설정과 도구 목록" aria-haspopup="dialog"><svg class="toolbar-btn-icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="3" cy="8" r="1.5"/><circle cx="12.5" cy="4" r="1.5"/><circle cx="12.5" cy="12" r="1.5"/><path d="M4.5 7.5 11 4.5M4.5 8.5 11 11.5"/></svg><span class="toolbar-btn-label">MCP</span><span id="mcpToolbarState" class="mcp-toolbar-state">…</span></button>
           </div>
-          <div class="toolbar-group" role="group" aria-label="알림과 대화">
-          <button id="toggleNotificationPanelBtn" class="toolbar-btn" title="Toggle notifications panel (Ctrl+Shift+N)">
-            <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <div class="toolbar-group toolbar-notifications" role="group" aria-label="알림과 대화">
+          <button id="toggleNotificationPanelBtn" class="toolbar-btn" type="button" title="Toggle notifications panel (Ctrl+Shift+N)" aria-label="Toggle notifications panel (Ctrl+Shift+N)">
+            <svg class="toolbar-btn-icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
               <path d="M8 2a5 5 0 0 1 5 5v3l1 2H2l1-2V7a5 5 0 0 1 5-5z"/>
               <path d="M6.5 13.5a1.5 1.5 0 0 0 3 0"/>
             </svg>
             <span class="toolbar-btn-label">Notifications</span>
+            <span id="notificationToolbarCount" class="toolbar-count" hidden></span>
           </button>
-          <button id="reminderBtn" class="toolbar-btn" title="수동 알림과 사용 한도 초기화 예약" aria-haspopup="dialog"><svg class="toolbar-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg><span class="toolbar-btn-label">예약 알림<span id="reminderCount"></span></span></button>
-          <button id="conversationBtn" class="toolbar-btn" title="프로젝트의 Claude·Codex 저장 대화 조회 및 재개" aria-haspopup="dialog"><svg class="toolbar-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v12H9l-5 4V5Z"/><path d="M8 9h8m-8 4h5"/></svg><span class="toolbar-btn-label">대화 이력</span></button>
+          <button id="reminderBtn" class="toolbar-btn" type="button" title="수동 알림과 사용 한도 초기화 예약" aria-label="수동 알림과 사용 한도 초기화 예약" aria-haspopup="dialog"><svg class="toolbar-btn-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg><span class="toolbar-btn-label">예약 알림</span><span id="reminderCount" class="toolbar-count"></span></button>
+          <button id="conversationBtn" class="toolbar-btn" type="button" title="프로젝트의 Claude·Codex 저장 대화 조회 및 재개" aria-label="프로젝트의 Claude·Codex 저장 대화 조회 및 재개" aria-haspopup="dialog"><svg class="toolbar-btn-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v12H9l-5 4V5Z"/><path d="M8 9h8m-8 4h5"/></svg><span class="toolbar-btn-label">대화 이력</span></button>
           </div>
           <div class="toolbar-group" role="group" aria-label="설정과 표시">
-          <button id="shortcutHelpBtn" class="toolbar-btn shortcut-help-btn" title="Show keyboard shortcuts (Ctrl+/)">
-            <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+          <button id="terminalRendererSettingsBtn" class="toolbar-btn" type="button" title="화면 설정" aria-label="화면 설정" aria-haspopup="dialog"><svg class="toolbar-btn-icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="2" width="13" height="10" rx="1.5"/><path d="M5 14h6M8 12v2M4 5.5h8M4 8h8"/><circle cx="6" cy="5.5" r=".7" fill="currentColor" stroke="none"/><circle cx="10" cy="8" r=".7" fill="currentColor" stroke="none"/></svg><span class="toolbar-btn-label">화면 설정</span></button>
+          <button id="shortcutHelpBtn" class="toolbar-btn shortcut-help-btn" type="button" title="Show keyboard shortcuts (Ctrl+/)" aria-label="Show keyboard shortcuts (Ctrl+/)">
+            <svg class="toolbar-btn-icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
               <rect x="1.5" y="3" width="13" height="10" rx="1.6"/>
               <path d="M4 6h.01M6.7 6h.01M9.4 6h.01M12 6h.01M4 8.5h.01M6.7 8.5h.01M9.4 8.5h.01M12 8.5h.01M5.2 11h5.6"/>
             </svg>
             <span class="toolbar-btn-label">Keys</span>
           </button>
-          <button id="launchSettingsBtn" class="toolbar-btn" title="실행 도구 목록과 기본 명령어 관리" aria-haspopup="dialog">
-            <svg class="toolbar-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m8 5-6 7 6 7m8-14 6 7-6 7M14 3l-4 18"/></svg>
+          <button id="launchSettingsBtn" class="toolbar-btn" type="button" title="실행 도구 목록과 기본 명령어 관리" aria-label="실행 도구 목록과 기본 명령어 관리" aria-haspopup="dialog">
+            <svg class="toolbar-btn-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m8 5-6 7 6 7m8-14 6 7-6 7M14 3l-4 18"/></svg>
             <span class="toolbar-btn-label">실행 설정</span>
           </button>
-          <div class="font-scale-group" title="Global terminal font size">
-            <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-              <text x="1" y="11" font-size="9" font-family="sans-serif" stroke="none" fill="currentColor" font-weight="bold">A</text>
-              <text x="9" y="14" font-size="6" font-family="sans-serif" stroke="none" fill="currentColor">a</text>
-            </svg>
-            <select id="fontScaleSelect" class="font-scale-select" title="Global terminal font size (Ctrl+= / Ctrl+-)">
-              <option value="80">80%</option>
-              <option value="85">85%</option>
-              <option value="90">90%</option>
-              <option value="95">95%</option>
-              <option value="100" selected>100%</option>
-              <option value="110">110%</option>
-              <option value="120">120%</option>
-            </select>
-            <button id="fontScaleResetBtn" class="toolbar-btn font-scale-reset-btn" title="Reset font size to default (Ctrl+0)">
-              <svg class="toolbar-btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M13 8A5 5 0 1 1 9 3.1"/>
-                <polyline points="9,1 9,4 12,4"/>
-              </svg>
-            </button>
-          </div>
           </div>
           <span id="selectedPaneLabel" class="muted toolbar-pane-label">Selected Pane: -</span>
           <div id="hiddenPanesPopover" class="hidden-panes-popover"></div>
@@ -136,7 +132,8 @@
           <div id="workspaceViewerResize" class="workspace-viewer-resize" role="separator" aria-orientation="vertical" aria-label="파일 보기 너비" tabindex="0" hidden></div>
           <section id="workspaceViewer" class="workspace-viewer" aria-label="워크스페이스 파일 뷰어" hidden>
             <header class="workspace-viewer-header"><strong>파일 보기</strong><span id="viewerRootName"></span><button id="viewerRefresh" type="button" title="새로고침">↻</button><button id="viewerClose" type="button" title="닫기">×</button></header>
-            <div class="workspace-viewer-tabs"><button id="viewerFilesTab" type="button" class="active">파일</button><button id="viewerGitTab" type="button">Git</button><button id="viewerAgentsTab" type="button">Agent</button></div>
+            <div class="workspace-viewer-tabs"><button id="viewerFilesTab" type="button" class="active">파일</button><button id="viewerGitTab" type="button">Git</button><button id="viewerAgentsTab" type="button">Agent</button><button id="viewerCodexTab" type="button">Codex</button><button id="viewerClaudeTab" type="button">Claude</button></div>
+            <div id="viewerAgentSetup" class="workspace-viewer-agent-setup" hidden><span id="viewerAgentHookStatus" role="status"></span><button id="viewerAgentHookRegister" type="button">훅 등록</button></div>
             <div id="viewerMain" class="workspace-viewer-main">
               <div class="workspace-viewer-sidebar">
                 <div id="viewerFolderBar" class="workspace-viewer-folder-bar"><span id="viewerFolderPath">워크스페이스 전체</span><button id="viewerFocusFolder" type="button" title="선택 폴더만 보기" disabled>폴더만 보기</button><button id="viewerParentFolder" type="button" title="상위 폴더로 이동" disabled>상위</button><button id="viewerWorkspaceRoot" type="button" title="워크스페이스 전체로 돌아가기" disabled>전체</button></div>
@@ -183,6 +180,24 @@
         <button type="submit" value="cancel">취소</button>
         <button type="submit" value="create" class="workspace-duplicate-create">그래도 생성</button>
       </form>
+    </dialog>
+
+    <dialog id="workspaceHookDialog" class="workspace-hook-dialog" aria-labelledby="workspaceHookTitle" aria-describedby="workspaceHookHelp">
+      <h2 id="workspaceHookTitle">에이전트 훅 등록</h2>
+      <p id="workspaceHookHelp"></p>
+      <p id="workspaceHookState" role="status"></p>
+      <section id="workspaceHookError" hidden>
+        <strong>훅 등록 실패</strong>
+        <pre id="workspaceHookErrorText"></pre>
+        <label for="workspaceHookPrompt">문제 해결 요청 프롬프트</label>
+        <textarea id="workspaceHookPrompt" readonly rows="5"></textarea>
+        <button id="workspaceHookCopy" type="button">프롬프트 복사</button>
+      </section>
+      <div class="workspace-hook-actions">
+        <button id="workspaceHookCancel" type="button">시작 취소</button>
+        <button id="workspaceHookWithout" type="button">훅 없이 시작</button>
+        <button id="workspaceHookRegister" type="button">훅 등록 후 시작</button>
+      </div>
     </dialog>
 
     <div id="wsInfoOverlay" class="ws-info-overlay" style="display:none">
@@ -267,6 +282,14 @@
       </div>
     </dialog>
 
+    <dialog id="terminalRendererDialog" class="terminal-renderer-dialog" aria-labelledby="terminalRendererTitle">
+      <h2 id="terminalRendererTitle">터미널 화면 설정</h2>
+      <label class="terminal-renderer-option"><span><strong>WebGL 가속 <b id="terminalWebglState">꺼짐</b></strong><small>화면을 GPU로 그립니다. 사용할 수 없으면 기본 렌더러로 표시합니다. 로컬·SSH·Docker 터미널에 적용됩니다.</small></span><input id="terminalWebglEnabled" type="checkbox" role="switch"></label>
+      <label class="ui-language-setting"><span><strong>언어</strong><small>메인·Docker·SSH 창에 함께 적용됩니다.</small></span><select class="ui-language-select" data-ui-language aria-label="언어"><option value="ko">한국어</option><option value="en">English</option></select></label>
+      <div class="terminal-font-setting"><label for="fontScaleSelect"><strong>전체 터미널 글자 크기</strong></label><div class="font-scale-group"><select id="fontScaleSelect" class="font-scale-select" title="Global terminal font size (Ctrl+= / Ctrl+-)" aria-label="Global terminal font size (Ctrl+= / Ctrl+-)"><option value="80">80%</option><option value="85">85%</option><option value="90">90%</option><option value="95">95%</option><option value="100" selected>100%</option><option value="110">110%</option><option value="120">120%</option></select><button id="fontScaleResetBtn" type="button" class="font-scale-reset-btn" title="Reset font size to default (Ctrl+0)" aria-label="Reset font size to default (Ctrl+0)"><svg class="toolbar-btn-icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8A5 5 0 1 1 9 3.1"/><polyline points="9,1 9,4 12,4"/></svg></button></div></div>
+      <footer><button id="terminalRendererClose" type="button">닫기</button></footer>
+    </dialog>
+
     <div id="shortcutOverlay" class="shortcut-overlay" hidden>
       <section class="shortcut-panel" role="dialog" aria-modal="true" aria-labelledby="shortcutTitle">
         <div class="shortcut-header">
@@ -322,12 +345,22 @@
 
     <footer id="statusBar">Ready</footer>
 
+    <script src="./i18n.catalog.js"></script>
+    <script src="./i18n.js"></script>
     <script src="./vendor/xterm.js"></script>
     <script src="./vendor/addon-fit.js"></script>
+    <script src="./vendor/addon-search.js"></script>
+    <script src="./vendor/addon-web-links.js"></script>
+    <script src="./vendor/addon-webgl.js"></script>
     <script src="./vendor/addon-unicode11.js"></script>
+    <script src="./terminal-links.js"></script>
+    <script src="./terminal-renderer.js"></script>
+    <script src="./terminal-search.js"></script>
+    <script src="./remote-shell-composer.js"></script>
     <script src="./tauri-adapter.js"></script>
     <script src="./workspace-folder-groups.js"></script>
     <script src="./renderer.shared.js"></script>
+    <script src="./renderer.hook-registration.js"></script>
     <script src="./renderer.launchers.js"></script>
     <script src="./renderer.layout.js"></script>
     <script src="./pane-icons.js"></script>

@@ -45,7 +45,7 @@
     if (bytes < 1024) return `${bytes} B`;
     const unit = bytes < 1024 * 1024 ? 'KiB' : 'MiB';
     const value = bytes / (unit === 'KiB' ? 1024 : 1024 * 1024);
-    return `${new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1 }).format(value)} ${unit}`;
+    return `${new Intl.NumberFormat(window.wincmuxI18n?.language === 'ko' ? 'ko-KR' : 'en-US', { maximumFractionDigits: 1 }).format(value)} ${unit}`;
   }
   const names = { claude: 'Claude Code', codex: 'Codex' };
   const idPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -118,9 +118,10 @@
       icon.innerHTML = window.wincmuxLaunchProfiles.iconMarkup(item.provider);
       const detail = element('div', 'conversation-detail');
       const title = element('strong', 'conversation-title', item.title || `${names[item.provider]} 대화`);
-      const time = Number.isFinite(item.updated_at) ? new Date(item.updated_at * 1000).toLocaleString() : '';
+      const locale = window.wincmuxI18n?.language === 'ko' ? 'ko-KR' : 'en-US';
+      const time = Number.isFinite(item.updated_at) ? new Date(item.updated_at * 1000).toLocaleString(locale) : '';
       const bytes = formatBytes(item.size_bytes);
-      const meta = element('span', 'conversation-meta', `${names[item.provider]} · ${time}${bytes ? ` · ${bytes}` : ''}${item.archived ? ' · 보관됨' : ''}`);
+      const meta = element('span', 'conversation-meta', `${names[item.provider]} · ${time}${bytes ? ` · ${bytes}` : ''}${item.archived ? ` · ${window.wincmuxI18n?.t('보관됨') ?? '보관됨'}` : ''}`);
       if (bytes) meta.title = '원본 대화 파일 크기 · 메시지 수나 토큰 수가 아닙니다.';
       const cwd = element('span', 'conversation-cwd', item.cwd); cwd.title = item.cwd;
       const id = element('span', 'conversation-id', item.id); id.title = item.source_path;
@@ -220,5 +221,6 @@
     for (const button of dialog.querySelectorAll('[data-picker]')) button.addEventListener('click', () => { void nativePicker(button.dataset.picker).catch(showError); });
   }
   document.getElementById('conversationBtn')?.addEventListener('click', () => { void open(); });
+  window.addEventListener('wincmux:languagechange', () => { if (dialog?.open) render(); });
   window.wincmuxConversations = { open, resume, refresh };
 })();

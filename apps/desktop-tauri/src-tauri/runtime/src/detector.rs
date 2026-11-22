@@ -161,6 +161,7 @@ impl Conversation {
             "SessionStart"
                 | "UserPromptSubmit"
                 | "PermissionRequest"
+                | "PostToolUse"
                 | "Stop"
                 | "StopFailure"
                 | "SessionEnd"
@@ -241,6 +242,9 @@ impl Conversation {
             match event {
                 "UserPromptSubmit" => self.set_state("working", "hook", "Agent turn started"),
                 "PermissionRequest" => self.set_state("blocked", "hook", "Agent requests input"),
+                "PostToolUse" if self.state == "blocked" => {
+                    self.set_state("working", "hook", "Agent resumed after input")
+                }
                 "Stop" if !duplicate_stop && !stale_stop => {
                     self.hook_completed_count += 1;
                     self.set_state("done", "hook", "Agent turn completed")
@@ -250,9 +254,16 @@ impl Conversation {
             }
         }
         Ok(match event {
-            "PermissionRequest" | "StopFailure" if !duplicate_stop => Some(Notice {
+            "PermissionRequest" if !duplicate_stop => Some(Notice {
                 kind: "assistant_prompt",
                 title: "Assistant needs attention",
+                body: self.reason.clone(),
+                key: format!("hook:{event}:{}", self.revision),
+                source: "hook",
+            }),
+            "StopFailure" => Some(Notice {
+                kind: "agent_error",
+                title: "Assistant turn failed",
                 body: self.reason.clone(),
                 key: format!("hook:{event}:{}", self.revision),
                 source: "hook",
@@ -415,6 +426,9 @@ impl Conversation {
         // consecutive turns. Raw output is cleared on submit, so a marker in
         // this turn's output is fresh even if the screen hash is unchanged.
         let raw_completion = DONE_MARKER.is_match(&clean);
+        if !self.agent_turn_submitted && !raw_completion {
+            return None;
+        }
         (fresh_completion || raw_completion)
             .then(|| self.complete_confirmed(&clean))
             .flatten()
@@ -628,6 +642,9 @@ impl Conversation {
             };
             return (notice, resume);
         }
+        if self.state == "done" && self.turn <= self.done {
+            return (None, resume);
+        }
         let recent = tail(&clean, 1_600);
         if let Some(found) = APPROVAL.find(recent) {
             let body = found
@@ -788,6 +805,11 @@ mod tests {
         .unwrap();
         assert_eq!(d.snapshot()["state"], "blocked");
         assert!(d
+            .hook("codex", "PostToolUse", Some("agent-a"), Some("turn-1"))
+            .unwrap()
+            .is_none());
+        assert_eq!(d.snapshot()["state"], "working");
+        assert!(d
             .hook("codex", "Stop", Some("agent-a"), Some("turn-1"))
             .unwrap()
             .is_some());
@@ -799,7 +821,7 @@ mod tests {
             .unwrap()
             .is_none());
         assert_eq!(d.snapshot()["state"], "idle");
-        assert_eq!(d.snapshot()["hook"]["count"], 5);
+        assert_eq!(d.snapshot()["hook"]["count"], 6);
         assert_eq!(d.snapshot()["hook"]["last_event"], "Stop");
         assert!(d.snapshot()["hook"]["last_seen_at"].as_u64().is_some());
     }
@@ -951,12 +973,45 @@ mod tests {
         let mut screen = crate::screen::Screen::default();
         screen.process("\x1b[2;1HClaude Code v2.1.326\x1b[10;1H✻ Worked for 1s · done\x1b[27;1H❯ ");
         detector.input("first\r");
+        detector.agent_turn_submitted = true;
         assert!(detector.observe_screen(screen.prompt_state()).is_some());
         detector.scheduled_terminal_input();
         assert!(detector.observe_screen(screen.prompt_state()).is_none());
         screen.process("\x1b[12;1H✻ Cooked for 2s · done\x1b[27;1H❯ ");
         assert!(detector.observe_screen(screen.prompt_state()).is_some());
         assert_eq!(detector.terminal_completed_count(), 2);
+    }
+
+    #[test]
+    fn stale_startup_completion_does_not_emit_a_done_notice() {
+        let mut detector = Conversation::new("codex.exe", &[]);
+        detector.input("codex\r");
+        assert!(detector
+            .observe_screen(PromptState {
+                visible: true,
+                empty: true,
+                agent_composer: true,
+                completion_fingerprint: Some(42),
+                ..Default::default()
+            })
+            .is_none());
+        assert_eq!(detector.terminal_completed_count(), 0);
+    }
+
+    #[test]
+    fn completed_claude_question_does_not_reblock_a_ready_queue() {
+        let mut detector = Conversation::new("claude.exe", &[]);
+        let mut screen = crate::screen::Screen::default();
+        detector.input("새 질문\r");
+        let completed = "\x1b[2;1HClaude Code v2.1.329\x1b[10;1H지금 수정할까요?\x1b[12;1H✻ Cooked for 38s · done\x1b[27;1H❯ ";
+        screen.process(completed);
+        detector.output(completed);
+        detector.observe_screen(screen.agent_prompt_state(crate::screen::PromptAgent::Claude));
+        assert_eq!(detector.snapshot()["state"], "done");
+        detector.output("\x1b[10;1H지금 수정할까요?");
+        assert_eq!(detector.snapshot()["state"], "done");
+        detector.last_terminal_output = Some(Instant::now() - Duration::from_secs(2));
+        assert!(detector.terminal_ready());
     }
 
     #[test]

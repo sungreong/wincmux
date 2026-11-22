@@ -1,6 +1,6 @@
 use crate::{
     detector::{missing_conversation, Conversation, Notice, Resume},
-    followups,
+    followups, hook_config,
     reminders::{self, LimitDetector},
     screen::PromptAgent,
     store::{self, id, text, Result, NOW},
@@ -435,6 +435,20 @@ impl Core {
             "agent.hook_setup" => {
                 Ok(json!({"core_path":std::env::current_exe()?.to_string_lossy()}))
             }
+            "workspace.hooks.status" | "workspace.hooks.ensure" => {
+                let workspace =
+                    store::workspace(&self.db.lock().unwrap(), text(&p, "workspace_id")?)?;
+                if !matches!(workspace["backend"].as_str(), Some("codex" | "custom")) {
+                    return Err("workspace hooks require a local workspace".into());
+                }
+                let root = Path::new(text(&workspace, "path")?);
+                let provider = text(&p, "provider")?;
+                if method == "workspace.hooks.status" {
+                    hook_config::status(root, provider)
+                } else {
+                    hook_config::ensure(root, provider, &std::env::current_exe()?)
+                }
+            }
             "agent.hook" => {
                 let sid = text(&p, "session_id")?;
                 let token = text(&p, "token")?;
@@ -449,7 +463,7 @@ impl Core {
                 let hook_started = p["hook_started"]
                     .as_u64()
                     .ok_or("missing hook process start")?;
-                let (workspace, notice) = {
+                let (workspace, notice, resumed) = {
                     let mut sessions = self.sessions.lock().unwrap();
                     let live = sessions
                         .running
@@ -477,11 +491,29 @@ impl Core {
                         }
                     }
                     let workspace = live.terminal.workspace.clone();
+                    let was_blocked = live.detector.snapshot()["state"] == "blocked";
                     let notice = live.detector.hook(provider, event, agent_id, turn_id)?;
                     live.hook_anchor = (event != "SessionEnd").then_some(anchor);
-                    (workspace, notice)
+                    (
+                        workspace,
+                        notice,
+                        was_blocked && live.detector.snapshot()["state"] != "blocked",
+                    )
                 };
                 self.publish_agent(sid);
+                if resumed {
+                    let ids = {
+                        let db = self.db.lock().unwrap();
+                        let ids = store::rows(&db,
+                            "SELECT id FROM notifications WHERE session_id=? AND kind='assistant_prompt' AND source_kind='hook' AND read_at IS NULL",
+                            [sid])?;
+                        db.execute(&format!("UPDATE notifications SET read_at={NOW} WHERE session_id=? AND kind='assistant_prompt' AND source_kind='hook' AND read_at IS NULL"), [sid])?;
+                        ids
+                    };
+                    for row in ids {
+                        self.emit("notify.read_changed", json!({"notification_id":row["id"],"workspace_id":workspace,"session_id":sid}));
+                    }
+                }
                 if event == "SessionEnd" {
                     followups::fail_agent(
                         &self.db.lock().unwrap(),
@@ -1575,7 +1607,7 @@ impl Core {
     fn announce(&self, sid: &str, workspace: &str, notice: Notice) -> Result<Value> {
         self.notify(json!({"workspace_id":workspace,"session_id":sid,"title":notice.title,"body":notice.body,
             "kind":notice.kind,"source_kind":notice.source,"source":format!("core-{}",notice.source),
-            "level":if notice.kind == "task_done" {"success"} else {"info"},
+            "level":if notice.kind == "task_done" {"success"} else if notice.kind == "agent_error" {"error"} else {"info"},
             "dedup_key":format!("{sid}|{}|{}",notice.kind,notice.key)}))
     }
 

@@ -7,16 +7,18 @@
     }
     const split = document.createElement("div");
     split.className = "pane-split";
-    split.dataset.direction = direction;
+    const horizontal = direction === "left" || direction === "right";
+    const before = direction === "left" || direction === "up";
+    split.dataset.direction = horizontal ? "right" : "down";
     const divider = document.createElement("div");
     divider.className = "pane-split-divider";
     divider.tabIndex = 0;
     divider.setAttribute("role", "separator");
-    const right = direction === "right";
+    const right = horizontal;
     divider.setAttribute("aria-orientation", right ? "vertical" : "horizontal");
     divider.setAttribute("aria-label", "분할 pane 크기 조절");
     anchor.replaceWith(split);
-    split.append(anchor, divider, pane);
+    split.append(before ? pane : anchor, divider, before ? anchor : pane);
 
     const extent = () => right ? split.clientWidth : split.clientHeight;
     const resize = size => {
@@ -30,7 +32,7 @@
     window.wincmuxViewerPanel.bindDivider(divider, event => {
       const rect = split.getBoundingClientRect();
       resize(right ? event.clientX - rect.left : event.clientY - rect.top);
-    }, delta => resize((right ? anchor.clientWidth : anchor.clientHeight) + delta));
+    }, delta => resize((right ? split.firstElementChild.clientWidth : split.firstElementChild.clientHeight) + delta));
     divider.addEventListener("dblclick", () => reset(split));
   }
 
@@ -49,5 +51,17 @@
     split.style.removeProperty("--split-grow");
   }
 
-  window.wincmuxRemoteLayout = { mount, remove, reset };
+  function move(root, pane, anchor, direction) {
+    if (pane === anchor || !root.contains(pane) || !root.contains(anchor) ||
+        !["left", "right", "up", "down"].includes(direction)) return false;
+    remove(pane);
+    mount(root, pane, anchor, direction);
+    return true;
+  }
+
+  function equalize(root) {
+    for (const split of root.querySelectorAll(".pane-split")) reset(split);
+  }
+
+  window.wincmuxRemoteLayout = { mount, remove, move, equalize };
 })();

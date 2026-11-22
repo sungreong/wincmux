@@ -10,7 +10,9 @@
     if (!viewer.agentCollapsedByWorkspace.has(viewer.workspaceId)) viewer.agentCollapsedByWorkspace.set(viewer.workspaceId, new Set());
     return viewer.agentCollapsedByWorkspace.get(viewer.workspaceId);
   };
-  const activeList = () => $v(viewer.tab === "git" ? "viewerGitList" : viewer.tab === "agents" ? "viewerAgentList" : "viewerTree");
+  const agentTab = () => ["agents", "codex", "claude"].includes(viewer.tab);
+  const hookProvider = () => ["codex", "claude"].includes(viewer.tab) ? viewer.tab : null;
+  const activeList = () => $v(viewer.tab === "git" ? "viewerGitList" : agentTab() ? "viewerAgentList" : "viewerTree");
   const identity = (item) => `${item?.section || viewer.tab}:${item?.relativePath ?? ""}`;
   const restoreSelection = (previous, list) => {
     if (!previous) return;
@@ -288,7 +290,7 @@
     $v("viewerPreview").textContent = "읽는 중…";
     const task = viewer.tab === "git"
       ? (item.section === "untracked" ? call("viewer-preview", { relativePath: item.relativePath }) : call("viewer-git-diff", { relativePath: item.relativePath, section: item.section }))
-      : viewer.tab === "agents" ? window.wincmux.agentAssetRead(workspace().path, item.relativePath).then((result) => ({ kind: "text", text: result.content ?? "" }))
+      : agentTab() ? window.wincmux.agentAssetRead(workspace().path, item.relativePath).then((result) => ({ kind: "text", text: result.content ?? "" }))
       : call("viewer-preview", { relativePath: item.relativePath });
     task.then((result) => {
       if (generation !== viewer.generation || !viewer.open) return;
@@ -539,17 +541,18 @@
     const list = $v("viewerAgentList");
     const previous = viewer.selected && identity(viewer.selected);
     const scroll = list.scrollTop;
-    list.textContent = "Agent 파일을 찾는 중…";
+    list.textContent = `${hookProvider() || "Agent"} 파일을 찾는 중…`;
     const wsId = viewer.workspaceId;
     const listGeneration = ++viewer.listGeneration;
     try {
       const result = await window.wincmux.agentAssetsScan(workspace().path);
-      if (viewer.workspaceId !== wsId || viewer.tab !== "agents" || !viewer.open || viewer.listGeneration !== listGeneration) return;
+      if (viewer.workspaceId !== wsId || !agentTab() || !viewer.open || viewer.listGeneration !== listGeneration) return;
       list.replaceChildren();
-      const items = (result.items || []).filter((item) => item.exists);
+      const provider = hookProvider();
+      const items = (result.items || []).filter((item) => item.exists && (!provider || item.providers?.includes(provider) || (item.providers?.includes("shared") && item.category === "mcp")));
       const summary = document.createElement("div");
       summary.className = "workspace-viewer-note";
-      summary.textContent = `에이전트 관련 파일 ${items.length}개`;
+      summary.textContent = `${provider ? provider === "codex" ? "Codex" : "Claude" : "에이전트"} 관련 파일 ${items.length}개`;
       list.append(summary);
       if (!items.length) {
         const empty = document.createElement("div");
@@ -607,9 +610,31 @@
     } catch (error) { if (viewer.listGeneration === listGeneration) { list.replaceChildren(); showError(error); } }
   }
 
+  async function loadHookStatus() {
+    const provider = hookProvider();
+    if (!provider) return;
+    const wsId = viewer.workspaceId;
+    const label = $v("viewerAgentHookStatus");
+    const button = $v("viewerAgentHookRegister");
+    label.textContent = `${provider} 훅 상태 확인 중…`;
+    button.disabled = true;
+    try {
+      const result = await rpc("workspace.hooks.status", { workspace_id: wsId, provider });
+      if (!viewer.open || viewer.workspaceId !== wsId || hookProvider() !== provider) return;
+      const relative = provider === "codex" ? ".codex/hooks.json" : ".claude/settings.local.json";
+      label.textContent = `${provider === "codex" ? "Codex" : "Claude"} 훅 ${result.events}/${result.total}개 · ${result.registered ? "등록됨" : "등록 필요 · 출력 기반 감지"} · ${relative}`;
+      button.textContent = result.registered ? "훅 다시 등록" : "훅 등록";
+      button.disabled = false;
+    } catch (error) {
+      if (!viewer.open || viewer.workspaceId !== wsId || hookProvider() !== provider) return;
+      label.textContent = `훅 상태를 읽지 못했습니다: ${String(error?.message ?? error)}`;
+      button.disabled = false;
+    }
+  }
+
   function refresh() {
     if (viewer.tab === "git") void loadGit();
-    else if (viewer.tab === "agents") void loadAgents();
+    else if (agentTab()) { void loadAgents(); if (hookProvider()) void loadHookStatus(); }
     else void loadFiles();
   }
 
@@ -622,9 +647,13 @@
     $v("viewerFilesTab").classList.toggle("active", tab === "files");
     $v("viewerGitTab").classList.toggle("active", tab === "git");
     $v("viewerAgentsTab").classList.toggle("active", tab === "agents");
+    $v("viewerCodexTab").classList.toggle("active", tab === "codex");
+    $v("viewerClaudeTab").classList.toggle("active", tab === "claude");
+    $v("viewerAgentSetup").hidden = !hookProvider();
+    $v("workspaceViewer").classList.toggle("has-agent-setup", Boolean(hookProvider()));
     $v("viewerTree").hidden = tab !== "files";
     $v("viewerGitList").hidden = tab !== "git";
-    $v("viewerAgentList").hidden = tab !== "agents";
+    $v("viewerAgentList").hidden = !agentTab();
     $v("viewerGitPager").hidden = tab !== "git";
     $v("viewerSearchForm").hidden = tab !== "files";
     updateFolderBar();
@@ -706,6 +735,22 @@
     $v("viewerFilesTab").addEventListener("click", () => setTab("files"));
     $v("viewerGitTab").addEventListener("click", () => setTab("git"));
     $v("viewerAgentsTab").addEventListener("click", () => setTab("agents"));
+    $v("viewerCodexTab").addEventListener("click", () => setTab("codex"));
+    $v("viewerClaudeTab").addEventListener("click", () => setTab("claude"));
+    $v("viewerAgentHookRegister").addEventListener("click", async () => {
+      const provider = hookProvider();
+      const wsId = viewer.workspaceId;
+      if (!provider || !wsId) return;
+      const button = $v("viewerAgentHookRegister");
+      button.disabled = true;
+      try {
+        await rpc("workspace.hooks.ensure", { workspace_id: wsId, provider });
+        if (viewer.workspaceId !== wsId || hookProvider() !== provider) return;
+        message(`${provider === "codex" ? "Codex" : "Claude"} 훅을 등록했습니다.`);
+        await loadHookStatus();
+        await loadAgents();
+      } catch (error) { showError(error); button.disabled = false; }
+    });
     $v("viewerPrevious").addEventListener("click", () => navigate(-1));
     $v("viewerNext").addEventListener("click", () => navigate(1));
     $v("viewerGitPrevPage").addEventListener("click", () => changeGitPage(-1));
@@ -796,7 +841,7 @@
     } else {
       setTab(tab);
     }
-    $v(tab === "git" ? "viewerGitTab" : tab === "agents" ? "viewerAgentsTab" : "viewerFilesTab").focus();
+    $v(({ git: "viewerGitTab", agents: "viewerAgentsTab", codex: "viewerCodexTab", claude: "viewerClaudeTab" })[tab] || "viewerFilesTab").focus();
   }
   window.wincmuxWorkspaceViewer = { init, workspaceChanged, open };
 })();

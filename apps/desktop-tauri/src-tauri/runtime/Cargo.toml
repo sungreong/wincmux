@@ -1,6 +1,6 @@
 [package]
 name = "wincmux-runtime"
-version = "0.2.105"
+version = "0.2.132"
 edition = "2021"
 
 [[bin]]

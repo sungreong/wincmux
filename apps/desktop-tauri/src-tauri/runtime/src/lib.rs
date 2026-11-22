@@ -3,6 +3,7 @@ pub mod conversations;
 pub mod core;
 pub mod detector;
 pub mod followups;
+pub mod hook_config;
 pub mod layout;
 pub mod pipe;
 pub mod platform;

@@ -4,8 +4,14 @@ import vm from "node:vm";
 const rendererDir = new URL("../renderer/", import.meta.url);
 const orderedFiles = [
   "tauri-adapter.js",
+  "terminal-links.js",
+  "terminal-renderer.js",
+  "remote-terminal-clipboard.js",
+  "remote-shell-composer.js",
+  "remote-conversations.js",
   "workspace-folder-groups.js",
   "renderer.shared.js",
+  "renderer.hook-registration.js",
   "renderer.launchers.js",
   "renderer.layout.js",
   "pane-icons.js",

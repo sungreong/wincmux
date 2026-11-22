@@ -298,6 +298,9 @@ function refreshHiddenPanesUi() {
     const count = hiddenPanesForWorkspace().length;
     setToolbarBtnLabel(hiddenPanesBtn, `Hidden (${count})`);
     hiddenPanesBtn.title = "Show hidden terminals (Ctrl+Shift+H)";
+    hiddenPanesBtn.setAttribute("aria-label", hiddenPanesBtn.title);
+    const badge = hiddenPanesBtn.querySelector(".toolbar-count");
+    if (badge) { badge.textContent = count > 99 ? "99+" : String(count); badge.hidden = count === 0; }
   }
   if (hiddenPanesPopover?.classList.contains("open")) {
     renderHiddenPanesPopover();

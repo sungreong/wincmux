@@ -50,4 +50,22 @@ function workspaceFolderEntries(workspaces) {
   return entries;
 }
 
-if (typeof module !== "undefined") module.exports = { workspacePathKey, workspaceFolderNameKey, workspaceFolderEntries };
+function paginateWorkspaceEntries(entries, pageSize) {
+  const pages = [];
+  let current = [];
+  let size = 0;
+  for (const entry of entries) {
+    const weight = entry.type === "folder" ? entry.members.length : 1;
+    if (current.length && size + weight > pageSize) {
+      pages.push(current);
+      current = [];
+      size = 0;
+    }
+    current.push(entry);
+    size += weight;
+  }
+  if (current.length) pages.push(current);
+  return pages;
+}
+
+if (typeof module !== "undefined") module.exports = { workspacePathKey, workspaceFolderNameKey, workspaceFolderEntries, paginateWorkspaceEntries };

@@ -31,6 +31,8 @@ const INSTRUCTIONS: &[&str] = &[
 const SETTINGS: &[&str] = &[
     ".claude/settings.json",
     ".claude/settings.local.json",
+    ".codex/hooks.json",
+    ".codex/config.toml",
     ".gemini/settings.json",
     "opencode.json",
     "opencode.jsonc",
@@ -277,8 +279,13 @@ fn agent_item(root: &Path, relative: &str) -> Result<Value> {
                 }
             }
             "settings" => {
-                details = json!({"format":"jsonc"});
-                summary = format!("{name} · JSONC config");
+                let format = if ext(&path) == "toml" {
+                    "TOML"
+                } else {
+                    "JSONC"
+                };
+                details = json!({"format":format.to_ascii_lowercase()});
+                summary = format!("{name} · {format} config");
             }
             "instructions" => {
                 let imports = body.lines().filter(|line| line.starts_with('@')).count();

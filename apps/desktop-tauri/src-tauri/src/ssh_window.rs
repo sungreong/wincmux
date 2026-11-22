@@ -458,6 +458,13 @@ pub async fn ssh_workspace(
             return remote.rpc(&action, params).await;
         }
         "set-target" => return set_target(state, &remote, params).await,
+        "conversation-list" => {
+            return crate::remote_conversations::list(
+                state,
+                params["include_children"].as_bool().unwrap_or(true),
+            )
+            .await
+        }
         "close-target" => return close_target(state, params).await,
         _ => {}
     }
@@ -490,7 +497,7 @@ pub async fn ssh_workspace(
             }
             "browse" | "terminal-input" | "terminal-resize" | "terminal-close" | "files"
             | "preview" | "search" | "git-status" | "git-diff" | "agent-submit"
-            | "agent-insert" | "agent-cancel" | "agent-toggle" => {
+            | "agent-insert" | "agent-cancel" | "agent-toggle" | "agent-send-now" => {
                 super::ssh_terminal::action(state, &action, &params).await
             }
             _ => Err("로컬 Docker에서 지원하지 않는 작업입니다.".into()),
@@ -686,9 +693,6 @@ async fn set_target(state: &SshWindow, remote: &Remote, params: Value) -> Result
 async fn close_target(state: &SshWindow, params: Value) -> Result<Value, String> {
     let project: Project =
         serde_json::from_value(params).map_err(|_| "닫을 작업환경을 선택하세요.")?;
-    if project.container.is_none() {
-        return Err("닫을 Docker 작업환경을 선택하세요.".into());
-    }
     let mut conn = state.connections.lock().await;
     let mut result = json!({"ok":true});
     if let Some(active) = conn.active.as_mut() {

@@ -1,4 +1,5 @@
 use crate::{remote::Remote, ssh_terminal::quote};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
     collections::VecDeque,
@@ -14,11 +15,52 @@ use wincmux_runtime::{
     terminal::Utf8Decoder,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Launch {
     Shell,
     Claude,
     Codex,
+    Gemini,
+}
+
+const USER_BIN_PATH: &str = "PATH=\"$HOME/.local/bin:$PATH\"; export PATH;";
+const CONTAINER_SHELL: &str = "PATH=\"$HOME/.local/bin:$PATH\"; export PATH; if command -v bash >/dev/null 2>&1; then exec bash -i; fi; exec sh -i";
+const SSH_SHELL: &str =
+    "PATH=\"$HOME/.local/bin:$PATH\"; export PATH; exec \"${SHELL:-/bin/sh}\" -i";
+pub const SHELL_READY_MARKER: &[u8] = b"\x1b]777;wincmux-shell-ready\x07";
+
+#[derive(Default)]
+pub struct ShellHandoff {
+    matched: usize,
+}
+
+impl ShellHandoff {
+    pub fn observe(&mut self, bytes: &[u8]) -> bool {
+        for &byte in bytes {
+            self.matched = if byte == SHELL_READY_MARKER[self.matched] {
+                self.matched + 1
+            } else if byte == SHELL_READY_MARKER[0] {
+                1
+            } else {
+                0
+            };
+            if self.matched == SHELL_READY_MARKER.len() {
+                self.matched = 0;
+                return true;
+            }
+        }
+        false
+    }
+}
+
+#[derive(Serialize)]
+pub struct AgentInstall {
+    code: &'static str,
+    command: &'static str,
+    install_command: &'static str,
+    verify: String,
+    requires: &'static str,
+    missing_tools: Vec<&'static str>,
 }
 
 impl Launch {
@@ -27,6 +69,7 @@ impl Launch {
             "shell" => Ok(Self::Shell),
             "claude" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
+            "gemini" => Ok(Self::Gemini),
             _ => Err("실행할 도구를 선택하세요.".into()),
         }
     }
@@ -36,27 +79,81 @@ impl Launch {
             Self::Shell => None,
             Self::Claude => Some("claude"),
             Self::Codex => Some("codex"),
+            Self::Gemini => Some("gemini"),
         }
     }
 
     pub fn command(self, path: &str, container: bool) -> String {
         if self.program().is_none() {
             return if container {
-                "exec sh -i"
+                CONTAINER_SHELL
             } else {
-                "exec \"${SHELL:-/bin/sh}\" -i"
+                SSH_SHELL
             }
             .into();
         }
-        self.login_command(path, &self.container_command())
+        self.login_command(
+            path,
+            &self.agent_command(
+                if container {
+                    CONTAINER_SHELL
+                } else {
+                    SSH_SHELL
+                },
+                None,
+                false,
+            ),
+        )
     }
 
     pub fn container_command(self) -> String {
-        let Some(agent) = self.program() else {
-            return "exec sh -i".into();
+        if self.program().is_none() {
+            return CONTAINER_SHELL.into();
+        }
+        self.agent_command(CONTAINER_SHELL, None, false)
+    }
+
+    pub fn resume_command(
+        self,
+        path: &str,
+        container: bool,
+        id: Option<&str>,
+        picker: bool,
+    ) -> String {
+        self.login_command(
+            path,
+            &self.agent_command(
+                if container {
+                    CONTAINER_SHELL
+                } else {
+                    SSH_SHELL
+                },
+                id,
+                picker,
+            ),
+        )
+    }
+
+    pub fn container_resume_command(self, id: Option<&str>, picker: bool) -> String {
+        self.agent_command(CONTAINER_SHELL, id, picker)
+    }
+
+    fn agent_command(self, fallback: &str, id: Option<&str>, picker: bool) -> String {
+        let agent = self.program().expect("agent command requires a CLI");
+        let command = match (self, id, picker) {
+            (Self::Claude, Some(id), _) => format!("\"$executable\" --resume {id}"),
+            (Self::Codex, Some(id), _) => format!("\"$executable\" resume {id}"),
+            (Self::Claude, None, true) => "\"$executable\" --resume".into(),
+            (Self::Codex, None, true) => "\"$executable\" resume".into(),
+            _ => "\"$executable\"".into(),
+        };
+        let run = if matches!(self, Self::Codex) {
+            format!("if [ -n \"${{OPENAI_API_KEY:-}}${{CODEX_ACCESS_TOKEN:-}}${{OPENAI_IDENTITY_TOKEN_FILE:-}}\" ] || \"$executable\" login status >/dev/null 2>&1 || \"$executable\" login --device-auth; then {command}; else printf '%s\\n' 'Codex 기기 코드 로그인이 완료되지 않았습니다. 계정에서 기기 코드 로그인을 허용한 뒤 다시 실행하세요.' >&2; fi")
+        } else {
+            command
         };
         format!(
-            "{} if [ -f \"$executable\" ] && [ -x \"$executable\" ]; then exec \"$executable\"; fi; printf '%s\\n' {} >&2; exit 127",
+            "{USER_BIN_PATH} {} if [ -f \"$executable\" ] && [ -x \"$executable\" ]; then if {run}; then :; fi; printf '\\033]777;wincmux-shell-ready\\007'; {fallback}; fi; printf '%s\\n' {} >&2; exit 127",
             Self::locate(agent),
             quote(self.missing())
         )
@@ -64,14 +161,70 @@ impl Launch {
 
     pub fn probe(self, path: &str, ssh: bool) -> Option<String> {
         let agent = self.program()?;
-        let check = format!(
-            "{} if [ -f \"$executable\" ] && [ -x \"$executable\" ]; then printf '\\nWINCMUX_AGENT_FOUND\\n'; else printf '\\nWINCMUX_AGENT_MISSING\\n'; fi",
-            Self::locate(agent)
+        let mut check = format!(
+            "{} if [ -f \"$executable\" ] && [ -x \"$executable\" ]; then printf '\\nWINCMUX_AGENT_FOUND\\n'; else printf '\\nWINCMUX_AGENT_MISSING\\n';",
+            Self::locate(agent),
         );
+        for tool in self.install_tools() {
+            check.push_str(&format!(
+                " command -v {tool} >/dev/null 2>&1 || printf 'WINCMUX_INSTALL_NEEDS=%s\\n' '{tool}';"
+            ));
+        }
+        check.push_str(" fi");
         Some(if ssh {
             self.login_command(path, &check)
         } else {
             check
+        })
+    }
+
+    fn install_tools(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &["curl", "bash"],
+            Self::Codex => &["curl", "mktemp"],
+            Self::Gemini => &["node", "npm"],
+            Self::Shell => &[],
+        }
+    }
+
+    pub fn install_guide(self, output: &str) -> Option<AgentInstall> {
+        let agent = self.program()?;
+        let codex_install = "_wincmux_script=$(mktemp) && curl -fL https://chatgpt.com/codex/install.sh -o \"$_wincmux_script\" && sh \"$_wincmux_script\"; _wincmux_result=$?; if [ -n \"$_wincmux_script\" ]; then rm -f \"$_wincmux_script\"; fi; if [ \"$_wincmux_result\" -eq 0 ]; then PATH=\"$HOME/.local/bin:$PATH\"; export PATH; codex --version; else printf 'Codex installation failed (exit %s)\\n' \"$_wincmux_result\"; fi";
+        let (command, install_command, requires) = match self {
+            Self::Claude => (
+                "bash -c 'set -o pipefail; curl -fL https://claude.ai/install.sh | bash'",
+                "bash -c 'set -o pipefail; curl -fL https://claude.ai/install.sh | bash' && { if command -v claude >/dev/null 2>&1; then claude --version; else \"$HOME/.local/bin/claude\" --version; fi; }",
+                "curl, Bash",
+            ),
+            Self::Codex => (
+                codex_install,
+                codex_install,
+                "curl, mktemp",
+            ),
+            Self::Gemini => (
+                "npm install -g @google/gemini-cli",
+                "npm install -g @google/gemini-cli && gemini --version",
+                "Node.js 20 이상, npm",
+            ),
+            Self::Shell => return None,
+        };
+        let missing_tools = self
+            .install_tools()
+            .iter()
+            .copied()
+            .filter(|tool| {
+                output
+                    .lines()
+                    .any(|line| line.trim().strip_prefix("WINCMUX_INSTALL_NEEDS=") == Some(*tool))
+            })
+            .collect();
+        Some(AgentInstall {
+            code: "agent_missing",
+            command,
+            install_command,
+            verify: format!("{agent} --version"),
+            requires,
+            missing_tools,
         })
     }
 
@@ -81,10 +234,11 @@ impl Launch {
         )
     }
 
-    pub fn missing(self) -> &'static str {
+    fn missing(self) -> &'static str {
         match self {
             Self::Claude => "이 환경에서 Claude Code를 찾을 수 없습니다. 해당 서버나 컨테이너에 설치된 CLI와 PATH를 확인하세요.",
             Self::Codex => "이 환경에서 Codex를 찾을 수 없습니다. 해당 서버나 컨테이너에 설치된 CLI와 PATH를 확인하세요.",
+            Self::Gemini => "이 환경에서 Gemini CLI를 찾을 수 없습니다. 해당 서버나 컨테이너에 설치된 CLI와 PATH를 확인하세요.",
             Self::Shell => "원격 셸을 실행할 수 없습니다.",
         }
     }
@@ -98,18 +252,19 @@ impl Launch {
 pub enum Composer {
     Add { text: String, due_at: Option<u64> },
     Insert(String),
+    SendNow(u64),
     Cancel(u64),
     Toggle(u64),
 }
 
 impl Composer {
     pub fn parse(action: &str, params: &Value) -> Result<Self, String> {
-        if matches!(action, "agent-cancel" | "agent-toggle") {
+        if matches!(action, "agent-cancel" | "agent-toggle" | "agent-send-now") {
             let id = params["item"].as_u64().ok_or("대기 항목을 선택하세요.")?;
-            return Ok(if action == "agent-cancel" {
-                Self::Cancel(id)
-            } else {
-                Self::Toggle(id)
+            return Ok(match action {
+                "agent-cancel" => Self::Cancel(id),
+                "agent-toggle" => Self::Toggle(id),
+                _ => Self::SendNow(id),
             });
         }
         let text = params["text"]
@@ -163,6 +318,10 @@ enum AgentAlert {
 }
 
 impl AgentSession {
+    pub fn pending_count(&self) -> usize {
+        self.queue.len()
+    }
+
     pub fn new(launch: Launch, cols: u16, rows: u16) -> Option<Self> {
         let mut screen = Screen::default();
         if Screen::validate_size(cols, rows).is_ok() {
@@ -240,7 +399,7 @@ impl AgentSession {
             let screen_notice = self
                 .detector
                 .observe_screen(self.screen.agent_prompt_state(self.prompt_agent));
-            self.announce(notice.or(screen_notice));
+            self.announce(screen_notice.or(notice));
         }
     }
 
@@ -294,6 +453,31 @@ impl AgentSession {
                     item.paused = !item.paused;
                 }
             }
+            Composer::SendNow(id) => {
+                if self.paste_at.is_some() || self.queue.front().is_some_and(|item| item.pasted) {
+                    self.error = Some("붙여넣은 초안을 먼저 확인한 뒤 다시 보내세요.");
+                    return None;
+                }
+                let Some(index) = self
+                    .queue
+                    .iter()
+                    .position(|item| item.id == id && !item.pasted)
+                else {
+                    self.error = Some("대기 입력을 찾을 수 없습니다.");
+                    return None;
+                };
+                let text = self.queue[index].text.clone();
+                let Some(mut data) = self.paste(&text) else {
+                    self.error =
+                        Some("여러 줄 입력을 즉시 보내려면 에이전트의 붙여넣기 모드가 필요합니다.");
+                    return None;
+                };
+                data.push(b'\r');
+                self.queue.remove(index);
+                self.quota.input(&format!("{text}\n"));
+                self.detector.scheduled_terminal_input();
+                return Some(data);
+            }
             Composer::Insert(text) => {
                 if let Some(bytes) = self.paste(&text) {
                     self.manual(&bytes);
@@ -323,7 +507,6 @@ impl AgentSession {
                 self.error =
                     Some("초안 확인이 필요합니다. 내용을 확인하고 터미널에서 직접 제출하세요.");
             } else if since.elapsed() >= Duration::from_millis(350)
-                && self.detector.terminal_pasted_followup_can_submit()
                 && prompt.visible
                 && !prompt.empty
             {
@@ -391,6 +574,176 @@ mod tests {
     use super::*;
 
     const READY: &str = "\x1b[2J\x1b[1;1HOpenAI Codex\x1b[10;1H› Ask Codex to do anything\x1b[14;1H? for shortcuts\x1b[10;3H\x1b[?2004h";
+
+    #[test]
+    fn agent_exit_returns_to_an_interactive_shell() {
+        for launch in [Launch::Claude, Launch::Codex] {
+            let docker = launch.container_command();
+            assert!(docker.contains("then :; fi; printf"));
+            assert!(docker.contains("wincmux-shell-ready"));
+            assert!(docker.contains(CONTAINER_SHELL));
+            assert!(!docker.contains("exec \"$executable\""));
+            let ssh = launch.command("/tmp", false);
+            assert!(ssh.contains(SSH_SHELL));
+        }
+    }
+
+    #[test]
+    fn saved_conversations_resume_through_agent_commands() {
+        let id = "01a1ec05-2e34-7501-a052-3ee0951e1f54";
+        let claude = Launch::Claude.container_resume_command(Some(id), false);
+        assert!(claude.contains(&format!("\"$executable\" --resume {id}")));
+        assert!(claude.contains("wincmux-shell-ready"));
+        let codex = Launch::Codex.resume_command("/app/project", false, Some(id), false);
+        assert!(codex.contains(&format!("\"$executable\" resume {id}")));
+        assert!(codex.contains("login --device-auth"));
+        assert!(Launch::Claude
+            .container_resume_command(None, true)
+            .contains("\"$executable\" --resume"));
+    }
+
+    #[test]
+    fn installed_agent_is_on_new_shell_and_agent_paths() {
+        for script in [CONTAINER_SHELL, SSH_SHELL] {
+            assert!(script.starts_with(USER_BIN_PATH));
+        }
+        for launch in [Launch::Claude, Launch::Codex] {
+            assert!(launch.container_command().starts_with(USER_BIN_PATH));
+        }
+        let guide = Launch::Codex
+            .install_guide("WINCMUX_AGENT_MISSING")
+            .unwrap();
+        assert!(guide.command.contains("export PATH; codex --version"));
+        assert!(guide
+            .install_command
+            .contains("export PATH; codex --version"));
+    }
+
+    #[test]
+    fn codex_uses_device_login_only_when_no_credential_is_available() {
+        let codex = Launch::Codex.container_command();
+        assert!(
+            codex.contains("login status >/dev/null 2>&1 || \"$executable\" login --device-auth")
+        );
+        assert!(codex.contains("OPENAI_API_KEY"));
+        assert!(codex.contains("CODEX_ACCESS_TOKEN"));
+        assert!(codex.contains("then \"$executable\"; else printf"));
+        assert!(!Launch::Claude.container_command().contains("--device-auth"));
+    }
+
+    #[test]
+    fn sends_a_selected_queued_message_immediately_and_keeps_the_rest() {
+        let mut agent = AgentSession::new(Launch::Codex, 100, 24).unwrap();
+        agent.output(READY.as_bytes());
+        for text in ["first", "second"] {
+            agent.apply(Composer::Add {
+                text: text.into(),
+                due_at: None,
+            });
+        }
+        let selected = agent.queue[1].id;
+        let data = agent.apply(Composer::SendNow(selected));
+        assert_eq!(data, Some(b"\x1b[200~second\x1b[201~\r".to_vec()));
+        assert_eq!(agent.queue.len(), 1);
+        assert_eq!(agent.queue[0].text, "first");
+    }
+
+    #[test]
+    fn immediate_send_keeps_the_queue_when_another_draft_is_pasted() {
+        let mut agent = AgentSession::new(Launch::Claude, 100, 24).unwrap();
+        agent.apply(Composer::Add {
+            text: "first".into(),
+            due_at: None,
+        });
+        agent.apply(Composer::Add {
+            text: "second".into(),
+            due_at: None,
+        });
+        agent.queue[0].pasted = true;
+        let selected = agent.queue[1].id;
+        assert!(agent.apply(Composer::SendNow(selected)).is_none());
+        assert_eq!(agent.queue.len(), 2);
+        assert!(agent.error.is_some());
+    }
+
+    #[test]
+    fn pasted_followup_submits_when_visible_even_if_detector_state_changed() {
+        let mut agent = AgentSession::new(Launch::Codex, 100, 24).unwrap();
+        agent.output(READY.as_bytes());
+        agent.apply(Composer::Add {
+            text: "second question".into(),
+            due_at: None,
+        });
+        std::thread::sleep(Duration::from_millis(1600));
+        assert_eq!(
+            agent.tick(),
+            Some(b"\x1b[200~second question\x1b[201~".to_vec())
+        );
+        agent.detector.scheduled_terminal_input();
+        agent.output(b"\x1b[10;1H\x1b[2K\xe2\x80\xba second question\x1b[10;18H");
+        assert!(!agent.detector.terminal_pasted_followup_can_submit());
+        agent.paste_at = Some(Instant::now() - Duration::from_millis(500));
+        assert_eq!(agent.tick(), Some(vec![b'\r']));
+        assert!(agent.queue.is_empty());
+    }
+
+    #[test]
+    fn shell_handoff_detects_a_split_terminal_marker() {
+        let mut handoff = ShellHandoff::default();
+        assert!(!handoff.observe(b"terminal output\x1b]777;wincmux-"));
+        assert!(handoff.observe(b"shell-ready\x07root@container:/app# "));
+        assert!(!handoff.observe(b"shell prompt"));
+    }
+
+    #[test]
+    fn gemini_install_guide_only_lists_its_missing_dependencies() {
+        let launch = Launch::parse(&json!("gemini")).unwrap();
+        let guide = launch
+            .install_guide(
+                "WINCMUX_AGENT_MISSING\nWINCMUX_INSTALL_NEEDS=npm\nWINCMUX_INSTALL_NEEDS=curl",
+            )
+            .unwrap();
+        assert_eq!(guide.command, "npm install -g @google/gemini-cli");
+        assert_eq!(
+            guide.install_command,
+            "npm install -g @google/gemini-cli && gemini --version"
+        );
+        assert_eq!(guide.verify, "gemini --version");
+        assert_eq!(guide.missing_tools, ["npm"]);
+    }
+
+    #[test]
+    fn claude_install_command_reports_download_failures_and_checks_the_installed_binary() {
+        let guide = Launch::Claude
+            .install_guide("WINCMUX_AGENT_MISSING")
+            .unwrap();
+        assert!(guide.command.contains("set -o pipefail"));
+        assert!(guide.install_command.contains("set -o pipefail"));
+        assert!(guide
+            .install_command
+            .contains("curl -fL https://claude.ai/install.sh"));
+        assert!(guide.install_command.contains("claude --version"));
+        assert_eq!(
+            serde_json::to_value(&guide).unwrap()["install_command"],
+            guide.install_command
+        );
+        assert_eq!(guide.missing_tools, Vec::<&str>::new());
+    }
+
+    #[test]
+    fn gemini_followup_waits_for_its_ready_prompt() {
+        let mut agent = AgentSession::new(Launch::Gemini, 100, 24).unwrap();
+        agent.apply(Composer::Add {
+            text: "hello".into(),
+            due_at: None,
+        });
+        assert!(agent.tick().is_none());
+        agent.output(b"\x1b[?2004h\x1b[10;1H> Type your message or @path/to/file\x1b[10;3H");
+        assert!(agent.tick().is_none());
+        agent.output("\x1b]0;◇  Ready (fixture)\x07".as_bytes());
+        std::thread::sleep(Duration::from_millis(1600));
+        assert_eq!(agent.tick(), Some(b"\x1b[200~hello\x1b[201~".to_vec()));
+    }
 
     #[test]
     fn sends_in_order_only_after_the_next_idle_composer() {

@@ -206,10 +206,12 @@
     const { core_path: corePath } = await setupPromise;
     if (!panel.isConnected) return;
     const makeHooks = (provider, events) => Object.fromEntries(events.map(event => [event, [{ hooks: [{ type: 'command', ...(provider === 'codex'
-      ? { command: `"${corePath}" --agent-hook codex ${event}` }
+      ? { command: `& '${corePath.replaceAll("'", "''")}' --agent-hook codex ${event}` }
       : { command: corePath, args: ['--agent-hook', 'claude', event] }), timeout: 3 }] }]]));
-    panel.querySelector('[data-setup="codex"]').value = JSON.stringify({ hooks: makeHooks('codex', ['SessionStart', 'UserPromptSubmit', 'PermissionRequest', 'Stop', 'SessionEnd']) }, null, 2);
-    panel.querySelector('[data-setup="claude"]').value = JSON.stringify({ hooks: makeHooks('claude', ['SessionStart', 'UserPromptSubmit', 'PermissionRequest', 'Stop', 'StopFailure', 'SessionEnd']) }, null, 2);
+    panel.querySelector('[data-setup="codex"]').value = JSON.stringify({ hooks: makeHooks('codex', ['SessionStart', 'UserPromptSubmit', 'PermissionRequest', 'PostToolUse', 'Stop', 'SessionEnd']) }, null, 2);
+    const claudeHooks = makeHooks('claude', ['SessionStart', 'UserPromptSubmit', 'PermissionRequest', 'PostToolUse', 'Stop', 'StopFailure', 'SessionEnd']);
+    claudeHooks.Notification = [{ matcher: 'permission_prompt', hooks: [{ type: 'command', command: corePath, args: ['--agent-hook', 'claude', 'Notification'], timeout: 3 }] }];
+    panel.querySelector('[data-setup="claude"]').value = JSON.stringify({ hooks: claudeHooks }, null, 2);
   }
 
   function createPanel(card, paneId, sessionId) {
@@ -228,12 +230,30 @@
       <button type="submit" class="followup-save" disabled>이 터미널에 예약</button></form>
       <section class="followup-list" aria-label="이 터미널의 예약 목록"></section>
       <details class="followup-setup"><summary>선택 사항 · Codex·Claude 훅 연결 방법</summary>
+        <p>이 워크스페이스 폴더에 바로 등록할 수 있습니다. 기존 훅은 유지됩니다.</p>
+        <button type="button" data-register="claude">Claude Hook 등록</button>
+        <button type="button" data-register="codex">Codex Hook 등록</button>
+        <span class="followup-hook-status" aria-live="polite"></span>
         <p>실행 중인 코어의 경로가 들어간 hooks 값을 기존 설정에 병합하세요. 설정 파일 전체를 덮어쓰지 마세요. Codex 훅은 실행 전 신뢰 승인이 필요합니다.</p>
         <label>Codex · ~/.codex/hooks.json<textarea data-setup="codex" readonly rows="9"></textarea></label><button type="button" data-copy="codex">Codex 설정 복사</button>
         <label>Claude · ~/.claude/settings.json<textarea data-setup="claude" readonly rows="9"></textarea></label><button type="button" data-copy="claude">Claude 설정 복사</button>
         <p>설정 후 새 터미널에서 에이전트를 실행하세요. 훅 수신 횟수가 표시되면 연결된 것입니다.</p>
       </details>`;
     card.append(panel);
+    panel.querySelectorAll('[data-register]').forEach(button => button.addEventListener('click', async () => {
+      const provider = button.dataset.register;
+      const workspaceId = selectedWorkspace()?.id;
+      if (!workspaceId) return;
+      button.disabled = true;
+      try {
+        const result = await rpc('workspace.hooks.ensure', { workspace_id: workspaceId, provider });
+        panel.querySelector('.followup-hook-status').textContent = `${provider} 등록됨 · ${result.events}/${result.total}개 이벤트`;
+        setStatus(`${provider} Hook을 워크스페이스에 등록했습니다.`);
+      } catch (error) {
+        panel.querySelector('.followup-hook-status').textContent = `${provider} 등록 실패: ${error?.message ?? error}`;
+        setStatus(`${provider} Hook 등록 실패: ${error?.message ?? error}`, true);
+      } finally { button.disabled = false; }
+    }));
     panel.addEventListener('pointerdown', event => event.stopPropagation());
     panel.querySelector('[data-close]').addEventListener('click', () => { saveDraft(panel); panel.hidden = true; });
     panel.addEventListener('keydown', event => { if (event.key === 'Escape') { saveDraft(panel); panel.hidden = true; } });

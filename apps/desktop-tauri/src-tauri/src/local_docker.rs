@@ -1,5 +1,5 @@
 use crate::{
-    remote_agent::{AgentSession, Launch},
+    remote_agent::{AgentSession, Launch, ShellHandoff},
     ssh_terminal::{directory_script, require_container, Input},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -91,9 +91,15 @@ impl DockerHost {
         container: Option<&str>,
         path: &str,
         launch: Launch,
+        resume_id: Option<&str>,
+        resume_picker: bool,
     ) -> Result<Spawned, String> {
         let id = require_container(container)?;
-        let script = launch.container_command();
+        let script = if resume_id.is_some() || resume_picker {
+            launch.container_resume_command(resume_id, resume_picker)
+        } else {
+            launch.container_command()
+        };
         let args = [
             "--host",
             self.endpoint.as_str(),
@@ -229,6 +235,7 @@ pub fn stream_terminal(
         },
     );
     tokio::spawn(async move {
+        let mut handoff = ShellHandoff::default();
         let resize = terminal.clone();
         let _ = tokio::task::spawn_blocking(move || resize.resize(cols, rows)).await;
         let mut clock = tokio::time::interval(Duration::from_millis(125));
@@ -240,16 +247,14 @@ pub fn stream_terminal(
             tokio::select! {
                 result = &mut exit => {
                     while let Ok(data) = output_rx.try_recv() {
-                        if let Some(agent) = &mut agent { agent.output(data.as_bytes()); }
-                        let _ = stream.send(json!({"data":STANDARD.encode(data)}));
+                        forward_output(&stream, &mut agent, &mut handoff, &data);
                     }
                     break result.ok()
                 },
                 Some(data) = output_rx.recv(), if managed => {
-                    if let Some(agent) = &mut agent { agent.output(data.as_bytes()); }
-                    let _ = stream.send(json!({"data":STANDARD.encode(data)}));
+                    forward_output(&stream, &mut agent, &mut handoff, &data);
                 },
-                _ = clock.tick(), if managed => {
+                _ = clock.tick(), if agent.is_some() => {
                     if let Some(data) = agent.as_mut().and_then(AgentSession::tick) {
                         let target = terminal.clone();
                         let result = tokio::task::spawn_blocking(move || target.write(&String::from_utf8_lossy(&data))).await;
@@ -289,4 +294,26 @@ pub fn stream_terminal(
         }
         let _ = stream.send(json!({"closed":true,"exit":code}));
     });
+}
+
+fn forward_output(
+    stream: &Channel<Value>,
+    agent: &mut Option<AgentSession>,
+    handoff: &mut ShellHandoff,
+    data: &str,
+) {
+    let ready = agent.is_some() && handoff.observe(data.as_bytes());
+    if !ready {
+        if let Some(agent) = agent.as_mut() {
+            agent.output(data.as_bytes());
+        }
+    }
+    let _ = stream.send(json!({"data":STANDARD.encode(data)}));
+    if ready {
+        let abandoned = agent
+            .take()
+            .map(|agent| agent.pending_count())
+            .unwrap_or_default();
+        let _ = stream.send(json!({"shell_ready":true,"abandoned":abandoned}));
+    }
 }

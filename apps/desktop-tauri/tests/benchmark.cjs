@@ -29,12 +29,12 @@ async function portNumber() {
   return port;
 }
 
-async function connect(port, child) {
+async function connect(port, child, matches = () => true) {
   const target = await until(async () => {
     if (child.exitCode !== null) throw new Error("Application exited: " + child.exitCode);
     try {
       const response = await fetch("http://127.0.0.1:" + port + "/json/list");
-      return (await response.json()).find((target) => target.type === "page" && target.webSocketDebuggerUrl);
+      return (await response.json()).find((target) => target.type === "page" && target.webSocketDebuggerUrl && matches(target));
     } catch { return null; }
   }, "WebView debugger");
   const socket = new WebSocket(target.webSocketDebuggerUrl);

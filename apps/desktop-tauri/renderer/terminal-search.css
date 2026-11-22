@@ -1,0 +1,7 @@
+.terminal-search { position: absolute; z-index: 5; top: 5px; right: 10px; display: flex; align-items: center; gap: 4px; max-width: calc(100% - 20px); padding: 4px; border: 1px solid #587397; border-radius: 6px; background: #18212e; color: #e6ecf5; box-shadow: 0 4px 14px #0008; font: 12px system-ui, sans-serif; }
+.terminal-search[hidden] { display: none; }
+.terminal-search > input[type="search"] { width: clamp(90px, 16vw, 230px); min-width: 0; padding: 4px 6px; border: 1px solid #4c607c; border-radius: 4px; background: #10151c; color: #e6ecf5; }
+.terminal-search-count { min-width: 3.5em; text-align: center; white-space: nowrap; }
+.terminal-search button { min-width: 25px; padding: 3px 5px; border: 1px solid #4c607c; border-radius: 4px; background: #243449; color: #e6ecf5; cursor: pointer; }
+.terminal-search label { display: flex; align-items: center; gap: 2px; white-space: nowrap; }
+.terminal-search label input { margin: 0; }

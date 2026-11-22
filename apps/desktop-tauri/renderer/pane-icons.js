@@ -16,11 +16,14 @@ const paneIcon = Object.freeze({
   group: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.5h8l2.5 2.5v8.5h-13v-11z"/><path d="M6 4.5v3h10.5"/><path d="M7 11h6"/><path d="M7 14h4"/></svg>`,
   more: `<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="10" r="1.2" fill="currentColor" stroke="none"/><circle cx="10" cy="10" r="1.2" fill="currentColor" stroke="none"/><circle cx="15" cy="10" r="1.2" fill="currentColor" stroke="none"/></svg>`,
   files: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="4" width="12" height="12" rx="1.5"/><path d="M7 7h6m-6 3h6m-6 3h6"/></svg>`,
+  search: `<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5"/><path d="m12.2 12.2 4.2 4.2"/></svg>`,
   folder: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6a1 1 0 0 1 1-1h4l2 2h6a1 1 0 0 1 1 1v7H3z"/></svg>`,
   save: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4h10l2 2v10H4zM7 4v4h6V4M7 16v-5h6v5"/></svg>`,
   code: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 5-5 5 5 5m6-10 5 5-5 5m-4 2 2-14"/></svg>`,
   container: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14v10H3zM6.5 8v4m3.5-4v4m3.5-4v4"/></svg>`,
   equalize: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="4" width="15" height="12" rx="1.5"/><path d="M7.5 4v12m5-12v12"/></svg>`,
   bell: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 14h12l-1.5-2.5V8a4.5 4.5 0 0 0-9 0v3.5zM8.5 16.5h3"/></svg>`,
+  display: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3" width="15" height="12" rx="1.5"/><path d="M7 17h6M10 15v2M5.5 7h9M5.5 10.5h9"/><circle cx="8" cy="7" r=".7" fill="currentColor" stroke="none"/><circle cx="12" cy="10.5" r=".7" fill="currentColor" stroke="none"/></svg>`,
+  power: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5v8M5.4 5.3a7 7 0 1 0 9.2 0"/></svg>`,
   clock: `<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l3 2"/></svg>`
 });

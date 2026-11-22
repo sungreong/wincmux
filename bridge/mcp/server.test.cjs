@@ -12,6 +12,7 @@ test('MCP stdio exposes workspace, terminal, input, follow-up, and capture tools
   const developmentFolder = fs.mkdtempSync(path.join(os.tmpdir(), 'wincmux-mcp-config-'));
   const writes = [];
   const activity = [];
+  const hookCalls = [];
   let enabled = true;
   const groups = [{ id: 'g0', workspace_id: 'w1', name: 'Default' }];
   let assignedGroup = 'g0';
@@ -30,9 +31,11 @@ test('MCP stdio exposes workspace, terminal, input, follow-up, and capture tools
       const request = JSON.parse(buffer.slice(0, end));
       if (request.method === 'session.write') writes.push(request.params.data);
       if (request.method === 'mcp.activity.record') activity.push(request.params);
+      if (request.method === 'workspace.hooks.ensure') hookCalls.push(request.params);
       const answers = {
         'mcp.settings.get': { enabled, development_folder: developmentFolder },
         'mcp.activity.record': { ok: true },
+        'workspace.hooks.ensure': { registered: true, provider: request.params.provider },
         'runtime.info': { version: '0.2.6', terminal_count: 1 },
         'workspace.list': { workspaces },
         'session.list': { sessions },
@@ -145,6 +148,8 @@ test('MCP stdio exposes workspace, terminal, input, follow-up, and capture tools
     assert.deepEqual(writes, ['\x1b[200~Hello\x1b[201~\r', '\r']);
     const fresh = await call('wincmux_start_terminal', { workspace_id: 'w1', pane_id: 'p3', group_id: group.id, agent: 'claude' });
     assert.equal(fresh.session_id, 's-new');
+    assert.deepEqual(fresh.hook_registration, { registered: true, provider: 'claude' });
+    assert.deepEqual(hookCalls, [{ workspace_id: 'w1', provider: 'claude' }]);
     assert.match(writes[2], /^claude --session-id [0-9a-f-]{36}\r$/);
     const automatic = await call('wincmux_start_group_terminal', { workspace_id: 'w1', group_id: group.id });
     assert.equal(automatic.session_id, 's-next');

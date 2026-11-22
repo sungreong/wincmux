@@ -1,0 +1,5 @@
+.ui-language-select { width: auto; min-width: 78px; max-width: 100px; padding: 4px 5px; border: 1px solid #40516a; border-radius: 5px; background: #18212e; color: #e6ecf5; font: 12px system-ui, sans-serif; cursor: pointer; }
+.ui-language-select:focus-visible { outline: 2px solid #83b4fa; outline-offset: 1px; }
+.ui-language-setting { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 16px; padding-top: 16px; border-top: 1px solid #3a485e; }
+.ui-language-setting span { display: grid; gap: 5px; }
+.ui-language-setting small { color: #aab9cd; line-height: 1.45; }

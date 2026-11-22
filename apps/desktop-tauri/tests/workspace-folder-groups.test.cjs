@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { workspaceFolderEntries, workspacePathKey, workspaceFolderNameKey } = require('../renderer/workspace-folder-groups.js');
+const { workspaceFolderEntries, workspacePathKey, workspaceFolderNameKey, paginateWorkspaceEntries } = require('../renderer/workspace-folder-groups.js');
 
 test('groups only workspaces with exactly the same folder name', () => {
   const rows = [
@@ -30,4 +30,16 @@ test('normalizes Windows path spelling for duplicate folder confirmation', () =>
   ]);
   assert.equal(duplicate.length, 1);
   assert.deepEqual(duplicate[0].members.map(item => item.workspace.id), ['first', 'second']);
+});
+
+test('pagination keeps a folder together even when it crosses a page boundary', () => {
+  const rows = [
+    ...Array.from({ length: 14 }, (_, index) => ({ id: `single-${index}`, path: `C:\\unique-${index}` })),
+    ...Array.from({ length: 4 }, (_, index) => ({ id: `group-${index}`, path: `C:\\parent-${index}\\shared` })),
+    { id: 'last', path: 'C:\\last' }
+  ];
+  const pages = paginateWorkspaceEntries(workspaceFolderEntries(rows), 15);
+  assert.deepEqual(pages.map(page => page.reduce((count, entry) => count + (entry.members?.length ?? 1), 0)), [14, 5]);
+  assert.deepEqual(pages[1][0].members.map(({ workspace }) => workspace.id), ['group-0', 'group-1', 'group-2', 'group-3']);
+  assert.equal(paginateWorkspaceEntries([], 15).length, 0);
 });

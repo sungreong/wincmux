@@ -36,6 +36,82 @@ async function connect(pipe) {
   }) };
 }
 
+test('workspace hook registration merges existing settings and avoids duplicates', { timeout: 20000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wincmux-hook-workspace-'));
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'wincmux-hook-data-'));
+  const pipe = '\\\\.\\pipe\\wincmux-hook-workspace-' + randomUUID();
+  fs.mkdirSync(path.join(root, '.claude'));
+  const claude = path.join(root, '.claude', 'settings.local.json');
+  fs.writeFileSync(claude, JSON.stringify({ permissions: { allow: ['Bash(ls)'] }, hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo existing' }] }] } }));
+  const core = spawn(exe, ['--data-dir', data, '--pipe', pipe, '--no-tray'], { windowsHide: true, stdio: 'ignore' });
+  let client;
+  try {
+    client = await until(() => connect(pipe).catch(() => null), 'core');
+    const id = (await client.rpc('workspace.create', { name: 'Hook workspace', path: root, backend: 'custom' })).workspace.id;
+    assert.equal((await client.rpc('workspace.hooks.status', { workspace_id: id, provider: 'claude' })).registered, false);
+    assert.equal((await client.rpc('workspace.hooks.ensure', { workspace_id: id, provider: 'claude' })).changed, true);
+    assert.equal((await client.rpc('workspace.hooks.ensure', { workspace_id: id, provider: 'claude' })).changed, false);
+    assert.equal((await client.rpc('workspace.hooks.ensure', { workspace_id: id, provider: 'codex' })).registered, true);
+    const saved = JSON.parse(fs.readFileSync(claude, 'utf8'));
+    assert.deepEqual(saved.permissions.allow, ['Bash(ls)']);
+    assert.equal(saved.hooks.Stop.length, 2);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root, '.codex', 'hooks.json'), 'utf8')).hooks.Stop.length, 1);
+    await client.rpc('runtime.shutdown');
+  } finally {
+    client?.close();
+    if (core.exitCode === null) {
+      core.kill();
+      await new Promise(resolve => core.once('exit', resolve));
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(data, { recursive: true, force: true });
+  }
+});
+
+test('Claude permission notification changes status and clears after tool use', { timeout: 20000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wincmux-claude-hook-notice-'));
+  const pipe = '\\\\.\\pipe\\wincmux-claude-hook-notice-' + randomUUID();
+  const core = spawn(exe, ['--data-dir', root, '--pipe', pipe, '--no-tray'], {
+    windowsHide: true, stdio: 'ignore', env: { ...process.env, WINCMUX_TEST_CORE_EXE: exe }
+  });
+  let client;
+  try {
+    client = await until(() => connect(pipe).catch(() => null), 'core');
+    const ws = (await client.rpc('workspace.create', { name: 'Claude notices', path: root, backend: 'custom' })).workspace.id;
+    const sid = (await client.rpc('session.run', { workspace_id: ws, cmd: 'powershell.exe', args: ['-NoLogo', '-NoProfile'], cwd: root })).session.session_id;
+    const script = path.resolve(__dirname, 'agent-fixture.cjs').replaceAll("'", "''");
+    await client.rpc('session.write', { session_id: sid, data: `& '${process.execPath.replaceAll("'", "''")}' '${script}' --claude\r` });
+    const tail = async () => (await client.rpc('session.tail', { session_id: sid })).output;
+    await until(async () => (await tail()).includes('AGENT_FIXTURE_READY'), 'Claude fixture');
+    const signal = async event => {
+      const marker = `HOOK_EXIT:${event}:0`;
+      const before = (await tail()).split(marker).length - 1;
+      await client.rpc('session.write', { session_id: sid, data: `#hook:${event}#` });
+      await until(async () => (await tail()).split(marker).length - 1 > before, event);
+    };
+    const state = async () => (await client.rpc('agent.list')).items.find(item => item.session_id === sid);
+    await signal('SessionStart');
+    await signal('UserPromptSubmit');
+    await signal('Notification');
+    assert.equal((await state()).state, 'blocked');
+    assert.equal((await client.rpc('notify.unread', { workspace_id: ws })).items.filter(row => row.session_id === sid && row.source_kind === 'hook' && row.kind === 'assistant_prompt').length, 1);
+    await signal('PostToolUse');
+    assert.equal((await state()).state, 'working');
+    assert.equal((await client.rpc('notify.unread', { workspace_id: ws })).items.filter(row => row.session_id === sid && row.source_kind === 'hook' && row.kind === 'assistant_prompt').length, 0);
+    await signal('Stop');
+    assert.equal((await state()).state, 'done');
+    await signal('UserPromptSubmit');
+    await signal('StopFailure');
+    assert.equal((await state()).state, 'error');
+    assert.equal((await client.rpc('notify.unread', { workspace_id: ws })).items.filter(row => row.session_id === sid && row.kind === 'agent_error').length, 1);
+    await client.rpc('session.close', { session_id: sid });
+    await client.rpc('runtime.shutdown');
+  } finally {
+    client?.close();
+    if (core.exitCode === null) core.kill();
+  }
+});
+
 test('hook receipt is process-bound and follow-up submits once only after hook-confirmed completion', { timeout: 60000 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wincmux-agent-'));
   const pipe = '\\\\.\\pipe\\wincmux-agent-' + randomUUID();
@@ -85,6 +161,10 @@ test('hook receipt is process-bound and follow-up submits once only after hook-c
     let rows = (await client.rpc('followup.list')).items;
     assert.equal(rows.find(row => row.id === first.id).status, 'pending');
     assert.equal((await state()).state, 'blocked');
+    assert.equal((await client.rpc('notify.unread', { workspace_id: ws })).items.filter(row => row.session_id === sid && row.source_kind === 'hook' && row.kind === 'assistant_prompt').length, 1);
+    await signal('PostToolUse');
+    assert.equal((await state()).state, 'working');
+    assert.equal((await client.rpc('notify.unread', { workspace_id: ws })).items.filter(row => row.session_id === sid && row.source_kind === 'hook' && row.kind === 'assistant_prompt').length, 0);
     await signal('Stop');
     await until(async () => (await client.rpc('followup.list')).items.find(row => row.id === first.id)?.status === 'sent', 'first delivery', 8000).catch(async err => {
       throw Error(`${err.message}; rows=${JSON.stringify((await client.rpc('followup.list')).items)}; state=${JSON.stringify(await state())}; tail=${JSON.stringify(await tail())}; log=${fs.readFileSync(path.join(root,'core.log'),'utf8')}`);

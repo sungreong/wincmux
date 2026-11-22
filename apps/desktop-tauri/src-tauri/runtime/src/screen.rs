@@ -170,14 +170,23 @@ impl Screen {
                 let text = text.trim();
                 let placeholder =
                     text.starts_with("Try \"") && text.ends_with('"') && placeholder_at_cursor;
-                let codex_chrome = agent == PromptAgent::Codex && trimmed.starts_with('›')
+                let codex_marker = trimmed.starts_with('›') || trimmed.starts_with('❯');
+                let codex_chrome = agent == PromptAgent::Codex && codex_marker
                     || rows
                         .iter()
                         .skip(last + 1)
                         .take(8)
                         .any(|row| row.contains("? for shortcuts"))
-                    || (trimmed.starts_with('›')
+                    || (codex_marker
                         && rows.iter().take(at).any(|row| row.contains("OpenAI Codex")));
+                let prompt_text_col = line.chars().take_while(|ch| ch.is_whitespace()).count()
+                    + 1
+                    + rest.chars().take_while(|ch| ch.is_whitespace()).count();
+                let dim_suggestion = (claude_chrome || codex_chrome)
+                    && placeholder_at_cursor
+                    && screen
+                        .cell(cursor_row, prompt_text_col as u16)
+                        .is_some_and(|cell| cell.dim());
                 let gemini_composer =
                     placeholder_at_cursor && text == "Type your message or @path/to/file";
                 let empty = text.is_empty()
@@ -185,7 +194,8 @@ impl Screen {
                     || gemini_composer
                     || (codex_chrome
                         && placeholder_at_cursor
-                        && text == "Ask Codex to do anything");
+                        && text == "Ask Codex to do anything")
+                    || dim_suggestion;
                 let done_lines: Vec<_> = rows
                     .iter()
                     .take(at)
@@ -320,6 +330,27 @@ mod tests {
         assert!(!screen.prompt_state().empty);
         screen.process("\x1b[8;1H\x1b[2K› 실제로 작성한 초안\x1b[8;3H");
         assert!(!screen.agent_prompt_state(PromptAgent::Codex).empty);
+    }
+    #[test]
+    fn codex_dim_recommendation_is_empty_but_the_same_typed_text_is_not() {
+        let mut screen = Screen::default();
+        screen
+            .process("\x1b[?2004h\x1b[23;1H❯\u{a0}\x1b[2mstream 호출 테스트해줘\x1b[22m\x1b[23;3H");
+        let suggestion = screen.agent_prompt_state(PromptAgent::Codex);
+        assert!(suggestion.visible && suggestion.empty && suggestion.startup_ready);
+        screen.process("\x1b[23;1H\x1b[2K❯\u{a0}stream 호출 테스트해줘\x1b[23;14H");
+        let typed = screen.agent_prompt_state(PromptAgent::Codex);
+        assert!(typed.visible && !typed.empty && !typed.startup_ready);
+    }
+    #[test]
+    fn claude_dim_recommendation_is_empty_but_the_same_typed_text_is_not() {
+        let mut screen = Screen::default();
+        screen.process("\x1b[?2004h\x1b[21;1H────────────────────\x1b[22;1H❯\u{a0}\x1b[2mstream 호출 테스트해줘\x1b[22m\x1b[23;1H────────────────────\x1b[24;1H  ⏵⏵ auto mode on\x1b[22;3H");
+        let suggestion = screen.agent_prompt_state(PromptAgent::Claude);
+        assert!(suggestion.visible && suggestion.empty && suggestion.startup_ready);
+        screen.process("\x1b[22;1H\x1b[2K❯\u{a0}stream 호출 테스트해줘\x1b[22;14H");
+        let typed = screen.agent_prompt_state(PromptAgent::Claude);
+        assert!(typed.visible && !typed.empty && !typed.startup_ready);
     }
     #[test]
     fn gemini_placeholder_is_empty_but_a_typed_draft_is_not() {

@@ -220,7 +220,7 @@ pub fn dispatch(db: &Connection, method: &str, p: &Value) -> Result<Value> {
         }
         "health.check" => Ok(json!({"status":"ok"})),
         "workspace.list" => Ok(
-            json!({"workspaces":rows(db,"SELECT * FROM workspaces WHERE id NOT LIKE 'remote:%' ORDER BY pinned DESC, sort_order, last_active DESC",[])?}),
+            json!({"workspaces":rows(db,"SELECT w.*, (SELECT COUNT(*) FROM sessions s WHERE s.workspace_id=w.id AND s.status='running') AS running_count FROM workspaces w WHERE w.id NOT LIKE 'remote:%' ORDER BY w.pinned DESC, w.sort_order, w.last_active DESC",[])?}),
         ),
         "remote_project.register" => {
             let id = text(p, "id")?;

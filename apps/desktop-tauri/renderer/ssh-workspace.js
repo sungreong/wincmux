@@ -2,6 +2,8 @@
 (() => {
   const { invoke, Channel } = window.__TAURI__.core;
   const el = id => document.getElementById(id);
+  const launchButtons = { newTerminal: "shell", newClaude: "claude", newCodex: "codex", newGemini: "gemini" };
+  const launchLabels = { shell: "셸", claude: "Claude Code", codex: "Codex", gemini: "Gemini CLI" };
   const localDocker = new URLSearchParams(location.search).get("mode") === "docker";
   const rpc = (action, params = {}) => invoke("ssh_workspace", { action, params });
   const status = text => { el("sshStatus").textContent = text; };
@@ -32,6 +34,7 @@
   let folder = "";
   let preview;
   let paneNumber = 0;
+  let paneGroupNumber = 0;
   let dockerItems = [];
   let selectingDockerFolder = false;
   let activeEnvironment;
@@ -87,7 +90,7 @@
   async function guarded(work) {
     if (busy) return;
     busy = true;
-    const disabled = ["connect", "testConnect", "editSshConfig", "refreshAliases", "registerAlias", "registerSubmit", "authSubmit", "skipPassphrase", "authCancel", "disconnect", "newTerminal", "newClaude", "newCodex"].map(el);
+    const disabled = ["connect", "testConnect", "editSshConfig", "refreshAliases", "registerAlias", "registerSubmit", "authSubmit", "skipPassphrase", "authCancel", "disconnect", ...Object.keys(launchButtons)].map(el);
     disabled.forEach(node => { node.disabled = true; });
     el("forget").disabled = true;
     try {
@@ -324,6 +327,7 @@
     if (challenge) await auth(await rpc("answer", { id: challenge.id, answers: [] }));
   }));
   async function disconnect() {
+    conversations.close();
     await rpc("disconnect");
     connected = false;
     challenge = null;
@@ -339,6 +343,8 @@
     el("panes").replaceChildren();
     el("environmentTabs").replaceChildren();
     el("environmentTabs").hidden = true;
+    el("paneGroupTabs").replaceChildren();
+    el("paneGroupTabs").hidden = true;
     setViewerOpen(false);
     el("workspace").hidden = true;
     el("workArea").hidden = true;
@@ -377,7 +383,7 @@
       const items = await rpc("containers");
       dockerItems = items;
       const placeholder = localDocker ? (items.length ? "컨테이너 선택" : "실행 중인 컨테이너 없음") : "SSH 서버";
-      select.replaceChildren(option(placeholder, ""), ...items.map(item => option(item.Names, item.ID)));
+      select.replaceChildren(option(placeholder, ""), ...items.map((item, index) => option(`${index + 1}. ${item.Names}`, item.ID)));
       select.value = items.some(item => item.ID === selected) ? selected : "";
       if (localDocker) {
         status(items.length ? `실행 중인 컨테이너 ${items.length}개` : "실행 중인 컨테이너 없음");
@@ -408,24 +414,63 @@
     select.toggleAttribute("data-container", hasContainer);
     select.title = select.selectedOptions[0]?.textContent || "";
     if (!localDocker) return;
+    const selectedIndex = dockerItems.findIndex(item => item.ID === select.value);
+    const chosen = dockerItems[selectedIndex];
+    el("dockerPickerNumber").hidden = !chosen;
+    el("dockerPickerNumber").textContent = chosen ? String(selectedIndex + 1) : "";
+    el("dockerPickerName").textContent = chosen?.Names || select.selectedOptions[0]?.textContent || "컨테이너 선택";
+    el("dockerPicker").title = chosen ? `${selectedIndex + 1}. ${chosen.Names}` : "컨테이너 선택";
     for (const id of ["directory", "browse", "openTarget"]) el(id).disabled = !hasContainer;
   }
   el("container").addEventListener("change", () => {
     el("directory").value = lastPaths.get(el("container").value) || "";
     updateContainerControls();
   });
+  function chooseContainer(item) {
+    el("container").value = item.ID;
+    el("container").dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  let containerNumber = "";
+  let containerNumberAt = 0;
+  const selectContainerNumber = event => {
+    if (!localDocker || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.key === "/") {
+      event.preventDefault();
+      el("dockerPicker").click();
+      return;
+    }
+    if (!/^\d$/.test(event.key)) return;
+    event.preventDefault();
+    const now = Date.now();
+    containerNumber = now - containerNumberAt < 750 ? containerNumber + event.key : event.key;
+    containerNumberAt = now;
+    const item = dockerItems[Number(containerNumber) - 1];
+    if (item) chooseContainer(item);
+  };
+  for (const id of ["container", "dockerPicker"]) el(id).addEventListener("keydown", selectContainerNumber);
   function showDockerChoices() {
     const query = el("dockerFilter").value.trim().toLowerCase();
-    const matches = dockerItems.filter(item => `${item.Names} ${item.Image}`.toLowerCase().includes(query));
+    const number = /^#?([1-9]\d*)$/.exec(query);
+    const matches = dockerItems.map((item, index) => ({ item, number: index + 1 }))
+      .filter(({ item, number: index }) => number ? index === Number(number[1]) : `${item.Names} ${item.Image}`.toLowerCase().includes(query));
     const list = el("dockerList");
-    list.replaceChildren(...matches.map(item => button(`${item.Names} · ${item.Image}`, () => guarded(async () => {
-      el("container").value = item.ID;
-      el("directory").value = lastPaths.get(item.ID) || "";
-      updateContainerControls();
-      await browse(el("directory").value || ".");
-      selectingDockerFolder = true;
-      el("dockerDialog").close();
-    }))));
+    list.replaceChildren(...matches.map(({ item, number: index }) => {
+      const choice = button("", () => guarded(async () => {
+        chooseContainer(item);
+        await browse(el("directory").value || ".");
+        selectingDockerFolder = true;
+        el("dockerDialog").close();
+      }));
+      choice.className = "docker-choice";
+      const number = document.createElement("span");
+      number.className = "docker-choice-number";
+      number.textContent = String(index);
+      const label = document.createElement("span");
+      label.className = "docker-choice-label";
+      label.textContent = `${item.Names} · ${item.Image}`;
+      choice.append(number, label);
+      return choice;
+    }));
     if (!matches.length) list.textContent = dockerItems.length ? "검색 결과가 없습니다." : "실행 중인 컨테이너가 없습니다.";
   }
   async function loadDockerDialog() {
@@ -437,18 +482,134 @@
       el("dockerList").textContent = String(error);
     }
   }
-  el("dockerAttach").addEventListener("click", () => guarded(async () => {
+  const openDockerChoices = () => guarded(async () => {
     el("dockerFilter").value = "";
     el("dockerDialog").showModal();
+    el("dockerFilter").focus();
     await loadDockerDialog();
-  }));
+  });
+  el("dockerAttach").addEventListener("click", openDockerChoices);
+  el("dockerPicker").addEventListener("click", openDockerChoices);
   el("dockerRefresh").addEventListener("click", () => guarded(loadDockerDialog));
   el("dockerCancel").addEventListener("click", () => el("dockerDialog").close());
   el("dockerFilter").addEventListener("input", showDockerChoices);
+  el("dockerFilter").addEventListener("keydown", event => {
+    if (event.key !== "Enter" || !/^#?[1-9]\d*$/.test(el("dockerFilter").value.trim())) return;
+    const choice = el("dockerList").querySelector("button");
+    if (!choice) return;
+    event.preventDefault();
+    choice.click();
+  });
   el("targetForm").addEventListener("submit", event => {
     event.preventDefault();
     guarded(openProject);
   });
+  function createPaneGroup(environment, name = `Group ${++paneGroupNumber}`) {
+    const group = { name, root: document.createElement("div"), hiddenRoot: document.createElement("div"), focused: null };
+    group.root.className = "pane-group-root";
+    group.hiddenRoot.className = "hidden-pane-storage";
+    group.hiddenRoot.hidden = true;
+    group.root.hidden = true;
+    environment.groups.push(group);
+    environment.root.append(group.root, group.hiddenRoot);
+    switchPaneGroup(environment, group);
+    return group;
+  }
+  function switchPaneGroup(environment, group) {
+    if (!environment.groups.includes(group)) return;
+    if (environment.activeGroup) environment.activeGroup.root.hidden = true;
+    environment.activeGroup = group;
+    group.root.hidden = environment !== activeEnvironment;
+    environment.focused = group.focused && !group.focused.hidden ? group.focused : null;
+    if (environment === activeEnvironment) {
+      renderPaneGroups();
+      updateEqualize();
+      refitEnvironment(environment);
+    }
+  }
+  function renderPaneGroups() {
+    const nav = el("paneGroupTabs");
+    const environment = activeEnvironment;
+    nav.replaceChildren();
+    nav.hidden = !environment;
+    if (!environment) return;
+    for (const group of environment.groups) {
+      const tab = button(group.name, () => {
+        switchPaneGroup(environment, group);
+        environment.focused?.focus();
+      });
+      tab.setAttribute("aria-pressed", String(group === environment.activeGroup));
+      tab.title = `${group.name} · ${[...panes].filter(pane => pane.group === group).length}개 터미널`;
+      nav.append(tab);
+      if (environment.groups.length > 1) {
+        const close = button("×", async () => {
+          const members = [...panes].filter(pane => pane.group === group);
+          if (members.length && !window.confirm(`${group.name}의 터미널 ${members.length}개를 종료하고 그룹을 삭제할까요?`)) return;
+          for (const pane of members) await pane.dispose();
+          group.root.remove();
+          group.hiddenRoot.remove();
+          environment.groups.splice(environment.groups.indexOf(group), 1);
+          if (environment.activeGroup === group) switchPaneGroup(environment, environment.groups[0]);
+          else renderPaneGroups();
+          refreshHiddenPanes();
+        });
+        close.className = "group-close";
+        close.title = `${group.name} 삭제`;
+        close.setAttribute("aria-label", `${group.name} 삭제`);
+        nav.append(close);
+      }
+    }
+    nav.append(button("+ 그룹", () => {
+      const group = createPaneGroup(environment);
+      status(`${group.name}을 만들었습니다. 이 그룹에서 터미널을 열 수 있습니다.`);
+      el("newTerminal").focus();
+    }));
+  }
+  function refreshHiddenPanes() {
+    const hidden = [...panes].filter(pane => pane.environment === activeEnvironment && pane.hidden);
+    el("hiddenRemotePanes").textContent = `숨김 (${hidden.length})`;
+    if (!el("hiddenRemotePanesDialog").open) return;
+    const list = el("hiddenRemotePanesList");
+    list.replaceChildren();
+    if (!hidden.length) list.textContent = "숨긴 터미널이 없습니다.";
+    for (const pane of hidden) {
+      const row = document.createElement("div");
+      row.className = "hidden-remote-row";
+      const title = document.createElement("strong");
+      title.textContent = `${pane.group.name} · ${pane.node.querySelector(".pane-title strong")?.textContent ?? "터미널"}`;
+      row.append(title, button("복원", () => restorePane(pane)), button("종료", () => pane.dispose().catch(alert)));
+      list.append(row);
+    }
+  }
+  function hidePane(pane) {
+    if (!panes.has(pane) || pane.hidden) return;
+    window.wincmuxRemoteLayout.remove(pane.node);
+    pane.group.hiddenRoot.append(pane.node);
+    pane.hidden = true;
+    if (pane.group.focused === pane) pane.group.focused = [...panes].find(other => other.group === pane.group && !other.hidden) ?? null;
+    if (pane.environment.focused === pane) pane.environment.focused = pane.group.focused;
+    updateEqualize();
+    refreshHiddenPanes();
+    pane.environment.focused?.focus();
+  }
+  function restorePane(pane) {
+    if (!panes.has(pane) || !pane.hidden) return;
+    const group = pane.group;
+    const anchor = [...panes].findLast(other => other.group === group && other !== pane && !other.hidden)?.node;
+    window.wincmuxRemoteLayout.mount(group.root, pane.node, anchor, "right");
+    pane.hidden = false;
+    switchPaneGroup(pane.environment, group);
+    pane.environment.focused = group.focused = pane;
+    updateEqualize();
+    refreshHiddenPanes();
+    pane.fit();
+    pane.focus();
+  }
+  el("hiddenRemotePanes").addEventListener("click", () => {
+    el("hiddenRemotePanesDialog").showModal();
+    refreshHiddenPanes();
+  });
+  el("closeHiddenRemotePanes").addEventListener("click", () => el("hiddenRemotePanesDialog").close());
   async function openProject() {
     const launch = activeEnvironment?.focused?.launch ?? "shell";
     const project = await rpc("set-target", { path: el("directory").value || ".", container: el("container").value || null });
@@ -467,20 +628,19 @@
       const controls = document.createElement("div");
       controls.className = "environment-tab";
       controls.append(tab);
-      environment = { key, project, root, tab, controls, open: false, view: "files", folder: "", page: 0, focused: null };
-      if (project.container) {
-        const close = paneAction("closePane", `${name} 작업환경 닫기`, () => requestEnvironmentClose(environment));
-        close.classList.add("environment-close");
-        controls.append(close);
-      }
+      environment = { key, project, root, tab, controls, open: false, view: "files", folder: "", page: 0, focused: null, groups: [], activeGroup: null };
+      const close = paneAction("closePane", `${name} 작업환경 닫기`, () => requestEnvironmentClose(environment));
+      close.classList.add("environment-close");
+      controls.append(close);
       environments.set(key, environment);
       el("panes").append(root);
       el("environmentTabs").append(controls);
       el("environmentTabs").hidden = false;
+      createPaneGroup(environment, "Default");
     }
     environment.project = project;
     activateEnvironment(environment);
-    if (environment.root.childElementCount > 0) return;
+    if ([...panes].some(pane => pane.environment === environment)) return;
     try {
       await openTerminal(launch);
     } catch (error) {
@@ -496,7 +656,11 @@
       return;
     }
     pendingEnvironmentClose = environment;
+    el("closeEnvironmentTitle").textContent = environment.project.container ? "Docker 작업환경 닫기" : "원격 폴더 닫기";
     el("closeEnvironmentTarget").textContent = environment.tab.title;
+    el("closeEnvironmentWarning").textContent = environment.project.container
+      ? "이 탭의 터미널과 실행 중인 작업이 종료됩니다. Docker 컨테이너는 계속 실행됩니다."
+      : "이 폴더 탭의 터미널과 실행 중인 작업이 종료됩니다. SSH 연결은 유지됩니다.";
     el("closeEnvironmentDialog").showModal();
   }
   el("closeEnvironmentDialog").addEventListener("close", () => { pendingEnvironmentClose = null; });
@@ -519,10 +683,11 @@
     environment.root.remove();
     el("environmentTabs").hidden = !environments.size;
     const remaining = [...environments.values()];
-    if (lastPaths.get(container) === path) {
-      const other = remaining.findLast(item => item.project.container === container);
-      if (other) lastPaths.set(container, other.project.path);
-      else lastPaths.delete(container);
+    const targetKey = container || "";
+    if (lastPaths.get(targetKey) === path) {
+      const other = remaining.findLast(item => (item.project.container || "") === targetKey);
+      if (other) lastPaths.set(targetKey, other.project.path);
+      else lastPaths.delete(targetKey);
     }
     if (environment !== activeEnvironment) {
       activeEnvironment?.tab.focus();
@@ -535,16 +700,16 @@
     el("directory").value = localDocker ? "" : lastPaths.get("") || "";
     updateContainerControls();
     updateEqualize();
+    renderPaneGroups();
+    refreshHiddenPanes();
     await setViewerOpen(false);
     const next = localDocker ? remaining.at(-1) : remaining.findLast(item => !item.project.container);
     if (next) {
       await switchEnvironment(next);
       if (next.focused) next.focused.focus();
       else next.tab.focus();
-    } else if (!localDocker) {
-      await openProject();
     } else {
-      el("container").focus();
+      el(localDocker ? "dockerPicker" : "directory").focus();
     }
   }
 
@@ -564,6 +729,8 @@
     await switchEnvironment(environment);
     const targetPane = pane ?? environment.focused;
     if (targetPane) {
+      if (targetPane.hidden) restorePane(targetPane);
+      else switchPaneGroup(environment, targetPane.group);
       targetPane.node.scrollIntoView({ block:"nearest" });
       targetPane.focus();
     }
@@ -571,6 +738,7 @@
   }
 
   function activateEnvironment(environment) {
+    if (activeEnvironment && activeEnvironment !== environment) conversations.close();
     if (activeEnvironment && activeEnvironment !== environment) {
       Object.assign(activeEnvironment, { view, folder, page });
       activeEnvironment.root.hidden = true;
@@ -580,12 +748,15 @@
     activeEnvironment = environment;
     target = environment.project;
     environment.root.hidden = false;
+    environment.activeGroup.root.hidden = false;
     environment.tab.setAttribute("aria-pressed", "true");
     el("container").value = target.container || "";
     el("directory").value = target.path;
     updateContainerControls();
     el("workArea").hidden = false;
+    renderPaneGroups();
     updateEqualize();
+    refreshHiddenPanes();
     if (!changing) return;
     ({ view, folder, page } = environment);
     updateFileTabs();
@@ -631,10 +802,57 @@
     }
   }));
 
-  async function openTerminal(launch, source = null, direction = null) {
+  function showAgentInstall(guide, launch, environment, source, direction) {
+    const dialog = el("agentInstallDialog");
+    el("agentInstallTitle").textContent = `${launchLabels[launch]} 설치`;
+    el("agentInstallTarget").textContent = `CLI 실행 파일을 찾지 못했습니다. ${environment.tab.title}에서 설치할 수 있습니다.`;
+    el("agentInstallRequirements").textContent = `필요한 환경 · 인터넷 연결, ${guide.requires}`;
+    const missing = el("agentInstallMissing");
+    missing.hidden = guide.missing_tools.length === 0;
+    missing.textContent = `먼저 설치할 도구 · ${guide.missing_tools.join(", ")}`;
+    el("agentInstallCommand").textContent = guide.command;
+    el("agentInstallVerify").textContent = guide.verify;
+    const feedback = el("agentInstallFeedback");
+    feedback.hidden = true;
+    el("agentInstallCopy").onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(guide.command);
+        feedback.textContent = "설치 명령을 복사했습니다.";
+      } catch {
+        const range = document.createRange();
+        range.selectNodeContents(el("agentInstallCommand"));
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        feedback.textContent = "선택된 명령을 Ctrl+C로 복사하세요.";
+      }
+      feedback.hidden = false;
+    };
+    const installNow = el("agentInstallNow");
+    installNow.disabled = guide.missing_tools.length > 0;
+    installNow.title = installNow.disabled ? `먼저 설치할 도구: ${guide.missing_tools.join(", ")}` : "셸을 열고 설치 명령을 바로 실행합니다";
+    installNow.onclick = () => {
+      dialog.close();
+      if (environment === activeEnvironment) {
+        guarded(() => openTerminal("shell", source, direction, { tool: launch, command: guide.install_command }));
+      }
+    };
+    const reopen = tool => {
+      dialog.close();
+      if (environment === activeEnvironment) guarded(() => openTerminal(tool, source, direction));
+    };
+    el("agentInstallShell").onclick = () => reopen("shell");
+    el("agentInstallRetry").onclick = () => reopen(launch);
+    dialog.showModal();
+  }
+  el("agentInstallDismiss").addEventListener("click", () => el("agentInstallDialog").close());
+
+  async function openTerminal(launch, source = null, direction = null, install = null, resumeId = null, resumePicker = false) {
     if (!target) return;
     const environment = source?.environment ?? activeEnvironment;
     if (!environment || (source && !panes.has(source))) return;
+    const group = source?.group ?? environment.activeGroup;
+    if (source?.hidden) restorePane(source);
     const project = environment.project;
     const containerName = dockerItems.find(item => item.ID === project.container)?.Names || (project.container ? "Docker" : "SSH 서버");
     const pane = document.createElement("section");
@@ -642,20 +860,22 @@
     if (launch !== "shell") pane.dataset.agent = launch;
     const label = document.createElement("header");
     const heading = document.createElement("strong");
-    const labelText = { shell:"셸", claude:"Claude Code", codex:"Codex" }[launch];
-    heading.textContent = `${labelText} ${++paneNumber}`;
+    heading.textContent = install ? `${launchLabels[install.tool]} 설치 ${++paneNumber}` : `${launchLabels[launch]}${resumeId || resumePicker ? " resume" : ""} ${++paneNumber}`;
     heading.title = `${containerName} · ${project.path}`;
     const surface = document.createElement("div");
     surface.className = "term";
-    const term = new window.Terminal({ fontFamily: "Consolas, monospace", fontSize: 14, scrollback: 5000, theme: { background: "#10151c" } });
+    const links = window.wincmuxTerminalLinks.create(alert);
+    const term = new window.Terminal({ fontFamily: "Consolas, monospace", fontSize: 14, scrollback: 5000, allowProposedApi: true, linkHandler: links.handler, theme: { background: "#10151c" } });
     const fit = new window.FitAddon.FitAddon();
+    let search = null;
     let closed = false;
     let id;
     const startupInput = [];
-    const composer = launch !== "shell" && window.wincmuxRemoteComposer((action, payload) => {
+    let composer = launch !== "shell" && window.wincmuxRemoteComposer((action, payload) => {
       if (!id || closed) return Promise.reject(Error("에이전트 터미널이 준비되지 않았습니다."));
       return rpc(action, { id, ...payload });
     }, button);
+    let shellComposer = null;
     let chain = Promise.resolve();
     const send = (action, data) => {
       if (closed) return;
@@ -665,6 +885,21 @@
       }
       chain = chain.then(() => closed ? null : rpc(action, { id, ...data })).catch(alert);
     };
+    const writeShell = text => {
+      if (!id || closed) return Promise.reject(Error("셸 터미널이 준비되지 않았습니다."));
+      const next = chain.then(() => {
+        if (closed) throw Error("셸 터미널이 종료되었습니다.");
+        return rpc("terminal-input", { id, text });
+      });
+      chain = next.catch(() => {});
+      return next;
+    };
+    function ensureShellComposer() {
+      if (shellComposer) return;
+      shellComposer = window.wincmuxRemoteShellComposer(writeShell, button);
+      pane.append(shellComposer.panel);
+      fitTerminal();
+    }
     function fitTerminal() {
       if (closed || surface.clientWidth < 20 || surface.clientHeight < 20) return;
       const [cols, rows] = [term.cols, term.rows];
@@ -675,19 +910,26 @@
     const record = {
       node: pane,
       environment,
+      group,
+      hidden: false,
       launch,
+      fit: fitTerminal,
       focus: () => term.focus(),
       async dispose(remote = true) {
         if (!panes.delete(record)) return;
         const refocus = remote && pane.contains(document.activeElement);
         closed = true;
         observer.disconnect();
+        search?.dispose();
+        window.wincmuxTerminalRenderer.unregister(term);
         term.dispose();
-        window.wincmuxRemoteLayout.remove(pane);
-        if (environment.focused === record) {
-          environment.focused = [...panes].reverse().find(item => item.environment === environment) ?? null;
-        }
+        if (record.hidden) pane.remove();
+        else window.wincmuxRemoteLayout.remove(pane);
+        if (record.group.focused === record) record.group.focused = [...panes].findLast(item => item.group === record.group && !item.hidden) ?? null;
+        if (environment.focused === record) environment.focused = record.group.focused;
         updateEqualize();
+        refreshHiddenPanes();
+        if (environment === activeEnvironment) renderPaneGroups();
         if (refocus) {
           if (environment.focused) environment.focused.focus();
           else el("newTerminal").focus();
@@ -715,25 +957,38 @@
     });
     const splitRight = paneAction("splitRight", "오른쪽 분할", () => chooseSplit(record, "right"), "Ctrl+Alt+\\");
     const splitDown = paneAction("splitDown", "아래 분할", () => chooseSplit(record, "down"), "Ctrl+Alt+-");
+    const movePane = paneAction("movePane", "터미널 배치 변경", () => openMoveDialog(record), "Ctrl+Alt+P");
+    record.moveButton = movePane;
+    const find = paneAction("search", "터미널 출력 검색", () => search?.open(), "Ctrl+F");
+    const hide = paneAction("hidePane", "터미널 숨기기 (실행 유지)", () => hidePane(record), "Ctrl+Alt+H");
     const close = paneAction("closePane", "pane 닫기", () => record.dispose().catch(alert), "Ctrl+Alt+Q");
     close.classList.add("pane-close");
     splitRight.disabled = splitDown.disabled = true;
-    actions.append(sizeDown, sizeUp, splitRight, splitDown, showPaneFiles, close);
+    actions.append(sizeDown, sizeUp, splitRight, splitDown, movePane, find, hide, showPaneFiles, close);
     label.append(title, actions);
     pane.append(label, surface);
     if (composer) pane.append(composer.panel);
-    pane.addEventListener("focusin", () => { environment.focused = record; });
+    else ensureShellComposer();
+    pane.addEventListener("focusin", () => { environment.focused = record.group.focused = record; });
     pane.addEventListener("keydown", event => {
-      if (event.isComposing || event.keyCode === 229 || event.getModifierState("AltGraph") || event.code !== "KeyQ" || !event.ctrlKey || !event.altKey || event.shiftKey || event.metaKey) return;
+      if (event.isComposing || event.keyCode === 229 || event.getModifierState("AltGraph") || !["KeyQ", "KeyP", "KeyH"].includes(event.code) || !event.ctrlKey || !event.altKey || event.shiftKey || event.metaKey) return;
       event.preventDefault();
       event.stopPropagation();
-      if (!event.repeat) void record.dispose().catch(alert);
+      if (!event.repeat) {
+        if (event.code === "KeyP") openMoveDialog(record);
+        else if (event.code === "KeyH") hidePane(record);
+        else void record.dispose().catch(alert);
+      }
     }, true);
-    window.wincmuxRemoteLayout.mount(environment.root, pane, source?.node, direction);
+    window.wincmuxRemoteLayout.mount(group.root, pane, source?.node, direction);
     panes.add(record);
+    renderPaneGroups();
     updateEqualize();
     term.loadAddon(fit);
+    links.attach(term);
     term.open(surface);
+    search = window.wincmuxTerminalSearch(term, surface);
+    window.wincmuxTerminalRenderer.register(term, alert);
     fitTerminal();
     const stream = new Channel();
     stream.onmessage = message => {
@@ -741,15 +996,34 @@
       if (message.data) term.write(Uint8Array.from(atob(message.data), character => character.charCodeAt(0)));
       if (message.agent && composer) composer.update(message.agent);
       if (message.error) alert(message.error);
+      if (message.shell_ready && composer) {
+        const refocus = composer.panel.contains(document.activeElement);
+        composer.handoff();
+        composer = null;
+        record.launch = "shell";
+        pane.removeAttribute("data-agent");
+        heading.textContent += " · 셸";
+        if (message.abandoned) status(`에이전트가 종료되어 대기 입력 ${message.abandoned}개를 취소했습니다.`);
+        ensureShellComposer();
+        if (refocus) shellComposer.input.focus();
+        fitTerminal();
+      }
       if (message.closed) {
         closed = true;
         if (composer) composer.close();
         else heading.textContent += " · 종료됨";
+        shellComposer?.close();
       }
     };
     term.onData(text => send("terminal-input", { text }));
     term.attachCustomKeyEventHandler(event => {
+      if (!window.wincmuxRemoteTerminalClipboard(event, term, text => invoke("desktop_action", { action:"clipboard-write", params:{ text } }), alert)) return false;
       if (event.isComposing || event.keyCode === 229) return true;
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key?.toLowerCase() === "f") {
+        if (event.type === "keydown") search.open();
+        event.preventDefault();
+        return false;
+      }
       const direction = { Backslash:"right", Minus:"down", NumpadSubtract:"down" }[event.code];
       const delta = { Equal:1, NumpadAdd:1, Minus:-1, NumpadSubtract:-1 }[event.code];
       if (delta && event.ctrlKey && !event.altKey) {
@@ -764,22 +1038,42 @@
     });
     observer.observe(surface);
     try {
-      id = await invoke("ssh_pty", { params: { launch, cols: term.cols, rows: term.rows, source_terminal_id: source?.id }, stream });
+      id = await invoke("ssh_pty", { params: { launch, cols: term.cols, rows: term.rows, source_terminal_id: source?.id, resume_id: resumeId, resume_picker: resumePicker }, stream });
       record.id = id;
       if (panes.has(record)) splitRight.disabled = splitDown.disabled = false;
       if (panes.has(record) && !closed) {
         for (const [action, data] of startupInput.splice(0)) send(action, data);
         send("terminal-resize", { cols: term.cols, rows: term.rows });
+        if (install) {
+          send("terminal-input", { text: `${install.command}\r` });
+          status(`${launchLabels[install.tool]} 설치를 터미널에서 실행했습니다. 결과를 확인하세요.`);
+        }
         term.focus();
       } else if (!panes.has(record)) {
         await rpc("terminal-close", { id });
       }
     } catch (error) {
       await record.dispose(false);
+      if (error?.code === "agent_missing" && activeEnvironment === environment) {
+        showAgentInstall(error, launch, environment, source, direction);
+        return;
+      }
       throw error;
     }
   }
-  for (const [id, launch] of [["newTerminal","shell"], ["newClaude","claude"], ["newCodex","codex"]]) {
+  const conversations = window.wincmuxRemoteConversations({
+    context: () => activeEnvironment && ({
+      identity: JSON.stringify([localDocker ? "docker" : profile?.alias || profile?.host, activeEnvironment.project.container, activeEnvironment.project.path]),
+      title: activeEnvironment.tab.title
+    }),
+    list: include_children => rpc("conversation-list", { include_children }),
+    resume: (provider, id) => {
+      const source = activeEnvironment?.focused && !activeEnvironment.focused.hidden ? activeEnvironment.focused : null;
+      return openTerminal(provider, source, source ? "right" : null, null, id, !id);
+    }
+  });
+  el("remoteConversationBtn").addEventListener("click", () => conversations.open());
+  for (const [id, launch] of Object.entries(launchButtons)) {
     el(id).addEventListener("click", () => guarded(() => openTerminal(launch)));
   }
 
@@ -799,13 +1093,78 @@
       if (split) guarded(() => openTerminal(choice.dataset.splitLaunch, split.source, split.direction));
     });
   }
+  function refitEnvironment(environment) {
+    requestAnimationFrame(() => {
+      for (const pane of panes) if (pane.environment === environment) pane.fit();
+    });
+  }
+  function openMoveDialog(source) {
+    if (!panes.has(source) || source.hidden) return;
+    const targets = [...panes].filter(pane => pane.group === source.group && !pane.hidden && pane !== source);
+    const otherGroups = source.environment.groups.filter(group => group !== source.group);
+    if (!targets.length && !otherGroups.length) return;
+    const dialog = el("moveRemotePaneDialog");
+    if (dialog.open) return;
+    el("moveRemotePaneSource").textContent = `이동할 터미널: ${source.node.querySelector(".pane-title strong")?.textContent ?? "터미널"}`;
+    const list = el("moveRemotePaneTargets");
+    list.replaceChildren();
+    for (const targetPane of targets) {
+      const row = document.createElement("div");
+      row.className = "move-target-row";
+      const name = document.createElement("strong");
+      name.textContent = `기준: ${targetPane.node.querySelector(".pane-title strong")?.textContent ?? "터미널"}`;
+      const actions = document.createElement("div");
+      actions.className = "move-target-actions";
+      for (const [direction, label] of [["left", "왼쪽"], ["right", "오른쪽"], ["up", "위"], ["down", "아래"]]) {
+        actions.append(button(label, () => {
+          if (!panes.has(source) || !panes.has(targetPane)) return;
+          if (window.wincmuxRemoteLayout.move(source.group.root, source.node, targetPane.node, direction)) {
+            dialog.close();
+            refitEnvironment(source.environment);
+            status(`${name.textContent} · ${label}에 배치했습니다.`);
+            source.focus();
+          }
+        }));
+      }
+      row.append(name, actions);
+      list.append(row);
+    }
+    for (const group of otherGroups) {
+      const row = document.createElement("div");
+      row.className = "move-target-row";
+      const name = document.createElement("strong");
+      name.textContent = `그룹: ${group.name}`;
+      row.append(name, button("이 그룹으로 이동", () => {
+        if (!panes.has(source) || source.hidden || !source.environment.groups.includes(group)) return;
+        const previous = source.group;
+        window.wincmuxRemoteLayout.remove(source.node);
+        if (previous.focused === source) previous.focused = [...panes].findLast(pane => pane.group === previous && !pane.hidden && pane !== source) ?? null;
+        source.group = group;
+        const anchor = [...panes].findLast(pane => pane.group === group && pane !== source && !pane.hidden)?.node;
+        window.wincmuxRemoteLayout.mount(group.root, source.node, anchor, "right");
+        dialog.close();
+        switchPaneGroup(source.environment, group);
+        source.environment.focused = group.focused = source;
+        updateEqualize();
+        source.fit();
+        source.focus();
+      }));
+      list.append(row);
+    }
+    dialog.showModal();
+  }
+  el("cancelMoveRemotePane").addEventListener("click", () => el("moveRemotePaneDialog").close());
   function updateEqualize() {
-    el("equalizeRemotePanes").hidden = !activeEnvironment?.root.querySelector(".pane-split");
+    el("equalizeRemotePanes").hidden = !activeEnvironment?.activeGroup?.root.querySelector(".pane-split");
+    for (const pane of panes) {
+      pane.moveButton.disabled = pane.hidden || ![...panes].some(other => other !== pane && other.group === pane.group && !other.hidden);
+    }
   }
   el("equalizeRemotePanes").addEventListener("click", () => {
-    for (const split of activeEnvironment?.root.querySelectorAll(".pane-split") ?? []) {
-      window.wincmuxRemoteLayout.reset(split);
-    }
+    if (!activeEnvironment) return;
+    window.wincmuxRemoteLayout.equalize(activeEnvironment.activeGroup.root);
+    refitEnvironment(activeEnvironment);
+    status("터미널 크기를 균등하게 배분했습니다.");
   });
 
   async function setViewerOpen(open) {
@@ -843,6 +1202,11 @@
     el("preview").replaceChildren();
     el("preview").hidden = true;
     el("previewHeader").hidden = true;
+    el("previewPlaceholder").hidden = false;
+    for (const entry of el("entries").querySelectorAll("button.active")) {
+      entry.classList.remove("active");
+      entry.removeAttribute("aria-current");
+    }
   }
   el("closePreview").addEventListener("click", clearPreview);
   async function showFiles() {
@@ -875,12 +1239,21 @@
       const relative = item.relative;
       if (view === "git") {
         const untracked = item.status === "??";
-        if (!untracked && item.status[0] !== " ") el("entries").append(button(`스테이징 ${item.status[0]}  ${relative}`, () => loadPreview(relative, { staged: true })));
-        if (untracked || item.status[1] !== " ") el("entries").append(button(`작업 트리 ${item.status[1]}  ${relative}`, () => loadPreview(relative, { untracked })));
+        if (!untracked && item.status[0] !== " ") {
+          const entry = button(`스테이징 ${item.status[0]}  ${relative}`, () => loadPreview(relative, { staged: true }));
+          entry.dataset.relative = relative;
+          el("entries").append(entry);
+        }
+        if (untracked || item.status[1] !== " ") {
+          const entry = button(`작업 트리 ${item.status[1]}  ${relative}`, () => loadPreview(relative, { untracked }));
+          entry.dataset.relative = relative;
+          el("entries").append(entry);
+        }
       } else if (item.kind === "directory") {
         el("entries").append(button(`▸ ${item.name}`, () => viewerTask(async () => { folder = relative; page = 0; await list(); })));
       } else {
         const entry = button(item.name, () => loadPreview(relative));
+        entry.dataset.relative = relative;
         entry.disabled = item.kind !== "file";
         el("entries").append(entry);
       }
@@ -910,6 +1283,7 @@
       if (token !== previewRequest) return;
       el("previewHeader").hidden = false;
       el("preview").hidden = false;
+      el("previewPlaceholder").hidden = true;
       el("previewTitle").textContent = result.truncated ? "파일 내용 검색 · 일부 표시" : "파일 내용 검색";
       el("markdownToggle").hidden = true;
       el("language").textContent = "";
@@ -927,6 +1301,12 @@
       const result = await viewerCall(diff ? "git-diff" : "preview", { relative, ...diff });
       if (token !== previewRequest) return;
       preview = { ...result, title: relative, language: diff ? "diff" : undefined, markdown: !diff && /\.mdx?$/i.test(relative), source: Boolean(line), line };
+      for (const entry of el("entries").querySelectorAll("button[data-relative]")) {
+        const selected = entry.dataset.relative === relative;
+        entry.classList.toggle("active", selected);
+        if (selected) entry.setAttribute("aria-current", "true");
+        else entry.removeAttribute("aria-current");
+      }
       await paintPreview();
     });
   }
@@ -935,6 +1315,7 @@
     const { title, text, binary, truncated, markdown, source, language, line: selectedLine } = preview;
     el("previewHeader").hidden = false;
     el("preview").hidden = false;
+    el("previewPlaceholder").hidden = true;
     el("previewTitle").textContent = truncated ? `${title} · 일부 표시` : title;
     el("language").textContent = "";
     el("markdownToggle").hidden = !markdown;
@@ -982,7 +1363,9 @@
     el("saveProfile").hidden = true;
     el("dockerAttach").title = "컨테이너 검색";
     el("dockerAttach").setAttribute("aria-label", "컨테이너 검색");
+    el("dockerAttach").hidden = true;
     el("workspace").hidden = false;
+    el("dockerPicker").hidden = false;
     el("container").replaceChildren(option("목록 불러오는 중", ""));
     updateContainerControls();
     status("로컬 Docker 확인 중…");

@@ -1,12 +1,13 @@
 use crate::{
     local_docker::{self, DockerHost},
     remote::Remote,
-    remote_agent::{AgentSession, Composer, Launch},
+    remote_agent::{AgentInstall, AgentSession, Composer, Launch},
     ssh_auth::Handle,
     ssh_window::{SshWindow, WorkspaceWindows},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use russh::ChannelMsg;
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
 use tauri::{ipc::Channel, State, WebviewWindow};
@@ -195,7 +196,7 @@ pub async fn action(state: &SshWindow, action: &str, params: &Value) -> Result<V
             )
         }
         "terminal-input" | "terminal-resize" | "terminal-close" | "agent-submit"
-        | "agent-insert" | "agent-cancel" | "agent-toggle" => {
+        | "agent-insert" | "agent-cancel" | "agent-toggle" | "agent-send-now" => {
             let id = params["id"].as_str().ok_or("원격 터미널을 지정하세요.")?;
             if action == "terminal-close" {
                 state.remove_terminal(id).await;
@@ -239,6 +240,25 @@ pub(super) async fn directory(
     Ok(path.into())
 }
 
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum PtyError {
+    Message(String),
+    Install(AgentInstall),
+}
+
+impl From<String> for PtyError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<&str> for PtyError {
+    fn from(message: &str) -> Self {
+        Self::Message(message.into())
+    }
+}
+
 #[tauri::command]
 pub async fn ssh_pty(
     window: WebviewWindow,
@@ -246,21 +266,45 @@ pub async fn ssh_pty(
     remote: State<'_, Arc<Remote>>,
     params: Value,
     stream: Channel<Value>,
-) -> Result<String, String> {
+) -> Result<String, PtyError> {
     let state = windows.select(&window)?;
     let (host, project) = state.project(params["source_terminal_id"].as_str()).await?;
-    let path = &project.path;
+    let resume_id = params["resume_id"].as_str();
+    let resume_picker = params["resume_picker"] == true;
+    let launch = Launch::parse(&params["launch"])?;
+    if (resume_id.is_some() || resume_picker) && !matches!(launch, Launch::Claude | Launch::Codex) {
+        return Err("Claude 또는 Codex 대화를 선택하세요.".into());
+    }
+    let resume_path = if let Some(id) = resume_id {
+        Some(
+            crate::remote_conversations::resolve(
+                state,
+                params["launch"].as_str().unwrap_or_default(),
+                id,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let path = resume_path.as_deref().unwrap_or(&project.path);
     let container = project.container.as_deref();
     let cols = size(&params, "cols", 80);
     let rows = size(&params, "rows", 24);
-    let launch = Launch::parse(&params["launch"])?;
     if let Some(probe) = launch.probe(path, matches!(&host, WorkspaceHost::Ssh(_))) {
         let response = host.exec(path, container, &probe, 16 * 1024).await?;
-        if !String::from_utf8_lossy(&response)
+        let output = String::from_utf8_lossy(&response);
+        let result = output
             .lines()
-            .any(|line| line.trim() == "WINCMUX_AGENT_FOUND")
-        {
-            return Err(launch.missing().into());
+            .map(str::trim)
+            .rfind(|line| matches!(*line, "WINCMUX_AGENT_FOUND" | "WINCMUX_AGENT_MISSING"));
+        if result != Some("WINCMUX_AGENT_FOUND") {
+            if result == Some("WINCMUX_AGENT_MISSING") {
+                if let Some(guide) = launch.install_guide(&output) {
+                    return Err(PtyError::Install(guide));
+                }
+            }
+            return Err("이 작업환경에서 CLI 설치 여부를 확인하지 못했습니다.".into());
         }
     }
     let mut agent = AgentSession::new(launch, cols as u16, rows as u16);
@@ -278,8 +322,16 @@ pub async fn ssh_pty(
                 .add_terminal(&host, id.clone(), project.clone(), sender)
                 .await?;
             let docker = docker.clone();
+            let run_path = path.to_owned();
+            let resume_id = resume_id.map(str::to_owned);
             let result = tokio::task::spawn_blocking(move || {
-                docker.spawn_terminal(project.container.as_deref(), &project.path, launch)
+                docker.spawn_terminal(
+                    project.container.as_deref(),
+                    &run_path,
+                    launch,
+                    resume_id.as_deref(),
+                    resume_picker,
+                )
             })
             .await
             .map_err(error)
@@ -295,7 +347,7 @@ pub async fn ssh_pty(
                 ),
                 Err(err) => {
                     state.remove_terminal(&id).await;
-                    return Err(err);
+                    return Err(err.into());
                 }
             }
             return Ok(id);
@@ -304,7 +356,11 @@ pub async fn ssh_pty(
     let command = shell(
         path,
         container,
-        &launch.command(path, container.is_some()),
+        &if resume_id.is_some() || resume_picker {
+            launch.resume_command(path, container.is_some(), resume_id, resume_picker)
+        } else {
+            launch.command(path, container.is_some())
+        },
         true,
     )?;
     let mut channel = timeout(Duration::from_secs(8), handle.channel_open_session())
@@ -318,10 +374,11 @@ pub async fn ssh_pty(
     channel.exec(true, command).await.map_err(error)?;
     if let Err(err) = state.add_terminal(&host, id.clone(), project, sender).await {
         let _ = channel.close().await;
-        return Err(err);
+        return Err(err.into());
     }
     tokio::spawn(async move {
         let mut exit = None;
+        let mut handoff = crate::remote_agent::ShellHandoff::default();
         let mut clock = tokio::time::interval(Duration::from_millis(125));
         clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -349,10 +406,17 @@ pub async fn ssh_pty(
                 }
                 message = channel.wait() => match message {
                     Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => {
-                        if let Some(agent) = &mut agent { agent.output(&data); }
+                        let ready = agent.is_some() && handoff.observe(&data);
+                        if !ready {
+                            if let Some(agent) = &mut agent { agent.output(&data); }
+                        }
                         if stream.send(json!({"data":STANDARD.encode(data)})).is_err() {
                             let _ = channel.close().await;
                             break;
+                        }
+                        if ready {
+                            let abandoned = agent.take().map(|agent| agent.pending_count()).unwrap_or_default();
+                            let _ = stream.send(json!({"shell_ready":true,"abandoned":abandoned}));
                         }
                     }
                     Some(ChannelMsg::Failure) => {

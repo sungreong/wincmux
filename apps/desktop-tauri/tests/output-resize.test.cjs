@@ -124,7 +124,8 @@ test('pane initialization actually activates the installed Unicode provider', ()
   const { Unicode11Addon } = require('@xterm/addon-unicode11');
   const initialization = panes.slice(panes.indexOf('function createPaneView('), panes.indexOf('  term.open(host);'));
   const context = {
-    window: { Terminal, FitAddon: { FitAddon }, Unicode11Addon: { Unicode11Addon } },
+    window: { Terminal, FitAddon: { FitAddon }, Unicode11Addon: { Unicode11Addon },
+      wincmuxTerminalLinks: { create: () => ({ handler: { activate() {} }, attach() {} }) } },
     currentPaneFontSize: () => 14, state: { selectedWorkspaceId: 'workspace', terminal: { unicode_width: 'unicode11' } },
     PANE_TERMINAL_FONT_FAMILY: 'monospace', document: { documentElement: {} },
     getComputedStyle: () => ({ getPropertyValue: () => '#000000' }), console

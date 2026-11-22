@@ -7,7 +7,7 @@ const readline = require('node:readline');
 const { execFile } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 
-let version = '0.2.105';
+let version = '0.2.132';
 try { version = require('../../package.json').version; } catch { /* Bundled resource has no package.json. */ }
 const pipe = process.env.WINCMUX_TAURI_PIPE || '\\\\.\\pipe\\wincmux-tauri-rpc';
 const OBJECT = { type: 'object', additionalProperties: false };
@@ -310,6 +310,8 @@ async function dispatchTool(name, args = {}) {
         if (bound && sessions.sessions.some(session => session.id === bound.session_id && session.status === 'running'))
           throw Error('pane already has a running terminal');
       }
+      const hook_registration = agent === 'claude' || agent === 'codex'
+        ? await coreCall('workspace.hooks.ensure', { workspace_id, provider: agent }) : null;
       const started = await coreCall('session.run', {
         workspace_id, cmd: 'powershell.exe', args: ['-NoLogo', '-NoProfile'], cwd: workspace.path
       });
@@ -329,7 +331,7 @@ async function dispatchTool(name, args = {}) {
         await coreCall('session.close', { session_id }).catch(() => {});
         throw error;
       }
-      return { session_id, workspace_id, workspace_name: workspace.name, pane_id: args.pane_id ?? null, group_id: args.group_id ?? null, launched: agent };
+      return { session_id, workspace_id, workspace_name: workspace.name, pane_id: args.pane_id ?? null, group_id: args.group_id ?? null, launched: agent, hook_registration };
     }
     case 'wincmux_start_group_terminal': {
       const workspace_id = (await resolveWorkspace(args)).id;

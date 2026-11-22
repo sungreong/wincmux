@@ -8,7 +8,7 @@ const id = '12345678-1234-1234-1234-123456789abc';
 function harness({ live=false, delayed=false }={}) {
   let complete;
   const calls=[];
-  const context={ window:{},document:{getElementById:()=>null},
+  const context={ window:{addEventListener:()=>{}},document:{getElementById:()=>null},
     state:{selectedWorkspaceId:'ws',selectedPaneId:'pane',paneViews:new Map([['pane',{sessionId:live?'existing':null}]]),paneSessions:live?{pane:'existing'}:{}},
     dormantPaneSession:()=>null, setStatus:()=>{},
     splitPaneInternal:async(...args)=>{calls.push(['split',...args]);return {first:'kept',second:'new'};},

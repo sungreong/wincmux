@@ -2,6 +2,150 @@
 
 [README](README.md) · [GitHub Releases](https://github.com/sungreong/wincmux/releases)
 
+## 0.2.132 — Shared Docker and remote workspace controls
+
+### Release summary since 0.2.105
+
+- Check workspace hooks for Claude Code and Codex and offer registration on launch. Fall back to terminal output detection when hooks are absent, and show a copyable troubleshooting prompt on registration failure.
+- Expand SSH and Docker agent launch, conversation history, shell input, and pane controls. Expose relevant configuration files in the local and remote file viewers.
+- Search Docker containers by number, name, or image and select them by number key or Enter. Align SSH folder closing and local and remote notification controls.
+- Add language switching, terminal output search and link opening, optional WebGL rendering, and shared UI rules in `UI-GUIDE.md`.
+
+- Separate container numbers and names in the Docker picker and search results while keeping their keyboard selection in sync.
+- Add the existing close-tab flow to SSH folders, leaving the SSH connection open after the last folder closes.
+- Size local and remote notification controls for counts and document shared UI rules in `UI-GUIDE.md`.
+
+## 0.2.131 — Faster Docker container selection
+
+- Number containers consistently in the dropdown and search dialog. Select by number key, open search with `/`, or enter a number and press Enter.
+- Keep name and image search and match the compact spacing used by remote workspace controls.
+
+## 0.2.130 — Compact notification controls
+
+- Keep only the bell button wide enough for its count, restoring standard widths for reminder and conversation buttons.
+
+## 0.2.129 — Notification count placement
+
+- Place the notification count beside the bell and give the notification, reminder, and conversation controls equal widths.
+
+## 0.2.128 — Notification toolbar alignment
+
+- Align notification, reminder, and conversation buttons in equal cells and keep the notification count inside its button.
+- Complete English translations for the agent hook registration prompt.
+
+## 0.2.127 — Hook registration on agent launch
+
+- Check workspace hooks before launching Claude Code or Codex and ask whether to register them.
+- Use terminal output detection when registration is skipped; show an error and copyable troubleshooting prompt if registration fails.
+- Remove excess space between agent settings and the file list in the viewer.
+
+## 0.2.126 — Workspace agent hooks and settings
+
+- Register Claude Code and Codex hooks per local workspace, connecting working, approval, and completion states to notifications and queued input.
+- Browse each workspace's Codex and Claude settings, hooks, and instruction files in dedicated file viewer tabs, with hook status and registration controls.
+- Register hooks before launching agents through MCP and fix Codex hook commands on Windows.
+
+## 0.2.125 — Favorite star alignment
+
+- Keep the favorite star in a fixed position to the right of each workspace name, using filled and outlined states as the toggle.
+- Remove the duplicate star before the name and from the expanded action row. The ellipsis row now contains rename, information, and delete.
+
+## 0.2.124 — Workspace row layout
+
+- Move workspace actions into an expandable row opened by the ellipsis button, keeping names clear at narrow sidebar widths.
+- Place the running indicator beside the path and check title, unread badge, and action spacing at 220, 260, and 320 px.
+
+## 0.2.123 — Workspace navigation
+
+- Search workspace names, paths, and branches; filter by favorites, running terminals, and unread notifications; sort by default order, recent use, or name.
+- Refine single-line, summary, and detail views. Detail view expands the selected workspace's path, running count, and last-used time.
+- Page through 15/30/50 workspaces while keeping same-name folder groups together, with a shortcut back to the current workspace.
+
+## 0.2.122 — Single-row icon toolbar
+
+- Replace mixed text and character buttons with consistent SVG icons, grouped on one toolbar row. Tooltips and accessible names identify each action.
+- Move the main terminal font scale control into Display settings. Use icon buttons for Display settings and disconnect in SSH and Docker windows.
+
+## 0.2.121 — Korean and English interface
+
+- Add a persistent Korean/English selector in **Display settings** in the main, Docker, and SSH windows, synchronized across open windows.
+- Translate fixed interface labels and common pane, session, and conversation controls through a shared catalog. Terminal output, file contents, commands, and user data remain untouched.
+
+## 0.2.120 — Terminal output search
+
+- Search each local Windows, Docker, and SSH pane's scrollback using the toolbar button or Ctrl+F in the terminal. Enter and Shift+Enter move through matches.
+- Show match counts and a case sensitivity option. Esc closes search without sending input to the running process.
+
+## 0.2.119 — Docker and SSH pane groups
+
+- Add and switch pane groups within each workspace while keeping terminals running in other groups.
+- Hide and restore live panes, move panes between groups, and use split, placement, and equalize within a group.
+
+## 0.2.118 — Docker queued input delivery
+
+- Route **Send now** from the local Docker window to its terminal handler instead of rejecting the action.
+- Keep a completed Claude turn ready when ordinary answer text asks a question, so queued followups can proceed.
+
+## 0.2.117 — Docker and SSH conversation history
+
+- Docker and SSH workspaces list Claude Code and Codex conversations stored in that environment, with project scope, search, date and provider filters, sorting, pagination, compact view, favorites, and hiding.
+- Resume a selected conversation in a new terminal at its original folder, or open the CLI's own resume picker. Transcript files remain read-only. Remote history lookup requires Python 3 in that environment.
+
+## 0.2.116 — Korean input for local, Docker, and SSH shells
+
+- Plain Docker and SSH shell panes now include a command input that supports Korean composition. Ctrl+Enter or the Run button sends a single line without treating an IME confirmation as execution.
+- Agent panes that return to a shell gain the same input. Failed commands remain in the field for correction.
+- Local shell panes now have the same per-pane input, so Korean commands can be entered and run with Ctrl+Enter or Run.
+
+## 0.2.115 — Installed CLI paths and immediate remote followups
+
+- Docker and SSH shells and agent processes now include `~/.local/bin` in `PATH`, so freshly installed Codex can be called by name. The install command also updates the current shell's `PATH` before checking the version.
+- Remote Claude Code, Codex, and Gemini queues now offer **Send now** for a selected pending message, ahead of its queue order or scheduled time.
+- A queued message pasted into the visible agent composer now submits even if the agent's inferred state changes between paste and Enter.
+- In Docker and SSH terminals, Ctrl+C copies a selection; with no selection, it keeps its interrupt behavior.
+
+## 0.2.114 — Codex login in remote terminals
+
+- Docker and SSH Codex panes check existing credentials and use device code login when needed, avoiding an unreachable browser callback on the container's localhost.
+- If device code login fails, the pane returns to a shell with guidance to enable it in account settings.
+
+## 0.2.113 — Return to shell after remote agent exits
+
+- Docker and SSH panes now stay interactive after Claude Code, Codex, or Gemini exits, switching the same terminal pane to a shell.
+- Pending agent followups are canceled instead of running as shell commands. An unsent draft remains available for copying.
+
+## 0.2.112 — Side-by-side remote file viewer
+
+- SSH and local Docker file viewers now keep the file or Git list in a left sidebar and show selected content beside it. Search results use the same preview area, and the selected file stays highlighted in the list.
+
+## 0.2.111 — Docker shell filename completion
+
+- New local and SSH-hosted Docker shell panes now start Bash when the container has it, enabling Tab filename completion. Containers without Bash still open their available `sh` shell.
+
+## 0.2.110 — Optional WebGL terminal rendering
+
+- Added a WebGL switch in Terminal display settings for local, SSH, and Docker terminals. It defaults to off, applies to open panes without restarting sessions, and persists across app windows.
+- When WebGL is unavailable or its context is lost, affected panes return to the built-in renderer. Disabling WebGL releases the active GPU context.
+
+## 0.2.109 — Open terminal links in browser and arrange remote panes
+
+- Terminal URLs now use the Windows Shell `open` action, which dispatches HTTP and HTTPS links to the default browser instead of opening File Explorer.
+- SSH and local Docker panes can be moved to the left, right, above, or below another pane. The visible Equalize control resets all split sizes and refits their terminals.
+
+## 0.2.108 — Open terminal links
+
+- Click HTTP and HTTPS URLs in local, SSH, and Docker terminals to open them in the Windows default browser. Both plain text links and OSC 8 terminal hyperlinks are supported.
+
+## 0.2.107 — Run agent installers in SSH and Docker
+
+- The install guide opens a shell pane and runs the Claude Code, Codex, or Gemini CLI installer, then checks its version. Claude download failures propagate through the pipeline; missing prerequisites disable the action.
+- Dimmed Claude Code and Codex prompt suggestions no longer count as typed drafts and block queued submissions.
+
+## 0.2.106 — Agent installation in SSH and Docker
+
+- Added Gemini CLI to the workspace toolbar and split launchers in SSH and Docker.
+- When Claude Code, Codex, or Gemini CLI is missing, WinCMux shows the official install command and reports missing prerequisites. Copy the command, open a shell in the selected environment, and retry the launcher after installing.
+
 ## 0.2.105 — Remote pane height and Docker detach
 
 - SSH and local Docker terminal output scrolls within the pane, keeping its header and composer in view when the window shrinks.

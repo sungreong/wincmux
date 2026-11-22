@@ -720,6 +720,15 @@ function overlayShellArgs(shellCmd, commandText) {
 
 async function startShellCommandForPane(paneId, commandText, options = {}) {
   const ws = selectedWorkspace();
+  const provider = workspaceHookProvider(commandText);
+  if (provider && ws?.id && !options.silent) {
+    const choice = await window.wincmuxHookRegistration.promptForLaunch(ws, provider);
+    if (choice === 'cancel') {
+      const view = state.paneViews.get(paneId);
+      if (view && !view.sessionId) setPaneOverlay(view, 'empty', '어떤 도구로 시작할까요?', '프로젝트 폴더에서 바로 실행합니다.');
+      return null;
+    }
+  }
   const cwdCandidates = uniqueOverlayStrings(options.strictCwd ? [options.cwd] : [options.cwd, ws?.path]);
   const shells = overlayShellCommands();
   let lastErr = null;
@@ -733,6 +742,7 @@ async function startShellCommandForPane(paneId, commandText, options = {}) {
           args: overlayShellArgs(shell, commandText),
           cwd,
           workspaceId: options.workspaceId ?? ws?.id,
+          hookPromptChecked: Boolean(provider),
           focusTerm: options.focusTerm !== false
         });
       } catch (err) {
@@ -741,6 +751,21 @@ async function startShellCommandForPane(paneId, commandText, options = {}) {
     }
   }
   throw lastErr ?? new Error("Failed to start shell command.");
+}
+
+function workspaceHookProvider(commandText) {
+  const first = String(commandText ?? '').trim().match(/^(?:&\s*)?(?:"([^"]+)"|'([^']+)'|([^\s]+))/);
+  const name = (first?.[1] ?? first?.[2] ?? first?.[3] ?? '').split(/[\\/]/).pop().replace(/\.(exe|cmd|bat)$/i, '').toLowerCase();
+  return ['claude', 'codex'].includes(name) ? name : null;
+}
+
+async function ensureWorkspaceHook(workspaceId, provider) {
+  try {
+    return await rpc('workspace.hooks.ensure', { workspace_id: workspaceId, provider });
+  } catch (error) {
+    setStatus(`${provider} Hook 등록 실패: ${error?.message ?? error}`, true);
+    return null;
+  }
 }
 
 function sessionLabelForOverlay(session) {
@@ -1650,6 +1675,8 @@ function disposeView(view) {
   meta?.actionsOverflowMenu?.remove();
   meta?.quickPanel?.remove();
   if (view.term) {
+    view.search?.dispose();
+    window.wincmuxTerminalRenderer.unregister(view.term);
     view.term.dispose();
   }
 }
@@ -2093,6 +2120,7 @@ function updatePaneActionLayout(paneId) {
     meta.closeBtn,
     meta.movePaneBtn,
     meta.hidePaneBtn,
+    meta.searchBtn,
     meta.quickBtn,
     meta.closePaneBtn
   ].filter(Boolean);
@@ -2549,6 +2577,28 @@ function terminalPromptPayload(text, preserveLineBreaks, bracketedPasteMode) {
   return `\x1b[200~${value}\x1b[201~`;
 }
 
+function isLocalShellView(view) {
+  const session = view?.sessionId && state.sessionsById.get(view.sessionId);
+  const command = commandBaseNameForOverlay(session?.spawn_cmd);
+  if (!["pwsh", "pwsh.exe", "powershell", "powershell.exe", "cmd", "cmd.exe", "bash", "bash.exe", "sh", "sh.exe", "zsh", "fish", "wsl", "wsl.exe"].includes(command)) return false;
+  const agent = state.agentStates.get(view.sessionId);
+  return !agent || (!agent.agent_process_attached && agent.source === "none" && !agent.hook?.active);
+}
+
+function syncLocalShellComposers() {
+  for (const [paneId, meta] of state.paneMeta) {
+    const shell = meta.shellComposer;
+    if (!shell) continue;
+    const view = state.paneViews.get(paneId);
+    if (shell.sessionId !== view?.sessionId) {
+      shell.sessionId = view?.sessionId;
+      shell.input.value = "";
+    }
+    shell.panel.hidden = !(isLocalShellView(view) && !view.detached && isPaneViewAttached(view));
+  }
+  syncTerminalPrompt();
+}
+
 let syncTerminalPrompt = () => {};
 
 function bindTerminalPrompt() {
@@ -2608,7 +2658,7 @@ function bindTerminalPrompt() {
       composerObserver.disconnect();
       document.body.appendChild(composer);
     }
-    composer.hidden = !card || !view;
+    composer.hidden = !card || !view || isLocalShellView(view);
     const ready = Boolean(view?.sessionId && !view.detached && isPaneViewAttached(view));
     editor.disabled = insert.disabled = insertSingleLine.disabled = expand.disabled = send.disabled = followup.disabled = !ready;
     targetLabel.textContent = view
@@ -3100,6 +3150,12 @@ function createPaneLeaf(node, hosts) {
     ev.stopPropagation();
     paneHandlers.hidePane(paneId).catch((err) => setStatus(String(err), true));
   }, "pane-btn", paneIcon.hidePane, "Ctrl+Alt+W");
+  const searchBtn = makeBtn("Find", "Search terminal output", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    closePaneOverflowMenus(null);
+    state.paneViews.get(paneId)?.search?.open();
+  }, "pane-btn", paneIcon.search, "Ctrl+F");
   const quickBtn = makeBtn("", "Quick command", () => {});
   quickBtn.classList.add("quickcmd-toggle");
   quickBtn.setAttribute("aria-label", "Quick command");
@@ -3155,7 +3211,25 @@ function createPaneLeaf(node, hosts) {
   document.body.appendChild(quickPanel);
   const terminalHost = document.createElement("div");
   terminalHost.className = "pane-terminal-host";
-  card.append(header, terminalHost);
+  const shellComposer = window.wincmuxRemoteShellComposer(text => {
+    const view = state.paneViews.get(paneId);
+    if (!isLocalShellView(view) || view.detached || !isPaneViewAttached(view)) {
+      return Promise.reject(Error("실행 중인 셸 터미널을 선택하세요."));
+    }
+    return new Promise((resolve, reject) => {
+      view.pendingPromptWrite = { resolve, reject };
+      queuePaneInput(view, text);
+    });
+  }, (label, action) => {
+    const node = document.createElement("button");
+    node.type = "button";
+    node.textContent = label;
+    node.addEventListener("click", action);
+    return node;
+  });
+  shellComposer.panel.classList.add("pane-shell-composer");
+  shellComposer.panel.hidden = true;
+  card.append(header, terminalHost, shellComposer.panel);
   card.addEventListener("pointermove", (ev) => {
     const sourcePaneId = state.paneMove?.sourcePaneId ?? null;
     if (!sourcePaneId || sourcePaneId === paneId) {
@@ -3171,7 +3245,7 @@ function createPaneLeaf(node, hosts) {
       return;
     }
     const target = ev.target;
-    if (target instanceof HTMLElement && target.closest("button")) {
+    if (target instanceof HTMLElement && (target.closest("button") || target.closest(".terminal-search"))) {
       return;
     }
     if (state.paneMove.sourcePaneId) {
@@ -3216,12 +3290,14 @@ function createPaneLeaf(node, hosts) {
     movePaneBtn,
     closePaneBtn,
     hidePaneBtn,
+    searchBtn,
     fontDownBtn,
     fontUpBtn,
     autoResizeBtn,
     quickBtn,
     quickPanel,
-    unreadBadgeEl
+    unreadBadgeEl,
+    shellComposer
   });
   bindQuickCommandPanelSafe(paneId, quickPanel, quickBtn);
   updatePaneActionLayout(paneId);
@@ -3278,7 +3354,9 @@ function renderPaneNode(node, paneMap, hosts) {
 
 function createPaneView(paneId, host) {
   const fontSize = currentPaneFontSize(state.selectedWorkspaceId, paneId);
+  const links = window.wincmuxTerminalLinks.create((error) => setStatus(`링크를 열지 못했습니다: ${error?.message ?? error}`, true));
   const term = new window.Terminal({
+    linkHandler: links.handler,
     allowProposedApi: true,
     windowsPty: { backend: "conpty" },
     convertEol: false,
@@ -3299,6 +3377,7 @@ function createPaneView(paneId, host) {
 
   const fitAddon = new window.FitAddon.FitAddon();
   term.loadAddon(fitAddon);
+  links.attach(term);
   if (state.terminal.unicode_width === "unicode11" && window.Unicode11Addon?.Unicode11Addon) {
     try {
       const unicode11Addon = new window.Unicode11Addon.Unicode11Addon();
@@ -3311,11 +3390,14 @@ function createPaneView(paneId, host) {
     }
   }
   term.open(host);
+  const search = window.wincmuxTerminalSearch(term, host);
+  window.wincmuxTerminalRenderer.register(term, (message) => setStatus(String(message), true));
 
   const view = {
     paneId,
     host,
     term,
+    search,
     fitAddon,
     sessionId: null,
     renderedSessionId: null,  // tracks which session's output is actually in the xterm buffer
@@ -3373,6 +3455,11 @@ function createPaneView(paneId, host) {
     }
     if (ev.isComposing || ev.keyCode === 229 || key === "process") {
       return true;
+    }
+    if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && !ev.shiftKey && key === "f") {
+      ev.preventDefault();
+      search.open();
+      return false;
     }
     if (isTerminalPromptShortcut(ev)) {
       ev.preventDefault();
@@ -3666,6 +3753,7 @@ function renderPaneSurface(force = false) {
       if (existing.term.element) {
         item.host.appendChild(existing.term.element);
       }
+      if (existing.search?.panel) item.host.appendChild(existing.search.panel);
       existing.host = item.host;
       if (existing._boundToStream) wincmuxTauriRestoreOutput(existing);
       existing.lastFitWidth = 0;

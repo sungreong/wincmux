@@ -22,6 +22,7 @@ const STORAGE_KEYS = {
   workspacePaneGroupHints: "wincmux.workspacePaneGroupHints",
   workspaceCreateOpen: "wincmux.workspaceCreateOpen",
   workspaceListMode: "wincmux.workspaceListMode",
+  workspaceSidebarOptions: "wincmux.workspaceSidebarOptions",
   workspaceFolderCollapsed: "wincmux.workspaceFolderCollapsed",
   workspaceNotesOpen: "wincmux.workspaceNotesOpen",
   globalFontScale: "wincmux.globalFontScale"
@@ -264,8 +265,12 @@ const state = {
   workspaceSelectedGroups: parseStoredMap(STORAGE_KEYS.workspaceSelectedGroups),
   workspacePaneGroupHints: parseStoredMap(STORAGE_KEYS.workspacePaneGroupHints),
   workspaceCreateOpen: localStorage.getItem(STORAGE_KEYS.workspaceCreateOpen) === "1",
-  workspaceListMode: ["simple", "compact"].includes(localStorage.getItem(STORAGE_KEYS.workspaceListMode))
-    ? localStorage.getItem(STORAGE_KEYS.workspaceListMode) : "detail",
+  workspaceListMode: ["simple", "compact", "detail"].includes(localStorage.getItem(STORAGE_KEYS.workspaceListMode))
+    ? localStorage.getItem(STORAGE_KEYS.workspaceListMode) : "compact",
+  workspaceSidebarOptions: {
+    query: "", favorites: false, running: false, unread: false, sort: "manual", pageSize: 15, page: 0,
+    ...parseStoredMap(STORAGE_KEYS.workspaceSidebarOptions)
+  },
   workspaceFolderCollapsed: parseStoredMap(STORAGE_KEYS.workspaceFolderCollapsed),
   workspaceNotesOpen: localStorage.getItem(STORAGE_KEYS.workspaceNotesOpen) === "1",
   hiddenPanesByWorkspace: {},
@@ -320,6 +325,18 @@ if (!localStorage.getItem(STORAGE_KEYS.quickPresetSeedVersion)) {
 const $ = (id) => document.getElementById(id);
 const appGrid = $("appGrid");
 const workspaceList = $("workspaceList");
+const workspaceSearchInput = $("workspaceSearchInput");
+const workspaceFavoriteOnly = $("workspaceFavoriteOnly");
+const workspaceRunningOnly = $("workspaceRunningOnly");
+const workspaceUnreadOnly = $("workspaceUnreadOnly");
+const workspaceSortSelect = $("workspaceSortSelect");
+const workspacePageSize = $("workspacePageSize");
+const workspacePager = $("workspacePager");
+const workspacePageStatus = $("workspacePageStatus");
+const workspacePagePrevious = $("workspacePagePrevious");
+const workspacePageNext = $("workspacePageNext");
+const workspaceCurrentJump = $("workspaceCurrentJump");
+let workspaceLastRenderedSelection = null;
 const notificationList = $("notificationList");
 const notifTitle = $("notifTitle");
 const statusBar = $("statusBar");
@@ -1135,11 +1152,16 @@ function setToolbarBtnLabel(btn, text) {
   if (btn.id === "toggleWorkspacePanelBtn") {
     text = "Workspaces";
     btn.setAttribute("aria-pressed", String(!state.leftCollapsed));
-    btn.title = "Toggle workspaces (Ctrl+B)";
+    btn.title = "Toggle workspace panel (Ctrl+B)";
+    btn.setAttribute("aria-label", btn.title);
   } else if (btn.id === "toggleNotificationPanelBtn") {
-    text = state.notifications.length ? `Notifications ${state.notifications.length}` : "Notifications";
+    const count = state.notifications.length;
+    text = count ? `Notifications ${count}` : "Notifications";
     btn.setAttribute("aria-pressed", String(!state.rightCollapsed));
-    btn.title = "Toggle notifications (Ctrl+Shift+N)";
+    btn.title = "Toggle notifications panel (Ctrl+Shift+N)";
+    btn.setAttribute("aria-label", btn.title);
+    const badge = btn.querySelector(".toolbar-count");
+    if (badge) { badge.textContent = count > 99 ? "99+" : String(count); badge.hidden = count === 0; }
   }
   const span = btn.querySelector(".toolbar-btn-label") ?? btn;
   span.textContent = text;
@@ -1412,6 +1434,21 @@ function renderWorkspaceSidebarControls() {
     workspaceList.classList.toggle("workspace-list-compact", state.workspaceListMode === "compact");
     workspaceList.classList.toggle("workspace-list-simple", state.workspaceListMode === "simple");
   }
+  const options = state.workspaceSidebarOptions;
+  if (workspaceSearchInput && workspaceSearchInput.value !== options.query) workspaceSearchInput.value = options.query;
+  if (workspaceFavoriteOnly) workspaceFavoriteOnly.checked = options.favorites;
+  if (workspaceRunningOnly) workspaceRunningOnly.checked = options.running;
+  if (workspaceUnreadOnly) workspaceUnreadOnly.checked = options.unread;
+  if (workspaceSortSelect) workspaceSortSelect.value = options.sort;
+  if (workspacePageSize) workspacePageSize.value = String(options.pageSize);
+  $("workspaceFilterMenu")?.classList.toggle("has-filter", options.favorites || options.running || options.unread || options.sort !== "manual");
+}
+
+function updateWorkspaceSidebarOptions(changes) {
+  Object.assign(state.workspaceSidebarOptions, changes, { page: 0 });
+  const { page, ...saved } = state.workspaceSidebarOptions;
+  localStorage.setItem(STORAGE_KEYS.workspaceSidebarOptions, JSON.stringify(saved));
+  renderWorkspaces();
 }
 
 function setWorkspaceCreateOpen(open) {
@@ -1428,7 +1465,7 @@ function toggleWorkspaceCreate() {
 }
 
 function setWorkspaceListMode(mode) {
-  state.workspaceListMode = ["simple", "compact", "detail"].includes(mode) ? mode : "detail";
+  state.workspaceListMode = ["simple", "compact", "detail"].includes(mode) ? mode : "compact";
   localStorage.setItem(STORAGE_KEYS.workspaceListMode, state.workspaceListMode);
   renderWorkspaceSidebarControls();
   renderWorkspaces();
@@ -1475,6 +1512,7 @@ function renderAgentPaneStates() {
     if (isAction) badge.disabled = false;
     badge.setAttribute("aria-label", isAction ? `${badge.textContent} · 결과 확인` : badge.textContent);
   }
+  if (typeof syncLocalShellComposers === "function") syncLocalShellComposers();
 }
 
 function agentWorkspaceSummary(workspaceId) {
@@ -1493,6 +1531,7 @@ function renderWorkspaceRow(ws, index, unreadByWorkspace, mode) {
     li.className = isActive ? "active" : "";
     li.classList.toggle("ws-compact", mode === "compact");
     li.classList.toggle("ws-simple", mode === "simple");
+    li.classList.toggle("ws-detail-expanded", mode === "detail" && isActive);
     li.title = ws.path;
     if (unread > 0) {
       li.classList.add("ws-has-unread");
@@ -1558,17 +1597,45 @@ function renderWorkspaceRow(ws, index, unreadByWorkspace, mode) {
     });
 
     titleRow.appendChild(nameEl);
-    titleRow.appendChild(editBtn);
+
+    const favoriteBtn = document.createElement("button");
+    favoriteBtn.type = "button";
+    favoriteBtn.className = "ws-favorite-btn";
+    favoriteBtn.title = ws.pinned ? "Remove favorite" : "Add favorite";
+    favoriteBtn.setAttribute("aria-label", favoriteBtn.title);
+    favoriteBtn.setAttribute("aria-pressed", String(Boolean(ws.pinned)));
+    favoriteBtn.innerHTML = `<svg aria-hidden="true" viewBox="0 0 20 20" fill="${ws.pinned ? "currentColor" : "none"}" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="m10 2 2.4 5 5.5.8-4 4 .9 5.5-4.8-2.6-4.8 2.6.9-5.5-4-4 5.5-.8z"/></svg>`;
+    favoriteBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      void rpc("workspace.pin", { id: ws.id, pinned: !ws.pinned })
+        .then(() => loadWorkspaces()).catch((err) => setStatus(String(err), true));
+    });
 
     const infoBtn = document.createElement("button");
     infoBtn.className = "ws-info-btn";
     infoBtn.title = "Workspace info & sessions";
-    infoBtn.textContent = "⋯";
+    infoBtn.textContent = "ⓘ";
     infoBtn.addEventListener("click", (ev) => {
       ev.stopPropagation();
       if (typeof openWsInfoPanel === "function") openWsInfoPanel(ws, li);
     });
-    titleRow.appendChild(infoBtn);
+
+    const hookBtn = document.createElement("button");
+    hookBtn.type = "button";
+    hookBtn.className = "ws-hook-btn";
+    hookBtn.title = "이 워크스페이스에 Claude·Codex Hook 등록";
+    hookBtn.setAttribute("aria-label", `${ws.name} Claude·Codex Hook 등록`);
+    hookBtn.textContent = "H";
+    hookBtn.addEventListener("click", async ev => {
+      ev.stopPropagation();
+      hookBtn.disabled = true;
+      try {
+        const results = await Promise.all(['claude', 'codex'].map(provider => rpc('workspace.hooks.ensure', { workspace_id: ws.id, provider })));
+        setStatus(`${ws.name}: Claude·Codex Hook 등록 완료${results.some(result => result.changed) ? '' : ' (이미 등록됨)'}`);
+      } catch (error) {
+        setStatus(`${ws.name}: Hook 등록 실패: ${error?.message ?? error}`, true);
+      } finally { hookBtn.disabled = false; }
+    });
 
     const deleteBtn = document.createElement("button");
     deleteBtn.className = "ws-delete-btn";
@@ -1581,19 +1648,49 @@ function renderWorkspaceRow(ws, index, unreadByWorkspace, mode) {
         globalThis.deleteWorkspaceById(ws.id).catch((err) => setStatus(String(err), true));
       }
     });
-    titleRow.appendChild(deleteBtn);
     const actions = document.createElement("div");
     actions.className = "ws-actions";
-    actions.append(editBtn, infoBtn, deleteBtn);
-    titleRow.appendChild(actions);
+    actions.id = `ws-actions-${ws.id}`;
+    actions.hidden = true;
+    actions.append(editBtn, infoBtn, hookBtn, deleteBtn);
+
+    const actionToggle = document.createElement("button");
+    actionToggle.type = "button";
+    actionToggle.className = "ws-actions-toggle";
+    actionToggle.title = "Workspace actions";
+    actionToggle.setAttribute("aria-label", `Workspace actions: ${ws.name}`);
+    actionToggle.setAttribute("aria-controls", actions.id);
+    actionToggle.setAttribute("aria-expanded", "false");
+    actionToggle.textContent = "⋯";
+    actionToggle.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      actions.hidden = !actions.hidden;
+      actionToggle.setAttribute("aria-expanded", String(!actions.hidden));
+      li.classList.toggle("ws-actions-open", !actions.hidden);
+    });
+
+    const metaRow = document.createElement("div");
+    metaRow.className = "ws-meta-row";
+
+    if (Number(ws.running_count) > 0) {
+      const running = document.createElement("span");
+      running.className = "ws-running-badge";
+      running.title = `${ws.running_count} running terminals`;
+      running.setAttribute("aria-label", running.title);
+      running.textContent = mode === "simple" ? "●" : `● ${ws.running_count}`;
+      if (mode === "simple") titleRow.appendChild(running);
+      else metaRow.appendChild(running);
+    }
 
     if (unread > 0) {
       const badge = document.createElement("span");
       badge.className = "ws-unread-badge";
       badge.title = `${unread} unread notifications`;
       badge.textContent = unread > 99 ? "99+" : String(unread);
-      titleRow.appendChild(badge);
+      if (mode === "simple") titleRow.appendChild(badge);
+      else metaRow.appendChild(badge);
     }
+    titleRow.append(favoriteBtn, actionToggle);
 
     const pathEl = document.createElement("button");
     pathEl.type = "button";
@@ -1613,7 +1710,15 @@ function renderWorkspaceRow(ws, index, unreadByWorkspace, mode) {
     branchEl.textContent = `${ws.branch ?? ""} ${ws.dirty ? "(dirty)" : ""}`;
     branchEl.hidden = !ws.branch;
 
-    li.append(titleRow, pathEl, branchEl);
+    metaRow.prepend(pathEl);
+    li.append(titleRow, actions, metaRow, branchEl);
+    if (mode === "detail" && isActive) {
+      const meta = document.createElement("div");
+      meta.className = "ws-detail-meta";
+      const lastUsed = ws.last_active ? new Date(ws.last_active).toLocaleString(window.wincmuxI18n?.language === "ko" ? "ko-KR" : "en-US") : "—";
+      meta.textContent = `${ws.running_count ?? 0} running terminals · Last used ${lastUsed}`;
+      li.appendChild(meta);
+    }
     const summary = document.createElement("div");
     summary.className = "ws-agent-summary";
     summary.textContent = agentWorkspaceSummary(ws.id);
@@ -1621,6 +1726,14 @@ function renderWorkspaceRow(ws, index, unreadByWorkspace, mode) {
     li.appendChild(summary);
     li.addEventListener("click", () => {
       switchWorkspace(ws.id).catch((err) => setStatus(String(err), true));
+    });
+    li.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Escape" || actions.hidden) return;
+      ev.stopPropagation();
+      actions.hidden = true;
+      li.classList.remove("ws-actions-open");
+      actionToggle.setAttribute("aria-expanded", "false");
+      actionToggle.focus();
     });
     return li;
 }
@@ -1668,8 +1781,27 @@ function renderWorkspaceFolderHeader(entry, rows, unreadByWorkspace) {
 function renderWorkspaces() {
   const unreadByWorkspace = unreadCountsByWorkspace();
   const mode = state.workspaceListMode;
+  const options = state.workspaceSidebarOptions;
+  const query = String(options.query ?? "").trim().toLocaleLowerCase();
+  const filtered = state.workspaces.filter((ws) =>
+    (!query || [ws.name, ws.path, ws.branch].some((value) => String(value ?? "").toLocaleLowerCase().includes(query)))
+    && (!options.favorites || Boolean(ws.pinned))
+    && (!options.running || Number(ws.running_count) > 0)
+    && (!options.unread || (unreadByWorkspace.get(ws.id) ?? 0) > 0));
+  if (options.sort === "recent") filtered.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || String(b.last_active ?? "").localeCompare(String(a.last_active ?? "")));
+  if (options.sort === "name") filtered.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || a.name.localeCompare(b.name, window.wincmuxI18n?.language ?? "en", { sensitivity: "base" }));
+  const pageSize = [15, 30, 50].includes(Number(options.pageSize)) ? Number(options.pageSize) : 15;
+  const pages = paginateWorkspaceEntries(workspaceFolderEntries(filtered), pageSize);
+  const selectedPage = pages.findIndex((entries) => entries.some((entry) => entry.type === "workspace"
+    ? entry.workspace.id === state.selectedWorkspaceId
+    : entry.members.some(({ workspace }) => workspace.id === state.selectedWorkspaceId)));
+  if (workspaceLastRenderedSelection !== state.selectedWorkspaceId) {
+    workspaceLastRenderedSelection = state.selectedWorkspaceId;
+    if (selectedPage >= 0) options.page = selectedPage;
+  }
+  options.page = Math.max(0, Math.min(Number(options.page) || 0, Math.max(0, pages.length - 1)));
   workspaceList.innerHTML = "";
-  for (const entry of workspaceFolderEntries(state.workspaces)) {
+  for (const entry of pages[options.page] ?? []) {
     if (entry.type === "workspace") {
       workspaceList.appendChild(renderWorkspaceRow(entry.workspace, entry.index, unreadByWorkspace, mode));
       continue;
@@ -1682,6 +1814,26 @@ function renderWorkspaces() {
       return row;
     });
     workspaceList.append(renderWorkspaceFolderHeader(entry, rows, unreadByWorkspace), ...rows);
+  }
+  if (!filtered.length) {
+    const empty = document.createElement("li");
+    empty.className = "ws-empty";
+    empty.textContent = state.workspaces.length ? "No matching workspaces" : "No workspaces yet";
+    workspaceList.appendChild(empty);
+  }
+  if (workspacePager) workspacePager.hidden = pages.length <= 1;
+  if (workspacePageStatus) workspacePageStatus.textContent = `${options.page + 1} / ${Math.max(1, pages.length)} · ${filtered.length}`;
+  if (workspacePagePrevious) workspacePagePrevious.disabled = options.page <= 0;
+  if (workspacePageNext) workspacePageNext.disabled = options.page >= pages.length - 1;
+  if (workspaceCurrentJump) {
+    const selected = selectedWorkspace();
+    const selectedFolder = (pages[options.page] ?? []).find((entry) => entry.type === "folder"
+      && entry.members.some(({ workspace }) => workspace.id === state.selectedWorkspaceId));
+    const selectedCollapsed = selectedFolder && state.workspaceFolderCollapsed[selectedFolder.key] === true;
+    workspaceCurrentJump.hidden = !selected || (selectedPage === options.page && !selectedCollapsed);
+    workspaceCurrentJump.textContent = selected ? `Current: ${selected.name}` : "";
+    workspaceCurrentJump.dataset.page = String(selectedPage);
+    workspaceCurrentJump.dataset.folder = selectedCollapsed ? selectedFolder.key : "";
   }
   renderWorkspaceSidebarControls();
   setToolbarBtnLabel(toggleWorkspacePanelBtn, state.leftCollapsed ? "Show Workspaces" : "Hide Workspaces");
@@ -1736,7 +1888,7 @@ function renderNotifications() {
 
       const titleEl = document.createElement("span");
       titleEl.className = "notif-title";
-      titleEl.textContent = n.kind === "task_done" ? "작업 완료" : n.kind === "assistant_prompt" ? "입력 필요" : n.title;
+      titleEl.textContent = n.kind === "task_done" ? "작업 완료" : n.kind === "assistant_prompt" ? "입력 필요" : n.kind === "agent_error" ? "작업 오류" : n.title;
 
       const metaEl = document.createElement("span");
       metaEl.className = "notif-meta muted";
@@ -1745,7 +1897,9 @@ function renderNotifications() {
       const bodyEl = document.createElement("span");
       bodyEl.className = "notif-body muted";
       const internalStatus = n.source_kind === "osc7501" || /^Program reported status/.test(n.body ?? "");
-      bodyEl.textContent = internalStatus ? "" : n.body;
+      bodyEl.textContent = internalStatus ? "" : n.source_kind === "hook"
+        ? n.kind === "assistant_prompt" ? "승인을 기다리고 있습니다." : n.kind === "task_done" ? "에이전트 응답이 완료됐습니다." : n.kind === "agent_error" ? "에이전트 작업이 오류로 종료됐습니다." : n.body
+        : n.body;
       bodyEl.hidden = !bodyEl.textContent;
 
       openBtn.append(titleEl, metaEl, bodyEl);

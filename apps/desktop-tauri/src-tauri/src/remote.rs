@@ -173,7 +173,13 @@ impl Remote {
                 *self.activation.lock().unwrap() = Some(event["params"].clone());
                 let _ = self.app.emit("wincmux-notification-open", &event["params"]);
             }
-            "notify.created" | "notify.reminders_changed" | "notify.read_changed" => {
+            "notify.read_changed" => {
+                if let Some(id) = event["params"]["notification_id"].as_str() {
+                    crate::toast::dismiss(&self.app, &json!({"ids":[id]}));
+                }
+                let _ = self.app.emit("wincmux-notify", event);
+            }
+            "notify.created" | "notify.reminders_changed" => {
                 let _ = self.app.emit("wincmux-notify", event);
             }
             _ => {

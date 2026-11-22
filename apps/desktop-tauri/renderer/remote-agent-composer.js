@@ -27,9 +27,10 @@ window.wincmuxRemoteComposer = (request, button) => {
     message.hidden = !error;
   };
   let pending = false;
+  let handedOff = false;
   let items = [];
   async function send(action) {
-    if (pending || !input.value.trim()) return;
+    if (handedOff || pending || !input.value.trim()) return;
     if (action === "agent-submit" && items.length >= 32) return report("대기 입력은 최대 32개입니다.");
     const due_at = !due.hidden && due.value ? new Date(due.value).getTime() : undefined;
     if (due_at !== undefined && (!Number.isFinite(due_at) || due_at <= Date.now())) return report("현재 이후의 예약 시각을 선택하세요.");
@@ -63,6 +64,19 @@ window.wincmuxRemoteComposer = (request, button) => {
   });
   return {
     panel, state,
+    handoff() {
+      handedOff = true;
+      state.remove();
+      queue.remove();
+      actions.remove();
+      if (input.value.trim()) {
+        input.readOnly = true;
+        input.setAttribute("aria-label", "종료된 에이전트의 미전송 초안");
+        report("에이전트가 종료되어 초안이 전송되지 않았습니다. 필요하면 복사해 사용하세요.");
+      } else {
+        panel.remove();
+      }
+    },
     update(value) {
       const status = { working:"작업 중", idle:"입력 가능", done:"작업 완료", blocked:"확인 필요", error:"오류", unknown:"상태 확인 중" };
       state.textContent = status[value.state] ?? "상태 확인 중";
@@ -77,7 +91,14 @@ window.wincmuxRemoteComposer = (request, button) => {
         const when = item.due_at ? ` · ${new Date(item.due_at).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}` : "";
         label.textContent = `${item.pasted ? "초안 확인" : item.paused ? "일시 정지" : "대기"}${when} · ${item.preview}`;
         row.append(label);
-        if (!item.pasted) row.append(button(item.paused ? "재개" : "일시 정지", () => request("agent-toggle", { item:item.id }).catch(error => report(String(error)))));
+        if (!item.pasted) {
+          const sendNow = button("↑ 지금 보내기", () => {
+            sendNow.disabled = true;
+            request("agent-send-now", { item:item.id }).catch(error => { report(String(error)); sendNow.disabled = false; });
+          });
+          sendNow.title = "대기 순서를 건너뛰고 터미널에 즉시 입력합니다. 에이전트 수신은 확인되지 않을 수 있습니다.";
+          row.append(sendNow, button(item.paused ? "재개" : "일시 정지", () => request("agent-toggle", { item:item.id }).catch(error => report(String(error)))));
+        }
         row.append(button("취소", () => request("agent-cancel", { item:item.id }).catch(error => report(String(error)))));
         queue.append(row);
       }
