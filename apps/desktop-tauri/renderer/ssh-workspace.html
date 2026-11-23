@@ -259,7 +259,7 @@
   <h2 id="terminalRendererTitle">터미널 화면 설정</h2>
   <label class="terminal-renderer-option"><span><strong>WebGL 가속 <b id="terminalWebglState">꺼짐</b></strong><small>화면을 GPU로 그립니다. 사용할 수 없으면 기본 렌더러로 표시합니다. 로컬·SSH·Docker 터미널에 적용됩니다.</small></span><input id="terminalWebglEnabled" type="checkbox" role="switch"></label>
   <label class="ui-language-setting"><span><strong>언어</strong><small>메인·Docker·SSH 창에 함께 적용됩니다.</small></span><select class="ui-language-select" data-ui-language aria-label="언어"><option value="ko">한국어</option><option value="en">English</option></select></label>
-  <footer><button id="terminalRendererClose" type="button">닫기</button></footer>
+  <footer><button id="agentCommandManagerBtn" type="button">명령·스킬 관리</button><button id="terminalRendererClose" type="button">닫기</button></footer>
 </dialog>
 <dialog id="remoteConversationDialog" class="conversation-dialog" aria-labelledby="remoteConversationHeading">
   <header class="conversation-header"><h2 id="remoteConversationHeading" data-conversation="heading"></h2><button type="button" data-conversation="close" aria-label="닫기">×</button></header>
@@ -279,6 +279,7 @@
 <script src="./vendor/addon-webgl.js"></script>
 <script src="./terminal-links.js"></script>
 <script src="./agent-command-input.js"></script>
+<script src="./agent-command-manager.js"></script>
 <script src="./terminal-renderer.js"></script>
 <script src="./terminal-search.js"></script>
 <script src="./remote-terminal-clipboard.js"></script>

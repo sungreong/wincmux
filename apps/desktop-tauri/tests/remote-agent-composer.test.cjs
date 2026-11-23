@@ -21,10 +21,11 @@ class Element {
   dispatchEvent(event) { this.listeners[event.type]?.(event); }
 }
 
-function composer() {
+function composer(seed) {
   const window = { addEventListener() {} };
   const document = { createElement: tag => new Element(tag), documentElement: { lang:'ko' } };
   const entries = new Map();
+  if (seed) entries.set('wincmux.agent-command-input.v1', JSON.stringify(seed));
   const localStorage = { getItem:key => entries.get(key) ?? null, setItem:(key,value) => entries.set(key,value) };
   const context = { window, document, localStorage, Event: class { constructor(type) { this.type = type; } } };
   for (const file of ['agent-command-input.js', 'remote-agent-composer.js']) {
@@ -45,19 +46,21 @@ function composer() {
 function controls(view) {
   const panel = view.panel.children.find(item => item.className === 'agent-command-tools');
   const row = panel.children.find(item => item.className === 'agent-command-row');
-  return { row, mode:row.children[1], saved:row.children[2], add:row.children[3], remove:row.children[4] };
+  return { row, mode:row.children[1], saved:row.children[2], add:row.children[3], remove:row.children[4], description:panel.children.find(item => item.className === 'agent-command-description') };
 }
 
 test('saved slash command goes directly to ready agent in command mode', async () => {
   const { view, calls, buttons, entries } = composer();
   const input = view.panel.children.find(item => item.tag === 'textarea');
-  const { mode, saved, add, remove } = controls(view);
+  const { mode, saved, add, remove, description } = controls(view);
   input.value = '/goal';
+  description.value = '내 목표 설명';
   add.dispatchEvent({ type:'click' });
   assert.equal(saved.value, '/goal');
-  assert.match(entries.get('wincmux.agent-command-input.v1'), /\/goal/);
+  assert.equal(JSON.parse(entries.get('wincmux.agent-command-input.v1')).codex.items[0].description, '내 목표 설명');
   saved.dispatchEvent({ type:'change' });
   assert.equal(mode.value, 'command');
+  assert.equal(description.value, '내 목표 설명');
   view.panel.children.find(item => item.className === 'agent-command-tools').dispatchEvent({ type:'change' });
   assert.equal(buttons.find(item => item.label === '후속 예약').disabled, true);
   buttons.find(item => item.label === '전송 / 대기열').click();
@@ -67,7 +70,25 @@ test('saved slash command goes directly to ready agent in command mode', async (
   assert.equal(input.value, '');
   saved.value = '/goal';
   remove.dispatchEvent({ type:'click' });
-  assert.doesNotMatch(entries.get('wincmux.agent-command-input.v1'), /\/goal/);
+  const data = JSON.parse(entries.get('wincmux.agent-command-input.v1')).codex;
+  assert.equal(data.items.length, 0);
+  assert.deepEqual(data.excluded, ['/goal']);
+});
+
+test('unknown skill remains executable and legacy favorites can receive descriptions', async () => {
+  const { view, calls, buttons, entries } = composer({ codex:{ mode:'message', items:['$my-skill'] } });
+  const input = view.panel.children.find(item => item.tag === 'textarea');
+  const { saved, add, description } = controls(view);
+  saved.value = '$my-skill';
+  saved.dispatchEvent({ type:'change' });
+  assert.equal(input.value, '$my-skill');
+  description.value = '프로젝트에서 만든 스킬';
+  add.dispatchEvent({ type:'click' });
+  assert.equal(JSON.parse(entries.get('wincmux.agent-command-input.v1')).codex.items[0].description, '프로젝트에서 만든 스킬');
+  buttons.find(item => item.label === '전송 / 대기열').click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls[0][0], 'agent-command');
+  assert.equal(calls[0][1].text, '$my-skill');
 });
 
 test('slash text in message mode is marked as ordinary message', async () => {

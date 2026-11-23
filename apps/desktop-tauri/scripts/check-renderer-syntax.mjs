@@ -6,6 +6,7 @@ const orderedFiles = [
   "tauri-adapter.js",
   "terminal-links.js",
   "agent-command-input.js",
+  "agent-command-manager.js",
   "terminal-renderer.js",
   "remote-terminal-clipboard.js",
   "remote-shell-composer.js",

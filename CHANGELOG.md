@@ -2,6 +2,12 @@
 
 [README](README.md) · [GitHub Releases](https://github.com/sungreong/wincmux/releases)
 
+## 0.2.135 — Command and skill descriptions
+
+- Manage Claude Code and Codex command descriptions from **Display settings → Manage commands and skills**, without starting an agent. The composer shares the same list.
+- Show a few basic examples per agent with links to official command references. Unlisted commands and workspace skills remain available for direct entry.
+- Preserve saved commands from earlier versions and allow adding descriptions.
+
 ## 0.2.134 — Agent commands and skills
 
 - Run Claude Code and Codex CLI commands such as `/goal` directly from the local, SSH, or Docker composer when the agent prompt is empty and ready. Commands bypass the follow-up queue.

@@ -141,6 +141,30 @@ async function run() {
     await until(() => main.eval('window.wincmuxI18n.language === "ko" && document.querySelector(".panel-left h2").textContent === "워크스페이스"'), 'cross-window Korean sync');
     await remote.eval(`window.wincmuxI18n.setLanguage('en')`);
     await until(() => main.eval('window.wincmuxI18n.language === "en" && document.querySelector(".panel-left h2").textContent === "Workspaces"'), 'cross-window English sync');
+    const commandManager = await main.eval(`(() => {
+      document.getElementById('terminalRendererSettingsBtn').click();
+      document.getElementById('agentCommandManagerBtn').click();
+      const dialog=document.querySelector('.agent-command-manager');
+      const selects=dialog.querySelectorAll('.agent-command-row select');
+      selects[2].value='/goal'; selects[2].dispatchEvent(new Event('change',{bubbles:true}));
+      const description=dialog.querySelector('.agent-command-description').value;
+      const input=dialog.querySelector('label textarea');
+      input.value='$project-skill'; dialog.querySelector('.agent-command-description').value='Project skill';
+      dialog.querySelector('.agent-command-row button').click();
+      const added=JSON.parse(localStorage.getItem('wincmux.agent-command-input.v1')).codex.items.some(item=>item.command==='$project-skill'&&item.description==='Project skill');
+      dialog.querySelectorAll('.agent-command-row button')[1].click();
+      const removed=!JSON.parse(localStorage.getItem('wincmux.agent-command-input.v1')).codex.items.some(item=>item.command==='$project-skill');
+      return {open:dialog.open,description,added,removed,english:dialog.textContent.includes('Manage commands and skills')};
+    })()`);
+    assert.deepEqual(commandManager, {open:true,description:'View, set, edit, or pause the chat goal',added:true,removed:true,english:true});
+    if (process.env.WINCMUX_CAPTURE_COMMANDS === '1') {
+      const screenshot = await main.request('Page.captureScreenshot', { format:'png', fromSurface:true });
+      const output = path.join(root, 'artifacts', 'agent-command-manager-0.2.135.png');
+      fs.mkdirSync(path.dirname(output), { recursive:true });
+      fs.writeFileSync(output, Buffer.from(screenshot.data, 'base64'));
+    }
+    await main.eval(`document.querySelector('.agent-command-manager').close()`);
+    assert.equal(await remote.eval(`(() => { document.getElementById('terminalRendererSettingsBtn').click(); document.getElementById('agentCommandManagerBtn').click(); const dialog=document.querySelector('.agent-command-manager'); const provider=dialog.querySelector('.agent-command-row select'); provider.value='claude'; provider.dispatchEvent(new Event('change',{bubbles:true})); const result=dialog.open&&[...dialog.querySelectorAll('option')].some(option=>option.value==='/help'); dialog.close(); return result; })()`), true);
     const audit = await Promise.all([main, remote].map(tab => tab.eval(`(() => [...new Set([...document.querySelectorAll('body *')].filter(el => !el.children.length && !el.closest('.xterm,pre,code') && /[가-힣]/.test(el.textContent)).map(el => el.textContent.trim()).filter(Boolean))].slice(0,40))()`)));
     console.log('English UI audit:', JSON.stringify(audit));
     assert.deepEqual(audit, [[], []]);

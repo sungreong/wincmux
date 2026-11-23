@@ -202,7 +202,17 @@ dialog footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 
 .agent-command-row select { width: auto; max-width: min(220px, 100%); min-width: 100px; }
 .agent-command-row select[hidden] { display: none; }
 .agent-command-row button { white-space: nowrap; }
+.agent-command-description { display: block; width: 100%; min-height: 48px; max-height: 100px; margin-top: 6px; resize: vertical; box-sizing: border-box; }
+.agent-command-reference { display: inline-block; margin-top: 6px; color: #a6bfe4; }
+.agent-command-source { margin: 5px 0 0; overflow-wrap: anywhere; }
 .agent-command-hint, .agent-command-feedback { margin: 5px 0 0; }
+.agent-command-manager { width: min(560px, 92vw); max-height: min(720px, 92vh); overflow: auto; }
+.agent-command-manager h2 { margin-bottom: 6px; }
+.agent-command-manager header p { margin: 0 0 16px; }
+.agent-command-manager > label { display: grid; gap: 6px; }
+.agent-command-manager > label textarea { width: 100%; min-height: 48px; box-sizing: border-box; }
+.agent-command-manager .agent-command-tools summary { display: none; }
+.agent-command-manager footer { display: flex; justify-content: flex-end; margin-top: 16px; }
 #agentInstallDialog p { overflow-wrap: anywhere; }
 #agentInstallDialog pre { background: #10151c; padding: 12px; border-radius: 5px; word-break: normal; overflow-wrap: anywhere; }
 #agentInstallDialog .install-missing { color: #f4c887; }

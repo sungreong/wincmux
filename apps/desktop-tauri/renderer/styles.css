@@ -3992,6 +3992,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .agent-command-row select { width: auto; max-width: min(220px, 100%); min-width: 100px; }
 .agent-command-row select[hidden] { display: none; }
 .agent-command-row button { white-space: nowrap; }
+.agent-command-description { display: block; width: 100%; min-height: 48px; max-height: 100px; margin-top: 6px; resize: vertical; box-sizing: border-box; }
+.agent-command-reference { display: inline-block; margin-top: 6px; color: var(--accent); }
+.agent-command-source { margin: 5px 0 0; overflow-wrap: anywhere; }
 .agent-command-hint, .agent-command-feedback { margin: 5px 0 0; }
 #terminalPromptSend:hover, .workspace-create-btn:hover { background: var(--accent-hover); color: var(--text-on-accent); }
 #terminalPromptExpand, #terminalPromptSingleLine { background: transparent; border-color: transparent; color: var(--text-secondary); }
@@ -4207,6 +4210,15 @@ a { color: var(--accent); }
 .terminal-renderer-dialog::backdrop { background: rgb(0 0 0 / 65%); }
 .terminal-renderer-dialog h2 { margin: 0 0 16px; font-size: 18px; }
 .terminal-renderer-dialog footer { display: flex; justify-content: flex-end; margin-top: 16px; }
+.terminal-renderer-dialog footer { gap: 8px; }
+.agent-command-manager { margin: auto; width: min(560px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - 32px)); overflow: auto; padding: 20px; border: 1px solid var(--border-default); border-radius: var(--radius-dialog); background: var(--surface-panel); color: var(--text-primary); }
+.agent-command-manager::backdrop { background: rgb(0 0 0 / 65%); }
+.agent-command-manager h2 { margin: 0 0 6px; font-size: 18px; }
+.agent-command-manager header p { margin: 0 0 16px; color: var(--text-secondary); }
+.agent-command-manager > label { display: grid; gap: 6px; }
+.agent-command-manager > label textarea { width: 100%; min-height: 48px; box-sizing: border-box; }
+.agent-command-manager .agent-command-tools summary { display: none; }
+.agent-command-manager footer { display: flex; justify-content: flex-end; margin-top: 16px; }
 .terminal-renderer-option { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
 .terminal-renderer-option span { display: grid; gap: 5px; }
 .terminal-renderer-option small { color: var(--text-secondary); line-height: 1.45; }
