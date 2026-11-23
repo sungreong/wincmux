@@ -93,12 +93,24 @@ impl DockerHost {
         launch: Launch,
         resume_id: Option<&str>,
         resume_picker: bool,
+        hook_token: Option<&str>,
+        install_script: Option<&str>,
     ) -> Result<Spawned, String> {
         let id = require_container(container)?;
-        let script = if resume_id.is_some() || resume_picker {
+        let script = if let Some(install) = install_script {
+            install.to_owned()
+        } else if resume_id.is_some() || resume_picker {
             launch.container_resume_command(resume_id, resume_picker)
         } else {
             launch.container_command()
+        };
+        let script = if let Some(token) = hook_token {
+            format!(
+                "WINCMUX_HOOK_TOKEN={}; export WINCMUX_HOOK_TOKEN; {script}",
+                crate::ssh_terminal::quote(token)
+            )
+        } else {
+            script
         };
         let args = [
             "--host",
@@ -264,6 +276,27 @@ pub fn stream_terminal(
                 next = input.recv() => {
                     let Some(next) = next else { break None };
                     let next = match next {
+                        Input::Command(text, reply) => {
+                            let result = match agent.as_mut() {
+                                Some(agent) => agent.command(&text),
+                                None => Err("에이전트 터미널이 아닙니다.".into()),
+                            };
+                            match result {
+                                Ok(data) => {
+                                    let target = terminal.clone();
+                                    let written = tokio::task::spawn_blocking(move || target.write(&String::from_utf8_lossy(&data))).await;
+                                    let outcome = match written {
+                                        Ok(value) => value,
+                                        Err(error) => Err(error.to_string()),
+                                    };
+                                    let failed = outcome.is_err();
+                                    let _ = reply.send(outcome);
+                                    if failed { break None; }
+                                }
+                                Err(error) => { let _ = reply.send(Err(error)); }
+                            }
+                            continue;
+                        }
                         Input::Agent(operation) => {
                             let Some(data) = agent.as_mut().and_then(|agent| agent.apply(operation)) else { continue };
                             Input::Data(data)
@@ -282,7 +315,7 @@ pub fn stream_terminal(
                         Input::Data(data) => std::str::from_utf8(&data).map_err(|err| err.to_string())
                             .and_then(|text| target.write(text)),
                         Input::Resize(cols, rows) => target.resize(cols as u16, rows as u16).map(|_| ()),
-                        Input::Agent(_) => unreachable!(),
+                        Input::Agent(_) | Input::Command(_, _) => unreachable!(),
                     }).await;
                     if !matches!(result, Ok(Ok(()))) { break None; }
                 }

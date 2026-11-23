@@ -834,7 +834,7 @@
     installNow.onclick = () => {
       dialog.close();
       if (environment === activeEnvironment) {
-        guarded(() => openTerminal("shell", source, direction, { tool: launch, command: guide.install_command }));
+        guarded(() => openTerminal("shell", source, direction, { tool: launch }));
       }
     };
     const reopen = tool => {
@@ -847,6 +847,69 @@
   }
   el("agentInstallDismiss").addEventListener("click", () => el("agentInstallDialog").close());
 
+  async function promptRemoteHook(launch, environment, source) {
+    if (!['claude', 'codex'].includes(launch)) return 'fallback';
+    const params = { provider: launch, source_terminal_id: source?.id };
+    let current;
+    let initialError;
+    try {
+      current = await rpc('hooks-status', params);
+      if (current.registered) return 'registered';
+    } catch (error) { initialError = error; }
+    const dialog = el('remoteHookDialog');
+    const controller = new AbortController();
+    const { signal } = controller;
+    const name = launchLabels[launch];
+    const relative = launch === 'claude' ? '.claude/settings.local.json' : '.codex/hooks.json';
+    el('remoteHookTitle').textContent = `${name} 훅 등록`;
+    el('remoteHookHelp').textContent = `${environment.tab.title} · ${environment.project.path}에 ${name} 훅을 등록하면 승인 대기와 작업 완료를 해당 터미널에서 직접 감지합니다. 기존 설정은 유지됩니다.`;
+    el('remoteHookState').textContent = current
+      ? `현재 ${current.events}/${current.total}개 등록 · ${current.os} · 훅이 없으면 터미널 출력으로 상태를 감지합니다.`
+      : '훅 설정을 읽지 못했습니다. 등록을 다시 시도하거나 출력 감지로 시작할 수 있습니다.';
+    el('remoteHookError').hidden = true;
+    el('remoteHookRegister').disabled = false;
+    el('remoteHookCopy').textContent = '프롬프트 복사';
+    const fail = error => {
+      const reason = String(error?.message ?? error);
+      el('remoteHookErrorText').textContent = reason;
+      el('remoteHookPrompt').value = `WinCMux에서 ${name} 원격 훅 등록에 실패했습니다.\n작업 공간: ${environment.tab.title}\n폴더: ${environment.project.path}\n설정 파일: ${relative}\n오류: ${reason}\n원격 OS와 설정 파일 권한을 확인하고, 기존 훅을 보존하면서 WinCMux 훅을 등록해 주세요.`;
+      el('remoteHookError').hidden = false;
+      el('remoteHookState').textContent = '등록 실패 · 출력 감지로 시작하거나 해결 프롬프트를 복사할 수 있습니다.';
+    };
+    if (initialError) fail(initialError);
+    el('remoteHookCopy').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(el('remoteHookPrompt').value);
+        el('remoteHookCopy').textContent = '복사됨';
+      } catch { el('remoteHookPrompt').select(); }
+    }, { signal });
+    el('remoteHookRegister').addEventListener('click', async () => {
+      el('remoteHookRegister').disabled = true;
+      el('remoteHookState').textContent = `${name} 훅 등록 중…`;
+      try {
+        const result = await rpc('hooks-ensure', params);
+        const verified = await rpc('hooks-status', params);
+        if (!result.registered || !verified.registered) throw Error('필요한 훅 이벤트가 모두 등록되지 않았습니다.');
+        status(`${name} 훅 등록 완료 (${verified.events}/${verified.total}) · 새 세션에서 수신을 확인하세요.`);
+        dialog.close('registered');
+      } catch (error) { fail(error); el('remoteHookRegister').disabled = false; }
+    }, { signal });
+    el('remoteHookWithout').addEventListener('click', () => {
+      status(`${name} 훅 없이 시작 · 터미널 출력으로 상태를 감지합니다.`);
+      dialog.close('fallback');
+    }, { signal });
+    el('remoteHookCancel').addEventListener('click', () => dialog.close('cancel'), { signal });
+    dialog.returnValue = 'cancel';
+    return new Promise(resolve => {
+      dialog.addEventListener('close', () => {
+        controller.abort();
+        resolve(['registered', 'fallback'].includes(dialog.returnValue) ? dialog.returnValue : 'cancel');
+      }, { once: true });
+      dialog.showModal();
+      el('remoteHookRegister').focus();
+    });
+  }
+
   async function openTerminal(launch, source = null, direction = null, install = null, resumeId = null, resumePicker = false) {
     if (!target) return;
     const environment = source?.environment ?? activeEnvironment;
@@ -854,6 +917,10 @@
     const group = source?.group ?? environment.activeGroup;
     if (source?.hidden) restorePane(source);
     const project = environment.project;
+    if (!install && ['claude', 'codex'].includes(launch)) {
+      const choice = await promptRemoteHook(launch, environment, source);
+      if (choice === 'cancel') return;
+    }
     const containerName = dockerItems.find(item => item.ID === project.container)?.Names || (project.container ? "Docker" : "SSH 서버");
     const pane = document.createElement("section");
     pane.className = "pane";
@@ -861,6 +928,26 @@
     const label = document.createElement("header");
     const heading = document.createElement("strong");
     heading.textContent = install ? `${launchLabels[install.tool]} 설치 ${++paneNumber}` : `${launchLabels[launch]}${resumeId || resumePicker ? " resume" : ""} ${++paneNumber}`;
+    const installHeading = heading.textContent;
+    const installStartedAt = install ? Date.now() : 0;
+    let installFinished = false;
+    let installBuffer = '';
+    const installTimer = install ? setInterval(() => {
+      if (!installFinished) heading.textContent = `${installHeading} · ${Math.floor((Date.now() - installStartedAt) / 1000)}초 경과`;
+    }, 1000) : null;
+    const finishInstall = code => {
+      if (installFinished || !install) return;
+      installFinished = true;
+      clearInterval(installTimer);
+      const elapsed = Math.round((Date.now() - installStartedAt) / 1000);
+      if (code === 0) {
+        heading.textContent = `${installHeading} · 완료`;
+        status(`${launchLabels[install.tool]} 설치와 실행 확인 완료 (${elapsed}초). + ${launchLabels[install.tool]}를 눌러 시작하세요.`);
+      } else {
+        heading.textContent = `${installHeading} · 실패`;
+        alert(`${launchLabels[install.tool]} 설치 실패 (종료 코드 ${code}, ${elapsed}초). 터미널 출력의 오류를 확인하세요.`);
+      }
+    };
     heading.title = `${containerName} · ${project.path}`;
     const surface = document.createElement("div");
     surface.className = "term";
@@ -874,7 +961,7 @@
     let composer = launch !== "shell" && window.wincmuxRemoteComposer((action, payload) => {
       if (!id || closed) return Promise.reject(Error("에이전트 터미널이 준비되지 않았습니다."));
       return rpc(action, { id, ...payload });
-    }, button);
+    }, button, launch);
     let shellComposer = null;
     let chain = Promise.resolve();
     const send = (action, data) => {
@@ -917,6 +1004,7 @@
       focus: () => term.focus(),
       async dispose(remote = true) {
         if (!panes.delete(record)) return;
+        if (installTimer) clearInterval(installTimer);
         const refocus = remote && pane.contains(document.activeElement);
         closed = true;
         observer.disconnect();
@@ -993,7 +1081,19 @@
     const stream = new Channel();
     stream.onmessage = message => {
       if (!panes.has(record)) return;
-      if (message.data) term.write(Uint8Array.from(atob(message.data), character => character.charCodeAt(0)));
+      if (message.data) {
+        const raw = atob(message.data);
+        term.write(Uint8Array.from(raw, character => character.charCodeAt(0)));
+        if (install && !installFinished) {
+          installBuffer = (installBuffer + raw).slice(-256);
+          const marker = `\x1b]777;wincmux-install-result;${install.tool};`;
+          const start = installBuffer.lastIndexOf(marker);
+          if (start >= 0) {
+            const match = /^(\d+)\x07/.exec(installBuffer.slice(start + marker.length));
+            if (match) finishInstall(Number(match[1]));
+          }
+        }
+      }
       if (message.agent && composer) composer.update(message.agent);
       if (message.error) alert(message.error);
       if (message.shell_ready && composer) {
@@ -1010,6 +1110,7 @@
       }
       if (message.closed) {
         closed = true;
+        if (install && !installFinished) finishInstall(message.exit ?? '연결 종료');
         if (composer) composer.close();
         else heading.textContent += " · 종료됨";
         shellComposer?.close();
@@ -1038,16 +1139,13 @@
     });
     observer.observe(surface);
     try {
-      id = await invoke("ssh_pty", { params: { launch, cols: term.cols, rows: term.rows, source_terminal_id: source?.id, resume_id: resumeId, resume_picker: resumePicker }, stream });
+      id = await invoke("ssh_pty", { params: { launch, cols: term.cols, rows: term.rows, source_terminal_id: source?.id, resume_id: resumeId, resume_picker: resumePicker, install_tool: install?.tool }, stream });
       record.id = id;
       if (panes.has(record)) splitRight.disabled = splitDown.disabled = false;
       if (panes.has(record) && !closed) {
         for (const [action, data] of startupInput.splice(0)) send(action, data);
         send("terminal-resize", { cols: term.cols, rows: term.rows });
-        if (install) {
-          send("terminal-input", { text: `${install.command}\r` });
-          status(`${launchLabels[install.tool]} 설치를 터미널에서 실행했습니다. 결과를 확인하세요.`);
-        }
+        if (install && !installFinished) status(`${launchLabels[install.tool]} 설치 중 · 터미널에 진행 상황과 경과 시간이 표시됩니다.`);
         term.focus();
       } else if (!panes.has(record)) {
         await rpc("terminal-close", { id });

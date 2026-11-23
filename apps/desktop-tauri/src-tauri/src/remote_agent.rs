@@ -1,4 +1,4 @@
-use crate::{remote::Remote, ssh_terminal::quote};
+use crate::{remote::Remote, remote_hooks::HookStream, ssh_terminal::quote};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
@@ -63,7 +63,27 @@ pub struct AgentInstall {
     missing_tools: Vec<&'static str>,
 }
 
+impl AgentInstall {
+    pub fn install_command(&self) -> &str {
+        self.install_command
+    }
+}
+
 impl Launch {
+    pub fn install_shell_command(self, container: bool) -> Option<String> {
+        let guide = self.install_guide("")?;
+        let fallback = Launch::Shell.command(".", container);
+        Some(format!(
+            "PATH=\"$HOME/.local/bin:$PATH\"; export PATH; \
+             printf '%s\\n' 'WinCMux: 설치를 시작합니다. 환경과 네트워크에 따라 시간이 걸릴 수 있습니다.'; \
+             sh -c {}; _wincmux_install_exit=$?; \
+             printf '\\033]777;wincmux-install-result;{};%s\\007' \"$_wincmux_install_exit\"; \
+             printf 'WinCMux: 설치 %s (종료 코드 %s)\\n' \
+               \"$(if [ \"$_wincmux_install_exit\" -eq 0 ]; then printf 완료; else printf 실패; fi)\" \
+               \"$_wincmux_install_exit\"; {fallback}",
+            quote(guide.install_command()), self.program()?
+        ))
+    }
     pub fn parse(value: &Value) -> Result<Self, String> {
         match value.as_str().unwrap_or("shell") {
             "shell" => Ok(Self::Shell),
@@ -300,6 +320,7 @@ struct Queued {
 
 pub struct AgentSession {
     detector: Conversation,
+    hooks: Option<HookStream>,
     quota: LimitDetector,
     alerts: Option<mpsc::Sender<AgentAlert>>,
     screen: Screen,
@@ -329,6 +350,7 @@ impl AgentSession {
         }
         Some(Self {
             detector: Conversation::new(launch.program()?, &[]),
+            hooks: None,
             quota: LimitDetector::new(launch.program()?, &[]),
             alerts: None,
             screen,
@@ -384,6 +406,10 @@ impl AgentSession {
         });
     }
 
+    pub fn bind_hook(&mut self, token: String, provider: String) {
+        self.hooks = Some(HookStream::new(token, provider));
+    }
+
     fn announce(&self, notice: Option<Notice>) {
         if let (Some(report), Some(notice)) = (&self.alerts, notice) {
             let _ = report.try_send(AgentAlert::Notice(notice));
@@ -391,6 +417,14 @@ impl AgentSession {
     }
 
     pub fn output(&mut self, data: &[u8]) {
+        if let Some(hooks) = &mut self.hooks {
+            let provider = hooks.provider().to_owned();
+            for event in hooks.feed(data) {
+                if let Ok(notice) = self.detector.hook(&provider, &event, None, None) {
+                    self.announce(notice);
+                }
+            }
+        }
         let text = self.decoder.push(data);
         if !text.is_empty() {
             self.screen.process(&text);
@@ -418,6 +452,24 @@ impl AgentSession {
         let text = String::from_utf8_lossy(text);
         self.quota.input(&text);
         self.detector.input(&text);
+    }
+
+    pub fn command(&mut self, text: &str) -> Result<Vec<u8>, String> {
+        if text.len() > 200 || !text.starts_with(['/', '$']) || text.chars().any(char::is_control) {
+            return Err("CLI 명령·스킬은 / 또는 $로 시작하는 한 줄이어야 합니다.".into());
+        }
+        let prompt = self.screen.agent_prompt_state(self.prompt_agent);
+        if !self.queue.is_empty()
+            || self.paste_at.is_some()
+            || !self.detector.terminal_ready()
+            || !prompt.visible
+            || !prompt.empty
+        {
+            return Err("에이전트 입력창이 비고 준비되면 명령을 다시 실행하세요.".into());
+        }
+        let data = format!("{text}\r").into_bytes();
+        self.manual(&data);
+        Ok(data)
     }
 
     pub fn apply(&mut self, operation: Composer) -> Option<Vec<u8>> {
@@ -574,6 +626,22 @@ mod tests {
     use super::*;
 
     const READY: &str = "\x1b[2J\x1b[1;1HOpenAI Codex\x1b[10;1H› Ask Codex to do anything\x1b[14;1H? for shortcuts\x1b[10;3H\x1b[?2004h";
+
+    #[test]
+    fn cli_command_requires_an_empty_ready_agent_and_no_queue() {
+        let mut agent = AgentSession::new(Launch::Codex, 100, 24).unwrap();
+        assert!(agent.command("/goal").is_err());
+        agent.output(READY.as_bytes());
+        assert!(agent.command("/goal\nother").is_err());
+        agent.apply(Composer::Add {
+            text: "queued".into(),
+            due_at: None,
+        });
+        assert!(agent.command("/goal").is_err());
+        agent.queue.clear();
+        std::thread::sleep(Duration::from_millis(1600));
+        assert_eq!(agent.command("/goal"), Ok(b"/goal\r".to_vec()));
+    }
 
     #[test]
     fn agent_exit_returns_to_an_interactive_shell() {
@@ -799,5 +867,20 @@ mod tests {
         let prompt = agent.screen.agent_prompt_state(PromptAgent::Claude);
         assert!(prompt.startup_ready && prompt.empty);
         assert!(!agent.screen.prompt_state().startup_ready);
+    }
+
+    #[test]
+    fn remote_hook_updates_state_only_for_its_session_token() {
+        let mut agent = AgentSession::new(Launch::Claude, 100, 24).unwrap();
+        agent.bind_hook("session123".into(), "claude".into());
+        agent.output(b"\x1b]7502;wrong;claude;PermissionRequest\x07");
+        assert_eq!(agent.detector.snapshot()["hook"]["received"], false);
+        agent.output(b"\x1b]7502;session123;claude;UserPromptSubmit\x07");
+        assert_eq!(agent.detector.snapshot()["state"], "working");
+        agent.output(b"\x1b]7502;session123;claude;Notification\x07");
+        assert_eq!(agent.detector.snapshot()["state"], "blocked");
+        agent.output(b"\x1b]7502;session123;claude;Stop\x07");
+        assert_eq!(agent.detector.snapshot()["state"], "done");
+        assert_eq!(agent.detector.snapshot()["hook"]["received"], true);
     }
 }

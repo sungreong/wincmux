@@ -193,6 +193,16 @@ dialog label { margin-bottom: 9px; }
 dialog input[type="checkbox"] { display: inline; width: auto; margin: 0 4px 0 0; }
 dialog footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 #agentInstallDialog { width: min(530px, 92vw); min-width: 0; }
+#remoteHookDialog { width: min(530px, 92vw); min-width: 0; }
+#remoteHookDialog p { overflow-wrap: anywhere; }
+#remoteHookPrompt { width: 100%; min-height: 105px; resize: vertical; }
+.agent-command-tools { margin: 4px 0; font-size: 12px; color: #aebbd0; }
+.agent-command-tools summary { cursor: pointer; width: fit-content; }
+.agent-command-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 6px; }
+.agent-command-row select { width: auto; max-width: min(220px, 100%); min-width: 100px; }
+.agent-command-row select[hidden] { display: none; }
+.agent-command-row button { white-space: nowrap; }
+.agent-command-hint, .agent-command-feedback { margin: 5px 0 0; }
 #agentInstallDialog p { overflow-wrap: anywhere; }
 #agentInstallDialog pre { background: #10151c; padding: 12px; border-radius: 5px; word-break: normal; overflow-wrap: anywhere; }
 #agentInstallDialog .install-missing { color: #f4c887; }

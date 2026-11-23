@@ -5,6 +5,7 @@ const rendererDir = new URL("../renderer/", import.meta.url);
 const orderedFiles = [
   "tauri-adapter.js",
   "terminal-links.js",
+  "agent-command-input.js",
   "terminal-renderer.js",
   "remote-terminal-clipboard.js",
   "remote-shell-composer.js",

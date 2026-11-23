@@ -1,11 +1,12 @@
 "use strict";
-window.wincmuxRemoteComposer = (request, button) => {
+window.wincmuxRemoteComposer = (request, button, provider = "codex") => {
   const panel = document.createElement("form");
   panel.className = "remote-composer";
   const input = document.createElement("textarea");
   input.rows = 1;
   input.placeholder = "메시지 입력 (Ctrl+Enter로 전송 또는 대기열 추가)";
   input.setAttribute("aria-label", "에이전트 메시지");
+  const commands = window.wincmuxAgentCommandInput.create(input, provider, true);
   const queue = document.createElement("div");
   queue.className = "remote-composer-queue";
   queue.hidden = true;
@@ -31,14 +32,17 @@ window.wincmuxRemoteComposer = (request, button) => {
   let items = [];
   async function send(action) {
     if (handedOff || pending || !input.value.trim()) return;
-    if (action === "agent-submit" && items.length >= 32) return report("대기 입력은 최대 32개입니다.");
-    const due_at = !due.hidden && due.value ? new Date(due.value).getTime() : undefined;
+    const commandMode = commands.mode() === "command";
+    if (commandMode && action !== "agent-submit") return;
+    if (!commandMode && action === "agent-submit" && items.length >= 32) return report("대기 입력은 최대 32개입니다.");
+    const due_at = !commandMode && !due.hidden && due.value ? new Date(due.value).getTime() : undefined;
     if (due_at !== undefined && (!Number.isFinite(due_at) || due_at <= Date.now())) return report("현재 이후의 예약 시각을 선택하세요.");
-    pending = true;
-    const text = input.value;
+    const draft = input.value;
     try {
-      await request(action, { text, due_at });
-      if (input.value === text) input.value = "";
+      const text = commands.prepare(draft);
+      pending = true;
+      await request(commandMode ? "agent-command" : action, { text, due_at });
+      if (input.value === draft) input.value = "";
       due.value = "";
       due.hidden = true;
     } catch (error) {
@@ -53,8 +57,16 @@ window.wincmuxRemoteComposer = (request, button) => {
   });
   const submit = button("전송 / 대기열", () => send("agent-submit"));
   const insert = button("삽입만", () => send("agent-insert"));
+  const syncMode = () => {
+    const commandMode = commands.mode() === "command";
+    submit.textContent = commandMode ? "CLI 명령 실행" : "전송 / 대기열";
+    insert.disabled = toggle.disabled = commandMode;
+    if (commandMode) due.hidden = true;
+  };
+  commands.panel.addEventListener("change", syncMode);
+  syncMode();
   actions.append(insert, toggle, due, submit);
-  panel.append(queue, input, message, actions);
+  panel.append(queue, input, commands.panel, message, actions);
   panel.addEventListener("submit", event => event.preventDefault());
   input.addEventListener("keydown", event => {
     if (!event.isComposing && event.keyCode !== 229 && event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
@@ -69,6 +81,7 @@ window.wincmuxRemoteComposer = (request, button) => {
       state.remove();
       queue.remove();
       actions.remove();
+      commands.panel.remove();
       if (input.value.trim()) {
         input.readOnly = true;
         input.setAttribute("aria-label", "종료된 에이전트의 미전송 초안");
@@ -80,7 +93,9 @@ window.wincmuxRemoteComposer = (request, button) => {
     update(value) {
       const status = { working:"작업 중", idle:"입력 가능", done:"작업 완료", blocked:"확인 필요", error:"오류", unknown:"상태 확인 중" };
       state.textContent = status[value.state] ?? "상태 확인 중";
-      if (value.source === "pattern" && value.state === "done") state.title = "터미널에서 작업 완료를 감지했습니다.";
+      state.title = value.hook?.received
+        ? `${value.hook.provider === 'claude' ? 'Claude Code' : 'Codex'} 훅 수신 · ${value.hook.count}회 · 최근 ${value.hook.last_event}`
+        : value.source === "pattern" && value.state === "done" ? "터미널에서 작업 완료를 감지했습니다." : "훅 수신 전 · 터미널 출력으로 상태를 감지합니다.";
       items = value.queue ?? [];
       queue.replaceChildren();
       queue.hidden = !items.length;
@@ -105,7 +120,7 @@ window.wincmuxRemoteComposer = (request, button) => {
       report(value.message ?? "");
     },
     close() {
-      for (const node of panel.querySelectorAll("input, textarea, button")) node.disabled = true;
+      for (const node of panel.querySelectorAll("input, textarea, button, select")) node.disabled = true;
       state.textContent = "종료됨";
     }
   };

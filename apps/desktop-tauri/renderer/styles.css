@@ -3986,6 +3986,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .pane-composer textarea { min-height: 36px; border-radius: var(--radius-control); padding: var(--space-2); background: var(--surface-input); }
 .pane-composer button { min-height: var(--control-height); padding: var(--space-1) var(--space-2); }
 #terminalPromptSend, .workspace-create-btn { background: var(--accent); border-color: var(--accent); color: var(--text-on-accent); }
+.agent-command-tools { margin: 4px 0; font-size: 12px; color: var(--text-secondary); }
+.agent-command-tools summary { cursor: pointer; width: fit-content; }
+.agent-command-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 6px; }
+.agent-command-row select { width: auto; max-width: min(220px, 100%); min-width: 100px; }
+.agent-command-row select[hidden] { display: none; }
+.agent-command-row button { white-space: nowrap; }
+.agent-command-hint, .agent-command-feedback { margin: 5px 0 0; }
 #terminalPromptSend:hover, .workspace-create-btn:hover { background: var(--accent-hover); color: var(--text-on-accent); }
 #terminalPromptExpand, #terminalPromptSingleLine { background: transparent; border-color: transparent; color: var(--text-secondary); }
 .terminal-prompt { padding: var(--space-4); border-radius: var(--radius-dialog); box-shadow: var(--shadow-menu); }

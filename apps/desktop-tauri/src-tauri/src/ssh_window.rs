@@ -495,9 +495,10 @@ pub async fn ssh_workspace(
                     .ok_or("먼저 로컬 Docker 목록을 여세요.")?;
                 state.last_docker_project(host)
             }
-            "browse" | "terminal-input" | "terminal-resize" | "terminal-close" | "files"
-            | "preview" | "search" | "git-status" | "git-diff" | "agent-submit"
-            | "agent-insert" | "agent-cancel" | "agent-toggle" | "agent-send-now" => {
+            "browse" | "hooks-status" | "hooks-ensure" | "terminal-input" | "terminal-resize"
+            | "terminal-close" | "files" | "preview" | "search" | "git-status" | "git-diff"
+            | "agent-submit" | "agent-command" | "agent-insert" | "agent-cancel"
+            | "agent-toggle" | "agent-send-now" => {
                 super::ssh_terminal::action(state, &action, &params).await
             }
             _ => Err("로컬 Docker에서 지원하지 않는 작업입니다.".into()),

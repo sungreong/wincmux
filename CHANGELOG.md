@@ -2,6 +2,17 @@
 
 [README](README.md) · [GitHub Releases](https://github.com/sungreong/wincmux/releases)
 
+## 0.2.134 — Agent commands and skills
+
+- Run Claude Code and Codex CLI commands such as `/goal` directly from the local, SSH, or Docker composer when the agent prompt is empty and ready. Commands bypass the follow-up queue.
+- Save, select, and remove custom commands per agent. Plain-message mode prevents leading `/` or `$` text from executing as a command.
+
+## 0.2.133 — Docker and SSH workspace hooks
+
+- Register Claude Code and Codex hooks in Linux and macOS Docker or SSH workspace folders after an on-launch prompt. Preserve existing settings and avoid duplicate handlers.
+- Bind remote hook signals to the active terminal with a per-session token, feeding working, approval, and completion states into notifications. Continue using terminal output detection until hooks arrive.
+- Run remote agent installation as a shell startup command and show elapsed time and the final exit result, including for slow Docker installs.
+
 ## 0.2.132 — Shared Docker and remote workspace controls
 
 ### Release summary since 0.2.105

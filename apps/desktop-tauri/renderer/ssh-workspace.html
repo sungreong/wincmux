@@ -197,6 +197,21 @@
   <div id="moveRemotePaneTargets"></div>
   <footer><button type="button" id="cancelMoveRemotePane">취소</button></footer>
 </dialog>
+<dialog id="remoteHookDialog" aria-labelledby="remoteHookTitle" aria-describedby="remoteHookHelp">
+  <h2 id="remoteHookTitle">에이전트 훅 등록</h2>
+  <p id="remoteHookHelp"></p>
+  <p id="remoteHookState" role="status"></p>
+  <div id="remoteHookError" hidden>
+    <p id="remoteHookErrorText" role="alert"></p>
+    <textarea id="remoteHookPrompt" readonly aria-label="훅 등록 오류 해결 프롬프트"></textarea>
+    <button type="button" id="remoteHookCopy">프롬프트 복사</button>
+  </div>
+  <footer>
+    <button type="button" id="remoteHookCancel">취소</button>
+    <button type="button" id="remoteHookWithout">훅 없이 시작</button>
+    <button type="button" id="remoteHookRegister">훅 등록</button>
+  </footer>
+</dialog>
 <dialog id="agentInstallDialog" aria-labelledby="agentInstallTitle" aria-describedby="agentInstallTarget">
   <h2 id="agentInstallTitle"></h2>
   <p id="agentInstallTarget"></p>
@@ -263,6 +278,7 @@
 <script src="./vendor/addon-web-links.js"></script>
 <script src="./vendor/addon-webgl.js"></script>
 <script src="./terminal-links.js"></script>
+<script src="./agent-command-input.js"></script>
 <script src="./terminal-renderer.js"></script>
 <script src="./terminal-search.js"></script>
 <script src="./remote-terminal-clipboard.js"></script>

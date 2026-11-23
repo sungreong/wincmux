@@ -2,6 +2,7 @@ use crate::{
     local_docker::{self, DockerHost},
     remote::Remote,
     remote_agent::{AgentInstall, AgentSession, Composer, Launch},
+    remote_hooks,
     ssh_auth::Handle,
     ssh_window::{SshWindow, WorkspaceWindows},
 };
@@ -11,13 +12,17 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
 use tauri::{ipc::Channel, State, WebviewWindow};
-use tokio::{sync::mpsc, time::timeout};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::timeout,
+};
 use uuid::Uuid;
 
 pub(super) enum Input {
     Data(Vec<u8>),
     Resize(u32, u32),
     Agent(Composer),
+    Command(String, oneshot::Sender<Result<(), String>>),
 }
 
 pub(super) enum WorkspaceHost {
@@ -166,6 +171,19 @@ pub async fn run(handle: &Handle, command: String, max: usize) -> Result<Vec<u8>
 
 pub async fn action(state: &SshWindow, action: &str, params: &Value) -> Result<Value, String> {
     match action {
+        "hooks-status" | "hooks-ensure" => {
+            let (host, project) = state.project(params["source_terminal_id"].as_str()).await?;
+            let provider = params["provider"]
+                .as_str()
+                .ok_or("에이전트를 선택하세요.")?;
+            if action == "hooks-status" {
+                remote_hooks::status(&host, &project.path, project.container.as_deref(), provider)
+                    .await
+            } else {
+                remote_hooks::ensure(&host, &project.path, project.container.as_deref(), provider)
+                    .await
+            }
+        }
         "containers" => {
             let WorkspaceHost::Ssh(handle) = state.host().await? else {
                 return Err("SSH 서버에 연결하세요.".into());
@@ -196,11 +214,17 @@ pub async fn action(state: &SshWindow, action: &str, params: &Value) -> Result<V
             )
         }
         "terminal-input" | "terminal-resize" | "terminal-close" | "agent-submit"
-        | "agent-insert" | "agent-cancel" | "agent-toggle" | "agent-send-now" => {
+        | "agent-command" | "agent-insert" | "agent-cancel" | "agent-toggle" | "agent-send-now" => {
             let id = params["id"].as_str().ok_or("원격 터미널을 지정하세요.")?;
             if action == "terminal-close" {
                 state.remove_terminal(id).await;
             } else {
+                let (reply, receiver) = if action == "agent-command" {
+                    let (reply, receiver) = oneshot::channel();
+                    (Some(reply), Some(receiver))
+                } else {
+                    (None, None)
+                };
                 let input = if action == "terminal-input" {
                     let text = params["text"].as_str().ok_or("터미널 입력을 확인하세요.")?;
                     if text.len() > 128 * 1024 {
@@ -209,6 +233,14 @@ pub async fn action(state: &SshWindow, action: &str, params: &Value) -> Result<V
                     Input::Data(text.as_bytes().to_vec())
                 } else if action == "terminal-resize" {
                     Input::Resize(size(params, "cols", 80), size(params, "rows", 24))
+                } else if action == "agent-command" {
+                    Input::Command(
+                        params["text"]
+                            .as_str()
+                            .ok_or("명령을 입력하세요.")?
+                            .to_owned(),
+                        reply.unwrap(),
+                    )
                 } else {
                     Input::Agent(Composer::parse(action, params)?)
                 };
@@ -219,6 +251,12 @@ pub async fn action(state: &SshWindow, action: &str, params: &Value) -> Result<V
                 sender
                     .try_send(input)
                     .map_err(|_| "원격 터미널이 닫혔거나 입력이 밀려 있습니다.")?;
+                if let Some(receiver) = receiver {
+                    timeout(Duration::from_secs(5), receiver)
+                        .await
+                        .map_err(|_| "명령 전송 응답이 지연되고 있습니다.")?
+                        .map_err(|_| "원격 터미널이 종료되었습니다.")??;
+                }
             }
             Ok(json!({"ok":true}))
         }
@@ -272,6 +310,18 @@ pub async fn ssh_pty(
     let resume_id = params["resume_id"].as_str();
     let resume_picker = params["resume_picker"] == true;
     let launch = Launch::parse(&params["launch"])?;
+    let install_tool = params["install_tool"].as_str();
+    if install_tool.is_some() && launch != Launch::Shell {
+        return Err("설치는 셸 터미널에서 실행하세요.".into());
+    }
+    let install_script = if let Some(tool) = install_tool {
+        Launch::parse(&json!(tool))?
+            .install_shell_command(project.container.is_some())
+            .ok_or("설치할 에이전트를 선택하세요.")?
+            .into()
+    } else {
+        None::<String>
+    };
     if (resume_id.is_some() || resume_picker) && !matches!(launch, Launch::Claude | Launch::Codex) {
         return Err("Claude 또는 Codex 대화를 선택하세요.".into());
     }
@@ -308,6 +358,14 @@ pub async fn ssh_pty(
         }
     }
     let mut agent = AgentSession::new(launch, cols as u16, rows as u16);
+    let hook_token = if matches!(launch, Launch::Claude | Launch::Codex) {
+        Some(Uuid::new_v4().simple().to_string())
+    } else {
+        None
+    };
+    if let (Some(agent), Some(token)) = (&mut agent, &hook_token) {
+        agent.bind_hook(token.clone(), params["launch"].as_str().unwrap().to_owned());
+    }
     let id = Uuid::new_v4().to_string();
     if let Some(agent) = &mut agent {
         if let Ok(context) = state.notice_project(&host, &project).await {
@@ -324,6 +382,10 @@ pub async fn ssh_pty(
             let docker = docker.clone();
             let run_path = path.to_owned();
             let resume_id = resume_id.map(str::to_owned);
+            let run_token = hook_token.clone();
+            let run_install = install_tool
+                .and_then(|tool| Launch::parse(&json!(tool)).ok())
+                .and_then(|tool| tool.install_shell_command(true));
             let result = tokio::task::spawn_blocking(move || {
                 docker.spawn_terminal(
                     project.container.as_deref(),
@@ -331,6 +393,8 @@ pub async fn ssh_pty(
                     launch,
                     resume_id.as_deref(),
                     resume_picker,
+                    run_token.as_deref(),
+                    run_install.as_deref(),
                 )
             })
             .await
@@ -353,16 +417,22 @@ pub async fn ssh_pty(
             return Ok(id);
         }
     };
-    let command = shell(
-        path,
-        container,
-        &if resume_id.is_some() || resume_picker {
-            launch.resume_command(path, container.is_some(), resume_id, resume_picker)
-        } else {
-            launch.command(path, container.is_some())
-        },
-        true,
-    )?;
+    let agent_command = if let Some(script) = install_script {
+        script
+    } else if resume_id.is_some() || resume_picker {
+        launch.resume_command(path, container.is_some(), resume_id, resume_picker)
+    } else {
+        launch.command(path, container.is_some())
+    };
+    let agent_command = if let Some(token) = &hook_token {
+        format!(
+            "WINCMUX_HOOK_TOKEN={}; export WINCMUX_HOOK_TOKEN; {agent_command}",
+            quote(token)
+        )
+    } else {
+        agent_command
+    };
+    let command = shell(path, container, &agent_command, true)?;
     let mut channel = timeout(Duration::from_secs(8), handle.channel_open_session())
         .await
         .map_err(|_| "서버가 SSH 터미널 요청에 응답하지 않습니다.")?
@@ -400,6 +470,20 @@ pub async fn ssh_pty(
                             Some(data) => channel.data_bytes(data).await,
                             None => Ok(()),
                         },
+                        Some(Input::Command(text, reply)) => {
+                            let result = match agent.as_mut() {
+                                Some(agent) => agent.command(&text),
+                                None => Err("에이전트 터미널이 아닙니다.".into()),
+                            };
+                            match result {
+                                Ok(data) => {
+                                    let written = channel.data_bytes(data).await;
+                                    let _ = reply.send(written.as_ref().map(|_| ()).map_err(|error| error.to_string()));
+                                    written
+                                }
+                                Err(error) => { let _ = reply.send(Err(error)); Ok(()) }
+                            }
+                        }
                         None => { let _ = channel.close().await; break; }
                     };
                     if result.is_err() { break; }

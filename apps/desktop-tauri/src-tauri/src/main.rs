@@ -6,6 +6,7 @@ mod local_docker;
 mod remote;
 mod remote_agent;
 mod remote_conversations;
+mod remote_hooks;
 mod ssh_auth;
 mod ssh_config;
 mod ssh_credentials;

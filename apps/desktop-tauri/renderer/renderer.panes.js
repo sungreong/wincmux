@@ -2606,6 +2606,8 @@ function bindTerminalPrompt() {
   const composer = $("terminalComposer");
   const form = $("terminalPromptForm");
   const editor = $("terminalPromptText");
+  const commandInput = window.wincmuxAgentCommandInput.create(editor);
+  editor.insertAdjacentElement("afterend", commandInput.panel);
   const targetLabel = $("terminalPromptTarget");
   const error = $("terminalPromptError");
   const close = $("terminalPromptClose");
@@ -2627,7 +2629,7 @@ function bindTerminalPrompt() {
     const hasLineBreaks = /[\n\t]/.test(editor.value);
     insert.textContent = "삽입만";
     insert.title = hasLineBreaks ? "줄바꿈과 들여쓰기를 유지해 삽입합니다. 제출하지 않습니다." : "입력 내용을 삽입합니다. 제출하지 않습니다.";
-    send.textContent = editor.value ? "전송 / 대기열" : "터미널 제출";
+    send.textContent = commandInput.mode() === "command" ? "CLI 명령 실행" : editor.value ? "전송 / 대기열" : "터미널 제출";
     insertSingleLine.hidden = multilineHint.hidden = !hasLineBreaks;
     editor.style.height = "auto";
     const card = composer.parentElement;
@@ -2647,6 +2649,10 @@ function bindTerminalPrompt() {
     if (changed) {
       target = view ? { view, sessionId: view.sessionId } : null;
       editor.value = view?.promptDraft ?? "";
+      const launch = state.sessionsById.get(view?.sessionId)?.spawn_cmd || "";
+      const program = commandBaseNameForOverlay(launch);
+      commandInput.setProvider(state.agentStates.get(view?.sessionId)?.hook?.provider
+        || (program.includes("claude") ? "claude" : program.includes("codex") ? "codex" : ""));
       showError("");
     }
     if (card && composer.parentElement !== card) {
@@ -2711,6 +2717,7 @@ function bindTerminalPrompt() {
     if (target) target.view.promptDraft = editor.value;
     updateInsertActions();
   });
+  commandInput.panel.addEventListener("change", updateInsertActions);
   editor.addEventListener("keydown", (ev) => {
     if (ev.ctrlKey && !ev.altKey && !ev.shiftKey && ev.key === "Enter"
       && !ev.isComposing && ev.keyCode !== 229 && !composing) {
@@ -2746,8 +2753,10 @@ function bindTerminalPrompt() {
     });
     try {
       validateTarget();
-      const preserveLineBreaks = ev.submitter !== insertSingleLine && /[\n\t]/.test(editor.value);
-      const data = terminalPromptPayload(editor.value, preserveLineBreaks, view.term.modes.bracketedPasteMode);
+      const commandMode = commandInput.mode() === "command";
+      const prepared = commandInput.prepare(editor.value);
+      const preserveLineBreaks = ev.submitter !== insertSingleLine && /[\n\t]/.test(prepared);
+      const data = terminalPromptPayload(prepared, preserveLineBreaks, view.term.modes.bracketedPasteMode);
       writing = true;
       editor.readOnly = close.disabled = insert.disabled = insertSingleLine.disabled = expand.disabled = send.disabled = followup.disabled = true;
       if (shouldSubmit && editor.value.trim()) {
@@ -2760,8 +2769,14 @@ function bindTerminalPrompt() {
           && item.delivery_mode === "when_ready");
         const recognized = agent && (agent.agent_process_attached || agent.source !== "none" || agent.hook?.active
           || Number(agent.terminal_completed_count ?? 0) > 0);
-        if (queued || (recognized && (agent.terminal_ready !== true || agent.terminal_prompt_empty !== true))) {
-          await rpc("followup.schedule", { session_id: sessionId, prompt: editor.value, delivery_mode: "when_ready" });
+        if (commandMode) {
+          if (!recognized) throw new Error("Claude Code 또는 Codex 터미널에서 CLI 명령을 실행하세요.");
+          if (queued || agent.terminal_ready !== true || agent.terminal_prompt_empty !== true || agent.terminal_prompt_visible !== true) {
+            throw new Error("CLI 명령은 대기열에 넣지 않습니다. 에이전트 입력창이 비고 준비되면 다시 실행하세요.");
+          }
+        }
+        if (!commandMode && (queued || (recognized && (agent.terminal_ready !== true || agent.terminal_prompt_empty !== true)))) {
+          await rpc("followup.schedule", { session_id: sessionId, prompt: prepared, delivery_mode: "when_ready" });
           view.promptDraft = "";
           editor.value = "";
           updateInsertActions();
@@ -2795,7 +2810,7 @@ function bindTerminalPrompt() {
         updateInsertActions();
       }
       if (dialog.open) dialog.close();
-      setStatus(shouldSubmit ? "터미널에 입력을 제출했습니다." : "내용을 넣었습니다. 터미널 제출을 누르면 실행됩니다.");
+      setStatus(shouldSubmit ? commandMode ? "CLI 명령을 터미널에 제출했습니다." : "터미널에 입력을 제출했습니다." : "내용을 넣었습니다. 터미널 제출을 누르면 실행됩니다.");
     } catch (err) {
       const message = err?.message ?? String(err);
       const detail = /pipe disconnected|RPC timeout/.test(message)
