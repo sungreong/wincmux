@@ -44,6 +44,20 @@ async function run() {
     })()`);
     await until(() => cdp.eval(`rpc('session.tail',{session_id:${JSON.stringify(sid)}}).then(r=>r.output.includes('LOCAL_SHELL_KOREAN_한글'))`), 'Korean command output');
     await until(() => cdp.eval(`document.querySelector(${JSON.stringify(selector)}).value===''`), 'input cleared after send');
+    const agentControls = await cdp.eval(`(() => {
+      const command=document.querySelector('#terminalComposer .agent-command-tools');
+      const shown=provider=>{
+        state.agentStates.set(${JSON.stringify(sid)}, { session_id:${JSON.stringify(sid)}, source:'hook', hook:{active:true,provider} });
+        syncLocalShellComposers();
+        return {visible:!command.hidden,provider:command.querySelector('.agent-command-row select').value};
+      };
+      const claude=shown('claude');
+      const codex=shown('codex');
+      state.agentStates.set(${JSON.stringify(sid)}, { session_id:${JSON.stringify(sid)}, source:'none', hook:{active:false,provider:'codex'} });
+      syncLocalShellComposers();
+      return {shellHidden:command.hidden,claude,codex};
+    })()`);
+    assert.deepEqual(agentControls, {shellHidden:true,claude:{visible:true,provider:'claude'},codex:{visible:true,provider:'codex'}});
     console.log('Local shell composer: IME guarded; Korean command reached PowerShell; input cleared.');
   } finally {
     if (cdp) { await cdp.eval("rpc('runtime.shutdown_all',{confirmed:true})").catch(() => {}); cdp.close(); }

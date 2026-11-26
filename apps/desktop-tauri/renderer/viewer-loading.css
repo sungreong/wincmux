@@ -1,0 +1,6 @@
+.viewer-tree-loading { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 8px; color: #a2caff; font-size: 11px; }
+.viewer-tree-loading::before, .viewer-preview-loading::before { content: ""; flex: none; width: 12px; height: 12px; border: 2px solid #526b91; border-top-color: #a2caff; border-radius: 50%; animation: viewer-loading-spin .8s linear infinite; }
+#previewPlaceholder.viewer-preview-loading { display: flex; align-items: center; justify-content: center; gap: 9px; }
+.workspace-viewer-preview-body .viewer-preview-loading { display: flex; align-items: center; gap: 9px; color: #a2caff; }
+@keyframes viewer-loading-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .viewer-tree-loading::before, .viewer-preview-loading::before { animation: none; } }

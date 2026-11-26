@@ -1,10 +1,48 @@
 // A small, on-demand companion pane. It creates no terminal and loads only open folders.
 (() => {
   const $v = (id) => document.getElementById(id);
+  const previewLimitKey = "wincmux.viewer.previewLimitMb";
+  const previewLimit = $v("viewerPreviewLimit");
+  previewLimit.value = ["8", "16", "32", "64"].includes(localStorage.getItem(previewLimitKey)) ? localStorage.getItem(previewLimitKey) : "8";
+  const maxPreviewBytes = () => Number(previewLimit.value) * 1024 * 1024;
   const viewer = { open: false, tab: "files", workspaceId: null, selected: null, copied: null, previewText: null, markdownText: null, markdownSource: false, generation: 0, listGeneration: 0, highlightGeneration: 0, gitPage: 0, codeLines: [], findMatches: [], findIndex: -1, expandedByWorkspace: new Map(), agentCollapsedByWorkspace: new Map(), searchFolder: null, focusFolder: "" };
+  const extensionFilter = window.wincmuxViewerExtensions($v("viewerSearchExtensions"), () => { updateSearchOptionsLabel(); if (viewer.open && viewer.tab === "files") void loadFiles(); });
+  const savedFolderKey = () => `wincmux.viewer.savedFolders.${JSON.stringify(["local", typeof selectedWorkspace === "function" ? selectedWorkspace()?.path || "" : ""])}`;
+  const savedFolders = () => {
+    try {
+      const value = JSON.parse(localStorage.getItem(savedFolderKey()) || "[]");
+      return Array.isArray(value) ? value.filter(path => typeof path === "string" && path && !path.startsWith("/") && !path.split("/").some(part => part === "." || part === "..")).slice(0, 20) : [];
+    } catch { return []; }
+  };
+  let folderPicker;
+  const savedMode = () => folderPicker.mode() === "saved";
+  const saveFolders = paths => localStorage.setItem(savedFolderKey(), JSON.stringify(paths));
+  let savedFeedbackTimer;
+  const showSavedFolderFeedback = text => {
+    const node = $v("viewerSavedFolderFeedback");
+    node.textContent = text;
+    node.title = text;
+    node.hidden = false;
+    clearTimeout(savedFeedbackTimer);
+    savedFeedbackTimer = setTimeout(() => { node.hidden = true; }, 4500);
+  };
+  folderPicker = window.wincmuxViewerFolderPicker({
+    trigger: $v("viewerSavedFolderMode"), getFolders: savedFolders, getKey: savedFolderKey,
+    onChange: () => { updateScope(); updateFolderBar(); if (viewer.open && viewer.tab === "files") void loadFiles(); }
+  });
+  previewLimit.addEventListener("change", () => {
+    localStorage.setItem(previewLimitKey, previewLimit.value);
+    if (viewer.selected && !viewer.selected.directory && (viewer.tab === "files" || viewer.tab === "git")) select(viewer.selected);
+  });
   const expanded = () => {
     if (!viewer.expandedByWorkspace.has(viewer.workspaceId)) viewer.expandedByWorkspace.set(viewer.workspaceId, new Set());
     return viewer.expandedByWorkspace.get(viewer.workspaceId);
+  };
+  const collapsedSavedByWorkspace = new Map();
+  const collapsedSaved = () => {
+    const key = savedFolderKey();
+    if (!collapsedSavedByWorkspace.has(key)) collapsedSavedByWorkspace.set(key, new Set());
+    return collapsedSavedByWorkspace.get(key);
   };
   const collapsedAgentGroups = () => {
     if (!viewer.agentCollapsedByWorkspace.has(viewer.workspaceId)) viewer.agentCollapsedByWorkspace.set(viewer.workspaceId, new Set());
@@ -22,11 +60,18 @@
   };
   const updateScope = () => {
     const scope = viewer.focusFolder || viewer.searchFolder;
-    $v("viewerSearchScope").disabled = !scope;
-    if (!scope) $v("viewerSearchScope").checked = false;
+    $v("viewerSearchScope").disabled = savedMode() || !scope;
+    if (savedMode() || !scope) $v("viewerSearchScope").checked = false;
     $v("viewerScopeName").textContent = scope ? `(${scope})` : "";
     $v("viewerScopeName").title = scope || "";
+    updateSearchOptionsLabel();
   };
+  function updateSearchOptionsLabel() {
+    const count = Number($v("viewerSearchScope").checked) + Number($v("viewerSearchIncludeExcluded").checked)
+      + Number(extensionFilter.values().length > 0) + Number(Boolean($v("viewerSearchExclude").value.trim()));
+    $v("viewerSearchOptionsToggle").textContent = count ? `필터 ${count}` : "필터";
+    $v("viewerSearchOptionsToggle").classList.toggle("is-filtered", count > 0);
+  }
   const updateFolderBar = () => {
     $v("viewerFolderBar").hidden = viewer.tab !== "files";
     $v("viewerFolderPath").textContent = viewer.focusFolder || "워크스페이스 전체";
@@ -34,6 +79,12 @@
     $v("viewerFocusFolder").disabled = viewer.tab !== "files" || !viewer.selected?.directory || viewer.selected.relativePath === viewer.focusFolder;
     $v("viewerParentFolder").disabled = !viewer.focusFolder;
     $v("viewerWorkspaceRoot").disabled = !viewer.focusFolder;
+    const path = viewer.selected?.relativePath;
+    const registered = Boolean(path && savedFolders().includes(path));
+    $v("viewerSaveFolder").disabled = viewer.tab !== "files" || !viewer.selected?.directory || !path || registered || savedFolders().length >= 20;
+    $v("viewerSaveFolder").textContent = registered ? "✓ 등록됨" : "등록";
+    $v("viewerSaveFolder").title = registered ? `${path} 등록됨` : "선택한 폴더 등록";
+    folderPicker.refresh();
   };
   const focusFolder = (path) => {
     viewer.focusFolder = path;
@@ -245,6 +296,7 @@
     const selected = viewer.selected;
     updateFolderBar();
     $v("viewerCopyPath").disabled = !selected;
+    $v("viewerDownload").disabled = !selected || selected.directory;
     $v("viewerCopyContent").disabled = viewer.previewText == null;
     $v("viewerCopyFile").disabled = !selected || selected.directory;
     $v("viewerPasteFile").disabled = !viewer.copied || !selected?.directory;
@@ -278,6 +330,7 @@
     $v("viewerMarkdownToggle").hidden = true;
     $v("viewerPreviewTitle").textContent = item.relativePath || workspace()?.path || "";
     $v("viewerPreview").replaceChildren();
+    $v("viewerPreview").removeAttribute("aria-busy");
     document.querySelectorAll(".workspace-viewer-row.selected").forEach((el) => el.classList.remove("selected"));
     item.element?.classList.add("selected");
     if (viewer.tab === "files" && item.directory) { viewer.searchFolder = item.relativePath || null; updateScope(); }
@@ -287,20 +340,28 @@
       return;
     }
     const generation = viewer.generation;
-    $v("viewerPreview").textContent = "읽는 중…";
+    const loading = document.createElement("div");
+    loading.className = "viewer-preview-loading";
+    loading.setAttribute("role", "status");
+    loading.textContent = "미리보기 불러오는 중…";
+    $v("viewerPreview").append(loading);
+    $v("viewerPreview").setAttribute("aria-busy", "true");
     const task = viewer.tab === "git"
-      ? (item.section === "untracked" ? call("viewer-preview", { relativePath: item.relativePath }) : call("viewer-git-diff", { relativePath: item.relativePath, section: item.section }))
+      ? (item.section === "untracked" ? call("viewer-preview", { relativePath: item.relativePath, maxPreviewBytes: maxPreviewBytes() }) : call("viewer-git-diff", { relativePath: item.relativePath, section: item.section }))
       : agentTab() ? window.wincmux.agentAssetRead(workspace().path, item.relativePath).then((result) => ({ kind: "text", text: result.content ?? "" }))
-      : call("viewer-preview", { relativePath: item.relativePath });
+      : call("viewer-preview", { relativePath: item.relativePath, maxPreviewBytes: maxPreviewBytes() });
     task.then((result) => {
       if (generation !== viewer.generation || !viewer.open) return;
       const body = $v("viewerPreview");
+      body.removeAttribute("aria-busy");
       body.replaceChildren();
       if (result.kind === "image") {
-        const image = document.createElement("img");
-        image.src = result.dataUrl;
-        image.alt = item.relativePath;
-        body.append(image);
+        window.wincmuxViewerMedia.image(body, result.dataUrl, item.relativePath);
+      } else if (result.kind === "pdf") {
+        window.wincmuxViewerMedia.pdf(body, result.dataUrl);
+      } else if (result.kind === "html") {
+        window.wincmuxViewerMedia.html(body, result.text);
+        viewer.previewText = result.text;
       } else if (result.kind === "text") {
         if (viewer.tab === "git" && item.section !== "untracked") {
           renderDiff(body, result.text);
@@ -314,16 +375,30 @@
         if (viewer.markdownText === null) addAgentEditor(body, item, result.text);
         viewer.previewText = result.text;
       } else {
-        body.textContent = result.kind === "large" ? "미리보기 크기 제한을 넘었습니다." : "이 파일은 미리보기를 지원하지 않습니다.";
+        body.textContent = result.kind === "large" ? `미리보기 크기 제한(${previewLimit.value}MB)을 넘었습니다. 위에서 한도를 높이거나 다운로드하세요.` : "이 파일은 미리보기를 지원하지 않습니다.";
       }
       updateActions();
-    }).catch((error) => { if (generation === viewer.generation) showError(error); });
+    }).catch((error) => {
+      if (generation !== viewer.generation) return;
+      $v("viewerPreview").removeAttribute("aria-busy");
+      $v("viewerPreview").textContent = "미리보기를 열 수 없습니다.";
+      showError(error);
+    });
+  }
+
+  function treeLoading(label) {
+    const loading = document.createElement("div");
+    loading.className = "viewer-tree-loading";
+    loading.setAttribute("role", "status");
+    loading.textContent = label;
+    return loading;
   }
 
   function makeRow(item, depth) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "workspace-viewer-row";
+    if (item.directory) button.classList.toggle("is-saved", savedFolders().includes(item.relativePath));
     button.style.paddingLeft = `${8 + depth * 15}px`;
     button.textContent = `${item.directory ? "▸ 📁" : item.symlink ? "↗" : "·"} ${item.name}`;
     button.title = item.relativePath;
@@ -347,9 +422,13 @@
       if (!isExpanded || loaded) return;
       const wsId = viewer.workspaceId;
       button.disabled = true;
+      button.textContent = `… 📁 ${item.name}`;
+      children.replaceChildren(treeLoading(`${item.name} 폴더 읽는 중…`));
+      children.setAttribute("aria-busy", "true");
       try {
-        const result = await call("viewer-list", { relativePath: item.relativePath });
+        const result = await call("viewer-list", { relativePath: item.relativePath, extensions: extensionFilter.values() });
         if (viewer.workspaceId !== wsId) return;
+        children.replaceChildren();
         for (const child of result.items) {
           children.append(makeRow(child, depth + 1));
           if (child.directory && expanded().has(child.relativePath)) await child.expand();
@@ -365,7 +444,11 @@
         showError(error);
         isExpanded = false;
         children.hidden = true;
-      } finally { button.disabled = false; }
+      } finally {
+        children.removeAttribute("aria-busy");
+        button.disabled = false;
+        button.textContent = `${isExpanded ? "▾" : "▸"} 📁 ${item.name}`;
+      }
     };
     item.expand = () => toggle(true);
     button.addEventListener("click", () => void toggle());
@@ -384,7 +467,10 @@
         pattern,
         contentQuery: $v("viewerContentInput").value.trim(),
         scopePath: $v("viewerSearchScope").checked ? (viewer.focusFolder || viewer.searchFolder) : "",
-        includeExcluded: $v("viewerSearchIncludeExcluded").checked
+        scopePaths: savedMode() ? folderPicker.activePaths() : undefined,
+        exclude: $v("viewerSearchExclude").value,
+        includeExcluded: $v("viewerSearchIncludeExcluded").checked,
+        extensions: extensionFilter.values()
       });
       if (viewer.workspaceId !== wsId || viewer.tab !== "files" || !viewer.open || viewer.listGeneration !== listGeneration) return;
       tree.replaceChildren();
@@ -409,7 +495,19 @@
         if (item.line) {
           const snippet = document.createElement("span");
           snippet.className = "workspace-viewer-search-snippet";
-          snippet.textContent = `${item.line}행 · ${item.snippet || ""}`;
+          const line = document.createElement("strong");
+          line.textContent = `${item.line}행 · `;
+          const value = item.snippet || "";
+          snippet.title = `${item.line}행 · ${value}`;
+          const query = $v("viewerContentInput").value.trim();
+          const match = value.toLowerCase().indexOf(query.toLowerCase());
+          snippet.append(line);
+          if (!query || match < 0) snippet.append(document.createTextNode(value));
+          else {
+            const mark = document.createElement("mark");
+            mark.textContent = value.slice(match, match + query.length);
+            snippet.append(document.createTextNode(value.slice(0, match)), mark, document.createTextNode(value.slice(match + query.length)));
+          }
           button.append(snippet);
         }
         button.viewerItem = { ...item, element: button };
@@ -428,20 +526,80 @@
     const ws = workspace();
     if (!ws) { message("워크스페이스를 선택하세요."); return; }
     const pattern = $v("viewerSearchInput").value.trim();
+    if (savedMode() && !folderPicker.activePaths().length) { $v("viewerTree").textContent = "등록한 폴더가 없습니다. 전체 폴더에서 폴더를 선택해 등록하세요."; return; }
     if (pattern || $v("viewerContentInput").value.trim()) { await searchFiles(pattern); return; }
     const tree = $v("viewerTree");
     const previous = viewer.selected && identity(viewer.selected);
     const scroll = tree.scrollTop;
     tree.setAttribute("role", "tree");
     tree.replaceChildren();
-    tree.textContent = "폴더를 읽는 중…";
+    tree.append(treeLoading("폴더를 읽는 중…"));
+    tree.setAttribute("aria-busy", "true");
     const wsId = ws.id;
     const listGeneration = ++viewer.listGeneration;
     try {
       const folder = viewer.focusFolder;
-      const result = await call("viewer-list", { relativePath: folder });
+      const result = savedMode() ? null : await call("viewer-list", { relativePath: folder, extensions: extensionFilter.values() });
       if (viewer.workspaceId !== wsId || !viewer.open || viewer.tab !== "files" || viewer.listGeneration !== listGeneration) return;
+      tree.removeAttribute("aria-busy");
       tree.replaceChildren();
+      if (savedMode()) {
+        for (const path of folderPicker.activePaths()) {
+          if (viewer.listGeneration !== listGeneration) return;
+          const group = document.createElement("div");
+          group.className = "workspace-viewer-saved-group";
+          const heading = document.createElement("div");
+          heading.className = "workspace-viewer-saved-heading";
+          const children = document.createElement("div");
+          children.className = "workspace-viewer-saved-children";
+          children.setAttribute("role", "group");
+          children.hidden = collapsedSaved().has(path);
+          const toggle = document.createElement("button");
+          toggle.type = "button";
+          toggle.className = "viewer-saved-toggle";
+          toggle.title = path;
+          toggle.setAttribute("aria-expanded", String(!children.hidden));
+          const updateToggle = () => { toggle.textContent = `${children.hidden ? "▸" : "▾"} 📁 ${path}`; };
+          updateToggle();
+          toggle.addEventListener("click", () => {
+            children.hidden = !children.hidden;
+            if (children.hidden) collapsedSaved().add(path); else collapsedSaved().delete(path);
+            toggle.setAttribute("aria-expanded", String(!children.hidden));
+            updateToggle();
+          });
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.className = "viewer-saved-remove";
+          remove.textContent = "해제";
+          remove.title = `${path} 등록 해제`;
+          remove.setAttribute("aria-label", remove.title);
+          remove.addEventListener("click", () => {
+            saveFolders(savedFolders().filter(value => value !== path));
+            collapsedSaved().delete(path);
+            folderPicker.refresh();
+            showSavedFolderFeedback(`${path} 등록을 해제했습니다.`);
+            updateFolderBar();
+            void loadFiles();
+          });
+          heading.append(toggle, remove);
+          group.append(heading, children);
+          tree.append(group);
+          children.append(treeLoading(`${path} 폴더 읽는 중…`));
+          children.setAttribute("aria-busy", "true");
+          try {
+            const result = await call("viewer-list", { relativePath: path, extensions: extensionFilter.values() });
+            if (viewer.listGeneration !== listGeneration) return;
+            children.replaceChildren();
+            for (const item of result.items) {
+              children.append(makeRow(item, 1));
+              if (item.directory && expanded().has(item.relativePath)) await item.expand();
+            }
+          } catch { children.replaceChildren(Object.assign(document.createElement("div"), { className: "workspace-viewer-note", textContent: "폴더를 읽을 수 없습니다." })); }
+          finally { children.removeAttribute("aria-busy"); }
+        }
+        tree.scrollTop = scroll;
+        return;
+      }
       const root = { name: folder ? folder.split("/").pop() : ws.name || ws.path, relativePath: folder, directory: true };
       const rootRow = document.createElement("button");
       rootRow.className = "workspace-viewer-row workspace-viewer-root";
@@ -457,7 +615,7 @@
       restoreSelection(previous, tree);
       tree.scrollTop = scroll;
       if (result.truncated) message("루트의 처음 500개 항목만 표시합니다.");
-    } catch (error) { tree.replaceChildren(); showError(error); }
+    } catch (error) { tree.removeAttribute("aria-busy"); tree.replaceChildren(); showError(error); }
   }
 
   async function loadGit() {
@@ -640,6 +798,8 @@
 
   function setTab(tab) {
     viewer.tab = tab;
+    const listTitle = tab === "files" ? "파일 목록" : tab === "git" ? "Git 목록" : "Agent 목록";
+    $v("viewerListTitle").textContent = listTitle;
     viewer.selected = null;
     viewer.previewText = null;
     viewer.markdownText = null;
@@ -783,19 +943,61 @@
       event.preventDefault();
       if (viewer.open && viewer.tab === "files") void loadFiles();
     });
+    $v("viewerSearchOptionsToggle").addEventListener("click", () => {
+      const panel = $v("viewerSearchOptionsPanel");
+      panel.hidden = !panel.hidden;
+      $v("viewerSearchOptionsToggle").setAttribute("aria-expanded", String(!panel.hidden));
+    });
+    document.addEventListener("click", event => {
+      if ($v("viewerSearchOptionsPanel").hidden || $v("viewerSearchForm").contains(event.target) || event.target.closest?.(".viewer-extension-dialog")) return;
+      $v("viewerSearchOptionsPanel").hidden = true;
+      $v("viewerSearchOptionsToggle").setAttribute("aria-expanded", "false");
+    });
+    document.addEventListener("keydown", event => {
+      if (event.key !== "Escape" || $v("viewerSearchOptionsPanel").hidden) return;
+      $v("viewerSearchOptionsPanel").hidden = true;
+      $v("viewerSearchOptionsToggle").setAttribute("aria-expanded", "false");
+    });
+    $v("viewerSearchScope").addEventListener("change", updateSearchOptionsLabel);
+    $v("viewerSearchExclude").addEventListener("input", updateSearchOptionsLabel);
+    updateSearchOptionsLabel();
+    $v("viewerSaveFolder").addEventListener("click", () => {
+      const path = viewer.selected?.relativePath;
+      const paths = savedFolders();
+      if (!path || !viewer.selected?.directory || paths.includes(path) || paths.length >= 20) return;
+      saveFolders([...paths, path]);
+      folderPicker.refresh();
+      viewer.selected.element?.classList.add("is-saved");
+      updateFolderBar();
+      showSavedFolderFeedback(`✓ ${path} 등록 완료 · 등록 폴더 ${paths.length + 1}개`);
+      message(`${path} 폴더를 등록했습니다.`);
+    });
     $v("viewerSearchClear").addEventListener("click", () => {
       $v("viewerSearchInput").value = "";
       $v("viewerContentInput").value = "";
+      $v("viewerSearchExclude").value = "";
+      updateSearchOptionsLabel();
       if (viewer.open && viewer.tab === "files") void loadFiles();
       $v("viewerSearchInput").focus();
     });
     $v("viewerSearchIncludeExcluded").addEventListener("change", () => {
+      updateSearchOptionsLabel();
       if (viewer.open && viewer.tab === "files" && ($v("viewerSearchInput").value.trim() || $v("viewerContentInput").value.trim())) void loadFiles();
     });
     for (const type of ["keydown", "keyup", "paste", "cut", "copy"]) {
-      for (const id of ["viewerSearchInput", "viewerContentInput", "viewerFindInput", "viewerLanguageSearch"]) $v(id).addEventListener(type, (event) => event.stopPropagation());
+      for (const id of ["viewerSearchInput", "viewerContentInput", "viewerSearchExclude", "viewerFindInput", "viewerLanguageSearch"]) $v(id).addEventListener(type, (event) => event.stopPropagation());
     }
     $v("viewerCopyPath").addEventListener("click", () => window.wincmux.clipboardWrite(fullPath(viewer.selected.relativePath)).then(() => message("경로를 복사했습니다.")).catch(showError));
+    $v("viewerDownload").addEventListener("click", async () => {
+      const item = viewer.selected;
+      if (!item || item.directory) return;
+      $v("viewerDownload").disabled = true;
+      try {
+        const result = await call("viewer-download", { relativePath: item.relativePath });
+        if (!result.cancelled) message(`다운로드 완료: ${result.path}`);
+      } catch (error) { showError(error); }
+      finally { updateActions(); }
+    });
     $v("viewerCopyContent").addEventListener("click", () => window.wincmux.clipboardWrite(viewer.previewText).then(() => message("내용을 복사했습니다.")).catch(showError));
     $v("viewerCopyFile").addEventListener("click", () => { viewer.copied = viewer.selected.relativePath; message("대상 폴더를 선택한 뒤 '여기에 붙여넣기'를 누르세요."); updateActions(); });
     $v("viewerPasteFile").addEventListener("click", async () => {

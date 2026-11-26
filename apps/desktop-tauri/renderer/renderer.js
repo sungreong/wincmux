@@ -370,7 +370,8 @@ function scheduleNotificationUiRefresh() {
 
 async function loadAgentStates() {
   const before = JSON.stringify([...state.agentStates]);
-  const result = await rpc("agent.list", {});
+  const result = await rpc("agent.list", { include_process_presence: true,
+    process_session_id: state.paneSessions[state.selectedPaneId] });
   const live = new Set((result.items ?? []).map((row) => row.session_id));
   for (const sid of state.agentStates.keys()) if (!live.has(sid)) state.agentStates.delete(sid);
   for (const row of result.items ?? []) applyAgentState(row);
@@ -731,7 +732,7 @@ async function loadUnread(options = {}) {
   }
   await updateUnreadBadge(state.notifications.length);
 }
-async function runShellSession(workspaceId, cwd) {
+async function runShellSession(workspaceId, cwd, accountProfiles) {
   const preferred = (state.terminal.default_shell || "pwsh.exe")
     .toLowerCase()
     .includes("pwsh")
@@ -770,6 +771,7 @@ async function runShellSession(workspaceId, cwd) {
     const result = await rpc("session.run", {
       workspace_id: workspaceId,
       cmd: preferred,
+      account_profiles:accountProfiles,
       args: argsFor(preferred),
       cwd,
     });
@@ -787,6 +789,7 @@ async function runShellSession(workspaceId, cwd) {
       const fallbackResult = await rpc("session.run", {
         workspace_id: workspaceId,
         cmd: fallback,
+        account_profiles:accountProfiles,
         args: argsFor(fallback),
         cwd,
       });
@@ -872,6 +875,7 @@ async function startSessionForPane(paneId, options = {}) {
       }
     }
   }
+  const accountProfiles = options.accountProfiles ?? window.wincmuxLocalAccounts?.selection(workspaceId);
   if (existing && force) {
     await rpc("session.close", { session_id: existing }).catch(() => {});
     delete state.paneSessions[paneId];
@@ -888,6 +892,7 @@ async function startSessionForPane(paneId, options = {}) {
       created = await rpc("session.run", {
         workspace_id: workspaceId,
         cmd: effectiveCmd,
+        account_profiles: accountProfiles,
         args: effectiveArgs ?? [],
         cwd: effectiveCwd ?? ws.path,
       });
@@ -900,7 +905,7 @@ async function startSessionForPane(paneId, options = {}) {
         latency_ms: Number((performance.now() - started).toFixed(2))
       });
     } else {
-      created = await runShellSession(workspaceId, ws.path);
+      created = await runShellSession(workspaceId, ws.path, accountProfiles);
     }
   } catch (err) {
     const message = String(err?.message ?? err);
@@ -918,6 +923,7 @@ async function startSessionForPane(paneId, options = {}) {
   if (!sid) {
     throw new Error("session.run returned no session_id");
   }
+  if (accountProfiles && Object.values(accountProfiles).some(Boolean)) localStorage.setItem("wincmux.accounts.session."+sid,JSON.stringify(accountProfiles));
   clearDormantPaneSession(paneId);
   state.paneSessions[paneId] = sid;
   const newGroupId = groupIdForNewPaneSession(paneId, effectiveCmd, effectiveArgs, options.groupId ?? null);
@@ -1975,6 +1981,7 @@ async function onNotificationClick(event) {
   }
 }
 function toggleWorkspacePanel() {
+  if (toggleCompactPanel("left")) return;
   state.leftCollapsed = !state.leftCollapsed;
   localStorage.setItem(
     STORAGE_KEYS.leftCollapsed,
@@ -1984,6 +1991,7 @@ function toggleWorkspacePanel() {
   paneApi.fitAllPanes();
 }
 function toggleNotificationPanel() {
+  if (toggleCompactPanel("right")) return;
   state.rightCollapsed = !state.rightCollapsed;
   localStorage.setItem(
     STORAGE_KEYS.rightCollapsed,

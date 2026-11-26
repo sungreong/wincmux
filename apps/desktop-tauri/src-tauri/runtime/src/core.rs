@@ -403,10 +403,23 @@ impl Core {
                         let mut state = live.detector.snapshot();
                         state["session_id"] = json!(sid);
                         state["workspace_id"] = json!(live.terminal.workspace);
-                        if check_process {
-                            state["agent_process_attached"] =
-                                json!(crate::platform::terminal_agent_anchor(live.terminal.pid)
-                                    .is_some());
+                        if check_process
+                            && p["process_session_id"]
+                                .as_str()
+                                .is_none_or(|id| id == sid.as_str())
+                        {
+                            let anchor = crate::platform::terminal_agent_anchor(live.terminal.pid);
+                            state["agent_process_attached"] = json!(anchor.is_some());
+                            let provider = anchor
+                                .and_then(|(pid, _)| crate::platform::process_identity(pid))
+                                .map(|identity| PromptAgent::from_program(&identity.image))
+                                .filter(|agent| *agent != PromptAgent::Unknown)
+                                .unwrap_or(live.prompt_agent);
+                            state["agent_process_provider"] = json!(match provider {
+                                PromptAgent::Claude => "claude",
+                                PromptAgent::Codex => "codex",
+                                PromptAgent::Unknown => "",
+                            });
                         }
                         state
                     })
@@ -628,6 +641,49 @@ impl Core {
                 self.deliver_followup(&row, now, true)?;
                 Ok(followups::by_id(&self.db.lock().unwrap(), id)?)
             }
+            "account.status" => {
+                let tool = text(&p, "tool")?;
+                if !matches!(tool, "claude" | "codex") { return Err("Unknown profile provider".into()); }
+                let mut probe = crate::terminal::hidden_command("powershell.exe");
+                probe.args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    include_str!("account_status.ps1"),
+                ]);
+                let mut claude_profile = None;
+                for (key, path) in crate::account_profiles::local(&p["account_profiles"])? {
+                    for token in crate::account_profiles::inherited_tokens(key) {
+                        probe.env_remove(*token);
+                    }
+                    probe.env(key, &path);
+                    if tool == "claude" && key == "CLAUDE_CONFIG_DIR" { claude_profile = Some(path); }
+                }
+                probe.env("WINCMUX_PROBE_TOOL", tool)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .stdin(std::process::Stdio::null());
+                let mut child = probe.spawn()?;
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+                loop {
+                    if let Some(status) = child.try_wait()? {
+                        if !status.success() { return Err("로그인 상태를 확인하지 못했습니다.".into()); }
+                        let output = child.wait_with_output()?;
+                        let result: Value = serde_json::from_slice(&output.stdout)?;
+                        if result["authenticated"] == true {
+                            if let Some(dir) = &claude_profile { crate::account_profiles::prepare_claude_session(dir)?; }
+                        }
+                        break Ok(result);
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err("로그인 상태 확인 시간이 초과되었습니다.".into());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(60));
+                }
+            }
             "session.run" => self.start_session(&p),
             "session.write" => {
                 let _change = self.changes.lock().unwrap();
@@ -758,8 +814,17 @@ impl Core {
                 };
                 let project = text(&workspace, "path")?;
                 let children = p["include_children"].as_bool().unwrap_or(true);
+                let mut roots = crate::conversations::Roots::local();
+                for (key, path) in crate::account_profiles::local(&p["account_profiles"])? {
+                    if key == "CODEX_HOME" {
+                        roots.codex = path;
+                    } else {
+                        roots.claude = path;
+                    }
+                }
                 if method == "conversation.resolve" {
                     crate::conversations::resolve(
+                        &roots,
                         project,
                         children,
                         text(&p, "provider")?,
@@ -767,6 +832,7 @@ impl Core {
                     )
                 } else {
                     Ok(crate::conversations::list(
+                        &roots,
                         project,
                         children,
                         p["refresh"].as_bool().unwrap_or(false),
@@ -860,6 +926,7 @@ impl Core {
             &session_id,
             &hook_token,
             &hook_pipe,
+            &crate::account_profiles::local(&p["account_profiles"])?,
         )?;
         let pid = spawned.terminal.pid;
         let inserted = self.db.lock().unwrap().execute(

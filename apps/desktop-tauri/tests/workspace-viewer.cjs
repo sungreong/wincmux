@@ -48,6 +48,22 @@ async function run() {
   fs.writeFileSync(path.join(project, '.codex', 'skills', 'review', 'SKILL.md'), '# review skill\n');
   fs.writeFileSync(path.join(project, 'target', 'test_hidden.py'), 'excluded result\n');
   fs.writeFileSync(path.join(project, 'pixel.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9bMZsAAAAASUVORK5CYII=', 'base64'));
+  fs.writeFileSync(path.join(project, 'page.html'), '<h1>HTML preview</h1><script>parent.__htmlExecuted=true</script>');
+  fs.writeFileSync(path.join(project, 'large-page.html'), '<h1>Large HTML preview</h1>' + ' '.repeat(8 * 1024 * 1024));
+  const pdfContent = 'BT /F1 24 Tf 20 100 Td (PDF preview) Tj ET';
+  const pdfObjects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    `<< /Length ${Buffer.byteLength(pdfContent)} >>\nstream\n${pdfContent}\nendstream`
+  ];
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+  pdfObjects.forEach((object, index) => { offsets.push(Buffer.byteLength(pdf)); pdf += `${index + 1} 0 obj\n${object}\nendobj\n`; });
+  const xref = Buffer.byteLength(pdf);
+  pdf += `xref\n0 ${offsets.length}\n0000000000 65535 f \n${offsets.slice(1).map(offset => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${offsets.length} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  fs.writeFileSync(path.join(project, 'document.pdf'), pdf);
   const port = await portNumber();
   const executable = process.env.WINCMUX_VIEWER_TEST_EXE || path.join(repo, 'apps/desktop-tauri/src-tauri/target/debug/wincmux-tauri.exe');
   const child = spawn(executable,
@@ -122,6 +138,7 @@ async function run() {
     assert.equal(await cdp.eval('Object.keys(state.paneSessions).length'), beforeSessions);
     assert.equal(await cdp.eval('document.getElementById("viewerTree").getBoundingClientRect().right < document.querySelector(".workspace-viewer-preview").getBoundingClientRect().left'), true);
     await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="note.txt"]')`), 'file tree');
+    assert.equal(await cdp.eval('document.getElementById("viewerListTitle").textContent'), '파일 목록');
     assert(await cdp.eval(`(() => {
       const sidebar=document.querySelector('.workspace-viewer-sidebar');
       const main=document.getElementById('viewerMain');
@@ -136,8 +153,14 @@ async function run() {
       } finally { main.style.removeProperty('--viewer-nav-width'); }
     })()`), 'folder commands, search, and tree stay in separate rows at narrow widths');
     console.log('viewer test: file tree');
-    await cdp.eval(`document.querySelector('#viewerTree button[title="note.txt"]').click()`);
+    const previewLoading = await cdp.eval(`(()=>{window.__viewerOriginalAction=window.wincmux.viewerAction;window.wincmux.viewerAction=async(...args)=>{if(args[0]==='viewer-preview')await new Promise(resolve=>setTimeout(resolve,900));return window.__viewerOriginalAction(...args)};document.querySelector('#viewerTree button[title="note.txt"]').click();return !!document.querySelector('#viewerPreview .viewer-preview-loading')&&document.getElementById('viewerPreview').getAttribute('aria-busy')==='true'})()`);
+    assert.equal(previewLoading, true, 'file click immediately shows preview loading');
+    if (process.env.WINCMUX_VIEWER_SCREENSHOT_DIR) {
+      const shot = await cdp.request('Page.captureScreenshot', { format: 'png', fromSurface: true });
+      fs.writeFileSync(path.join(process.env.WINCMUX_VIEWER_SCREENSHOT_DIR, 'local-preview-loading.png'), Buffer.from(shot.data, 'base64'));
+    }
     await until(() => cdp.eval('document.getElementById("viewerPreview").textContent.includes("after")'), 'text preview');
+    await cdp.eval('window.wincmux.viewerAction=window.__viewerOriginalAction');
     assert.equal(await cdp.eval('document.querySelector("#viewerPreview .workspace-viewer-line-number")?.textContent'), '1');
     await cdp.eval(`(()=>{const input=document.getElementById('viewerFindInput');input.value='after';input.dispatchEvent(new Event('input'))})()`);
     assert.equal(await cdp.eval('document.getElementById("viewerFindCount").textContent'), '1/1');
@@ -171,8 +194,14 @@ async function run() {
     await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="target/test_hidden.py"]')`), 'include excluded folders');
     await cdp.eval('document.getElementById("viewerSearchClear").click()');
     await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="note.txt"]')`), 'tree after clear');
-    await cdp.eval(`document.querySelector('#viewerTree button[title="src"]').click()`);
+    const folderLoading = await cdp.eval(`(()=>{window.__viewerOriginalAction=window.wincmux.viewerAction;window.wincmux.viewerAction=async(...args)=>{if(args[0]==='viewer-list')await new Promise(resolve=>setTimeout(resolve,900));return window.__viewerOriginalAction(...args)};document.querySelector('#viewerTree button[title="src"]').click();return !!document.querySelector('#viewerTree .viewer-tree-loading')&&!!document.querySelector('#viewerTree [aria-busy=true]')})()`);
+    assert.equal(folderLoading, true, 'folder expansion immediately shows loading');
+    if (process.env.WINCMUX_VIEWER_SCREENSHOT_DIR) {
+      const shot = await cdp.request('Page.captureScreenshot', { format: 'png', fromSurface: true });
+      fs.writeFileSync(path.join(process.env.WINCMUX_VIEWER_SCREENSHOT_DIR, 'local-folder-loading.png'), Buffer.from(shot.data, 'base64'));
+    }
     await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="src/test_alpha.py"]')`), 'expanded folder');
+    await cdp.eval('window.wincmux.viewerAction=window.__viewerOriginalAction');
     await cdp.eval('document.getElementById("viewerFocusFolder").click()');
     await until(() => cdp.eval('document.getElementById("viewerFolderPath").textContent === "src" && !document.querySelector(\'#viewerTree button[title="note.txt"]\')'), 'focused folder only');
     assert.equal(await cdp.eval('document.getElementById("viewerSearchScope").checked'), true);
@@ -205,14 +234,74 @@ async function run() {
     assert.equal(await cdp.eval('document.querySelector("#viewerPreview .workspace-viewer-code-line.target .workspace-viewer-line-number")?.textContent'), '1');
     assert.equal(await cdp.eval(`!!document.querySelector('#viewerTree button[title="src/test_beta.py"]')`), false);
     assert.equal(await cdp.eval('document.querySelector("#viewerTree .workspace-viewer-search-snippet")?.textContent.includes("1행")'), true);
+    assert.equal(await cdp.eval('document.querySelector("#viewerTree .workspace-viewer-search-result").getBoundingClientRect().height < 36'), true, 'search result fits one row');
     await cdp.eval('document.getElementById("viewerSearchClear").click()');
     await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="note.txt"]')`), 'tree after content search');
+    await cdp.eval(`document.querySelector('#viewerTree button[title="src"]').click()`);
+    await cdp.eval('document.getElementById("viewerSaveFolder").click()');
+    assert.equal(await cdp.eval('document.getElementById("viewerSaveFolder").textContent.includes("등록됨")'), true);
+    assert.equal(await cdp.eval('document.getElementById("viewerSavedFolderFeedback").textContent.includes("등록 완료")'), true);
+    await capture('saved-folder-feedback.png');
+    await cdp.eval(`document.querySelector('#viewerTree button[title="target"]').click();document.getElementById('viewerSaveFolder').click()`);
+    await cdp.eval('document.getElementById("viewerSavedFolderMode").click()');
+    await capture('folder-picker-modal.png');
+    await cdp.eval(`(()=>{const dialog=document.querySelector('.viewer-folder-dialog');dialog.querySelector('input[value=saved]').click();dialog.querySelector('input[type=checkbox][value=target]').click();dialog.querySelector('.viewer-folder-actions button:last-child').click()})()`);
+    await until(() => cdp.eval('document.querySelector("#viewerTree .workspace-viewer-saved-heading")?.textContent.includes("src")'), 'saved folder view');
+    assert.equal(await cdp.eval('document.getElementById("viewerSavedFolderMode").textContent.includes("1/2")'), true);
+    assert.equal(await cdp.eval('document.querySelectorAll("#viewerTree .workspace-viewer-saved-heading").length'), 1);
+    assert.equal(await cdp.eval(`!!document.querySelector('#viewerTree button[title="note.txt"]')`), false);
+    await cdp.eval('document.getElementById("viewerSearchInput").value="test_*.py";document.getElementById("viewerSearchForm").requestSubmit()');
+    await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="src/test_alpha.py"]')`), 'search one selected folder');
+    assert.equal(await cdp.eval(`!!document.querySelector('#viewerTree button[title="target/test_hidden.py"]')`), false);
+    await cdp.eval('document.getElementById("viewerSearchClear").click()');
+    await cdp.eval(`(()=>{document.getElementById('viewerSavedFolderMode').click();const dialog=document.querySelector('.viewer-folder-dialog');dialog.querySelector('input[type=checkbox][value=target]').click();dialog.querySelector('.viewer-folder-actions button:last-child').click()})()`);
+    await until(() => cdp.eval('document.querySelectorAll("#viewerTree .workspace-viewer-saved-heading").length === 2'), 'multiple saved folders');
+    await capture('saved-folder-groups.png');
+    assert.equal(await cdp.eval(`(() => { const heading=document.querySelector('#viewerTree .workspace-viewer-saved-heading'); const toggle=heading.querySelector('.viewer-saved-toggle'); const remove=heading.querySelector('.viewer-saved-remove'); return toggle.textContent.includes('src') && remove.textContent==='해제' && Math.abs(toggle.getBoundingClientRect().top-remove.getBoundingClientRect().top)<3 && remove.getBoundingClientRect().right<=heading.getBoundingClientRect().right; })()`), true, 'saved folder controls share heading row');
+    await cdp.eval(`document.querySelector('#viewerTree .workspace-viewer-saved-heading .viewer-saved-toggle').click()`);
+    assert.equal(await cdp.eval(`document.querySelector('#viewerTree .workspace-viewer-saved-group .workspace-viewer-saved-children').hidden`), true, 'saved folder children collapse');
+    await capture('saved-folder-collapsed.png');
+    assert.equal(await cdp.eval(`document.querySelectorAll('#viewerTree .workspace-viewer-saved-heading').length`), 2, 'other saved group remains');
+    await cdp.eval(`document.querySelector('#viewerTree .workspace-viewer-saved-heading .viewer-saved-toggle').click()`);
+    assert.equal(await cdp.eval(`document.querySelector('#viewerTree .workspace-viewer-saved-group .workspace-viewer-saved-children').hidden`), false, 'saved folder children expand');
+    await cdp.eval('document.getElementById("viewerSearchInput").value="test_*.py";document.getElementById("viewerSearchForm").requestSubmit()');
+    await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="target/test_hidden.py"]')`), 'search multiple selected folders');
+    await cdp.eval('document.getElementById("viewerSearchClear").click()');
+    await cdp.eval(`(()=>{document.getElementById('viewerSavedFolderMode').click();const dialog=document.querySelector('.viewer-folder-dialog');dialog.querySelector('input[value=all]').click();dialog.querySelector('.viewer-folder-actions button:last-child').click()})()`);
+    await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="note.txt"]')`), 'all folders view');
+    await cdp.eval('document.getElementById("viewerSearchOptionsToggle").click();document.getElementById("viewerSearchExtensions").click()');
+    await capture('local-extension-modal.png');
+    await cdp.eval('document.querySelector(".viewer-extension-dialog input[value=md]").click();document.querySelector(".viewer-extension-dialog .viewer-extension-apply").click()');
+    await until(() => cdp.eval(`!document.querySelector('#viewerTree button[title="note.txt"]')`), 'extension filtered tree');
+    await cdp.eval('document.getElementById("viewerSearchExtensions").click();document.querySelector(".viewer-extension-dialog input[value=md]").click();document.querySelector(".viewer-extension-dialog .viewer-extension-apply").click()');
+    await cdp.eval('document.getElementById("viewerSearchOptionsToggle").click()');
+    await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="note.txt"]')`), 'extension filter cleared');
     await cdp.eval(`document.querySelector('#viewerTree button[title="note.txt"]').click()`);
     await cdp.eval('document.getElementById("viewerCopyFile").click(); document.querySelector(".workspace-viewer-root").click(); document.getElementById("viewerPasteFile").click()');
     await until(() => fs.existsSync(path.join(project, 'note (copy).txt')), 'file copy');
     assert.equal(fs.readFileSync(path.join(project, 'note.txt'), 'utf8'), 'after\n');
+    await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="pixel.png"]')`), 'file tree after copy');
     await cdp.eval(`document.querySelector('#viewerTree button[title="pixel.png"]').click()`);
     await until(() => cdp.eval('document.querySelector("#viewerPreview img")?.src.startsWith("data:image/png;base64,")'), 'image preview');
+    await cdp.eval(`document.querySelector('#viewerTree button[title="page.html"]').click()`);
+    await until(() => cdp.eval('document.querySelector("#viewerPreview iframe")?.srcdoc.includes("HTML preview")'), 'HTML preview');
+    await capture('html-viewer.png');
+    await cdp.eval(`document.querySelector('#viewerTree button[title="large-page.html"]').click()`);
+    await until(() => cdp.eval('document.getElementById("viewerPreview").textContent.includes("8MB")'), 'large HTML limit');
+    await cdp.eval('document.getElementById("viewerPreviewLimit").value="16";document.getElementById("viewerPreviewLimit").dispatchEvent(new Event("change"))');
+    await until(() => cdp.eval('document.querySelector("#viewerPreview iframe")?.srcdoc.includes("Large HTML preview")'), 'expanded HTML preview');
+    await capture('large-html-viewer.png');
+    assert.equal(await cdp.eval('document.querySelector("#viewerPreview iframe").getAttribute("sandbox")'), '');
+    assert.equal(await cdp.eval('window.__htmlExecuted === true'), false);
+    assert.equal(await cdp.eval('document.getElementById("viewerDownload").disabled'), false);
+    await cdp.eval(`(async()=>{window.__originalViewerAction=window.wincmux.viewerAction;window.wincmux.viewerAction=async(action,path,payload)=>action==='viewer-download'?{path:'saved.html'}:window.__originalViewerAction(action,path,payload);document.getElementById('viewerDownload').click()})()`);
+    await until(() => cdp.eval('document.getElementById("viewerMessage").textContent.includes("saved.html")'), 'download action');
+    await cdp.eval('window.wincmux.viewerAction=window.__originalViewerAction');
+    await cdp.eval(`document.querySelector('#viewerTree button[title="document.pdf"]').click()`);
+    await until(() => cdp.eval('document.querySelector("#viewerPreview iframe")?.src.startsWith("blob:")'), 'PDF preview');
+    await sleep(500);
+    await capture('pdf-viewer.png');
+    if (process.env.WINCMUX_VIEWER_MEDIA_ONLY) return;
     if (process.env.WINCMUX_VIEWER_SCREENSHOT_DIR) {
       const screenshot = await cdp.request('Page.captureScreenshot', { format: 'png', fromSurface: true });
       fs.writeFileSync(path.join(process.env.WINCMUX_VIEWER_SCREENSHOT_DIR, 'folder-viewer.png'), Buffer.from(screenshot.data, 'base64'));

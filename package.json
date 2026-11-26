@@ -1,6 +1,6 @@
 {
   "name": "wincmux",
-  "version": "0.2.135",
+  "version": "0.2.153",
   "private": true,
   "description": "WinCMux Windows terminal workspace powered by Tauri and Rust",
   "scripts": {
@@ -12,10 +12,12 @@
     "lint": "node apps/desktop-tauri/scripts/check-renderer-syntax.mjs && cargo fmt --all --check --manifest-path apps/desktop-tauri/src-tauri/Cargo.toml",
     "test:ui": "node --experimental-websocket apps/desktop-tauri/tests/benchmark.cjs",
     "test:rendering": "node --experimental-websocket apps/desktop-tauri/tests/rendering.cjs",
+    "test:accounts": "node --experimental-websocket apps/desktop-tauri/tests/account-profiles-ui.cjs",
     "test:launchers": "node --experimental-websocket apps/desktop-tauri/tests/launchers.cjs",
     "test:local-shell": "node --experimental-websocket apps/desktop-tauri/tests/local-shell-composer-ui.cjs",
     "test:remote-conversations": "node --test apps/desktop-tauri/tests/remote-conversations.test.cjs",
     "test:docker-conversations": "node --experimental-websocket apps/desktop-tauri/tests/docker-conversations-ui.cjs",
+    "test:workspace-skills": "node --experimental-websocket apps/desktop-tauri/tests/workspace-skills-ui.cjs",
     "test:i18n": "node --experimental-websocket apps/desktop-tauri/tests/i18n-ui.cjs",
     "test:reminders": "node --experimental-websocket apps/desktop-tauri/tests/reminders.cjs",
     "test:conversations": "node --experimental-websocket apps/desktop-tauri/tests/conversations.cjs",

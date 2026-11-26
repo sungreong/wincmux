@@ -21,6 +21,19 @@
     codex: "https://learn.chatgpt.com/docs/developer-commands?surface=cli"
   };
   const translate = value => window.wincmuxI18n?.t(value) ?? value;
+  function fromAgentAssets(scan, provider) {
+    const prefix = provider === "claude" ? "/" : "$";
+    return (scan?.items || []).filter(item => item.exists && item.providers?.includes(provider)
+      && ["skills", "commands"].includes(item.category)).map(item => {
+      const path = item.relativePath || "";
+      if (provider === "claude" && !path.startsWith(".claude/skills/") && !path.startsWith(".claude/commands/")) return null;
+      if (provider === "codex" && !path.startsWith(".agents/skills/") && !path.startsWith(".codex/skills/")) return null;
+      const name = item.details?.name || (item.category === "commands" ? item.name?.replace(/\.md$/i, "") : item.name);
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name || "")) return null;
+      return { command: prefix + name, description: item.details?.description || "", path };
+    }).filter(Boolean);
+  }
+  const api = { workspaceLoader: null, setWorkspaceLoader(loader) { this.workspaceLoader = loader; }, fromAgentAssets };
   const empty = () => ({ claude: { mode: "message", items: [], excluded: [] }, codex: { mode: "message", items: [], excluded: [] } });
   function read() {
     try {
@@ -54,9 +67,10 @@
     parent.append(node);
     return node;
   }
-  function create(input, initialProvider = "codex", fixedProvider = false) {
+  function create(input, initialProvider = "codex", fixedProvider = false, compact = false) {
     const panel = document.createElement("details");
     panel.className = "agent-command-tools";
+    if (compact) panel.classList.add("agent-command-compact");
     control("summary", "명령·스킬", panel);
     const row = control("div", "", panel);
     row.className = "agent-command-row";
@@ -75,11 +89,25 @@
       option.value = value;
     }
     const saved = control("select", "", row);
-    saved.setAttribute("aria-label", "저장한 명령");
+    saved.setAttribute("aria-label", "명령·스킬 선택");
     const add = control("button", "명령·설명 저장", row);
     add.type = "button";
+    add.className = "agent-command-save";
     const remove = control("button", "목록에서 제외", row);
     remove.type = "button";
+    remove.className = "agent-command-remove";
+    const reload = control("button", "↻", row);
+    reload.type = "button";
+    reload.className = "agent-command-reload";
+    reload.title = "워크스페이스 스킬 새로고침";
+    reload.setAttribute("aria-label", "워크스페이스 스킬 새로고침");
+    const manage = control("button", "관리", row);
+    manage.type = "button";
+    manage.className = "agent-command-manage";
+    manage.title = "명령·스킬 관리 열기";
+    manage.hidden = !compact;
+    const scope = control("p", "", panel);
+    scope.className = "agent-command-scope";
     const description = control("textarea", "", panel);
     description.className = "agent-command-description";
     description.rows = 2;
@@ -98,9 +126,34 @@
     feedback.className = "agent-command-feedback";
     feedback.setAttribute("role", "status");
     feedback.hidden = true;
+    let workspaceSkills = [];
+    let skillRequest = 0;
+    let active = true;
+    async function reloadSkills() {
+      const token = ++skillRequest;
+      const selectedProvider = provider.value;
+      scope.textContent = "워크스페이스 스킬 확인 중…";
+      try {
+        const result = await api.workspaceLoader?.(selectedProvider);
+        if (token !== skillRequest || selectedProvider !== provider.value) return;
+        workspaceSkills = (result?.items || []).filter(item => item && valid(item.command)).slice(0, 100);
+        scope.textContent = result?.title
+          ? `${result.title} · 워크스페이스 스킬 ${workspaceSkills.length}개`
+          : "워크스페이스를 선택하면 스킬을 표시합니다.";
+        scope.title = scope.textContent;
+        refresh(saved.value);
+      } catch (error) {
+        if (token !== skillRequest) return;
+        workspaceSkills = [];
+        scope.textContent = `스킬 목록을 읽지 못했습니다: ${error?.message || error}`;
+        scope.title = scope.textContent;
+        refresh();
+      }
+    }
     function entry(command) {
       const data = read()[provider.value];
-      return data.items.find(item => item.command === command)
+      return workspaceSkills.find(item => item.command === command)
+        || data.items.find(item => item.command === command)
         || examples[provider.value].find(item => item.command === command);
     }
     function refresh(selected = "") {
@@ -109,30 +162,40 @@
       saved.replaceChildren();
       const placeholder = control("option", "명령 선택 또는 직접 입력…", saved);
       placeholder.value = "";
+      const discovered = control("optgroup", "", saved);
+      discovered.label = translate("현재 워크스페이스 스킬");
+      for (const item of workspaceSkills) {
+        const option = control("option", item.description ? `${item.command} · ${item.description}` : item.command, discovered);
+        option.value = item.command;
+        option.title = item.path;
+      }
       const personal = control("optgroup", "", saved);
       personal.label = translate("내 명령");
       for (const item of data.items) {
+        if (workspaceSkills.some(skill => skill.command === item.command)) continue;
         const option = control("option", item.description ? `${item.command} · ${item.description}` : item.command, personal);
         option.value = item.command;
       }
       const builtIn = control("optgroup", "", saved);
       builtIn.label = translate("기본 참고 명령");
       for (const item of examples[provider.value]) {
-        if (data.excluded.includes(item.command) || data.items.some(saved => saved.command === item.command)) continue;
+        if (data.excluded.includes(item.command) || data.items.some(saved => saved.command === item.command)
+          || workspaceSkills.some(skill => skill.command === item.command)) continue;
         const option = control("option", `${item.command} · ${translate(item.description)}`, builtIn);
         option.value = item.command;
       }
       saved.value = selected && entry(selected) ? selected : "";
       reference.href = docs[provider.value];
       source.textContent = saved.value
-        ? (data.items.some(item => item.command === saved.value) ? "내 목록 · 설명을 수정하고 다시 저장할 수 있습니다." : "기본 참고 명령 · 사용 가능 여부는 설치된 CLI에서 확인하세요.")
+        ? (workspaceSkills.some(item => item.command === saved.value) ? `워크스페이스 파일 · ${entry(saved.value).path}`
+          : data.items.some(item => item.command === saved.value) ? "내 목록 · 설명을 수정하고 다시 저장할 수 있습니다." : "기본 참고 명령 · 사용 가능 여부는 설치된 CLI에서 확인하세요.")
         : "목록은 참고용입니다. 여기에 없는 명령·스킬도 직접 입력할 수 있습니다.";
       hint.textContent = mode.value === "command"
         ? "명령은 대기열 없이 준비된 CLI에 직접 보냅니다. /명령 또는 $스킬을 입력하세요."
         : "일반 메시지는 /명령이나 $스킬로 시작해도 CLI 명령으로 실행하지 않습니다.";
     }
     const report = text => { feedback.textContent = text; feedback.hidden = !text; };
-    provider.addEventListener("change", () => { report(""); description.value = ""; refresh(); });
+    provider.addEventListener("change", () => { report(""); description.value = ""; workspaceSkills = []; refresh(); void reloadSkills(); });
     mode.addEventListener("change", () => {
       const data = read();
       data[provider.value].mode = mode.value;
@@ -144,7 +207,8 @@
       const command = saved.value;
       input.value = command;
       const selected = entry(command);
-      description.value = selected ? (read()[provider.value].items.some(item => item.command === command)
+      description.value = selected ? (workspaceSkills.some(item => item.command === command)
+        ? selected.description : read()[provider.value].items.some(item => item.command === command)
         ? selected.description : translate(selected.description)) : "";
       if (mode.value !== "command") {
         mode.value = "command";
@@ -169,12 +233,18 @@
     remove.addEventListener("click", () => {
       if (!saved.value) return;
       const selected = saved.value;
+      if (workspaceSkills.some(item => item.command === selected)) {
+        return report("워크스페이스 스킬은 해당 SKILL.md 파일에서 관리하세요.");
+      }
       const data = read();
       data[provider.value].items = data[provider.value].items.filter(item => item.command !== selected);
       if (examples[provider.value].some(item => item.command === selected)
         && !data[provider.value].excluded.includes(selected)) data[provider.value].excluded.push(selected);
       save(data); description.value = ""; refresh(); report("목록에서 제외했습니다. 직접 입력은 계속 가능합니다.");
     });
+    reload.addEventListener("click", () => void reloadSkills());
+    manage.addEventListener("click", () => window.wincmuxAgentCommandManager?.open());
+    panel.addEventListener("toggle", () => { if (panel.open) void reloadSkills(); });
     window.addEventListener("storage", event => { if (event.key === storageKey) refresh(); });
     window.addEventListener("wincmux:agentcommandschange", () => refresh(saved.value));
     window.addEventListener("wincmux:languagechange", () => refresh(saved.value));
@@ -182,12 +252,18 @@
     refresh();
     return {
       panel,
-      mode: () => mode.value,
+      mode: () => active ? mode.value : "message",
       provider: () => provider.value,
       reload: () => refresh(saved.value),
-      setProvider(value) { if (providers.includes(value) && provider.value !== value) { provider.value = value; refresh(); } },
+      reloadSkills,
+      setActive(value) {
+        active = Boolean(value);
+        panel.hidden = !active;
+        if (!active) panel.open = false;
+      },
+      setProvider(value) { if (providers.includes(value) && provider.value !== value) { provider.value = value; workspaceSkills = []; refresh(); if (panel.open) void reloadSkills(); } },
       prepare(text) {
-        if (mode.value === "command") {
+        if (active && mode.value === "command") {
           const command = text.trim();
           if (!valid(command)) throw Error("CLI 명령·스킬은 / 또는 $로 시작하는 한 줄이어야 합니다.");
           return command;
@@ -198,5 +274,5 @@
       }
     };
   }
-  window.wincmuxAgentCommandInput = { create, invocation };
+  window.wincmuxAgentCommandInput = Object.assign(api, { create, invocation });
 })();

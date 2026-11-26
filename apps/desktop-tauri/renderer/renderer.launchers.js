@@ -116,7 +116,8 @@
           setStatus(String(err?.message ?? err), true);
         });
       });
-      grid.append(card);
+      const pair = window.wincmuxLocalAccounts?.launchChoice(view,profile,card);
+      grid.append(pair ?? card);
     }
     const history = document.createElement("button");
     history.type = "button";

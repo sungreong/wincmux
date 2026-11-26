@@ -78,7 +78,7 @@
     sameWorkspace(wsId); busy = true;
     if (dialog) { dialog.dataset.busy = 'true'; render(); }
     try {
-      const resolved = await rpc('conversation.resolve', { workspace_id: wsId, provider: item.provider, id: item.id,
+      const resolved = await rpc('conversation.resolve', { account_profiles: window.wincmuxLocalAccounts?.selection(wsId), workspace_id: wsId, provider: item.provider, id: item.id,
         include_children: context.includeChildren ?? children?.checked ?? true });
       sameWorkspace(wsId);
       if (resolved.id !== item.id || resolved.provider !== item.provider || !resolved.cwd_exists) throw new Error('대화 정보를 다시 확인하세요.');
@@ -155,7 +155,7 @@
     const sequence = ++generation, wsId = workspaceId;
     error.hidden = true; list.replaceChildren(element('p', 'conversation-empty', '프로젝트 대화 이력을 조회하고 있습니다…'));
     try {
-      const result = await rpc('conversation.list', { workspace_id: wsId, include_children: children.checked, refresh: force });
+      const result = await rpc('conversation.list', { account_profiles: window.wincmuxLocalAccounts?.selection(wsId), workspace_id: wsId, include_children: children.checked, refresh: force });
       if (sequence !== generation || workspaceId !== wsId || !dialog.open) return;
       sameWorkspace(wsId); items = result.items ?? [];
       dialog.querySelector('.conversation-warning').textContent = (result.warnings ?? []).join(' '); render();

@@ -6,7 +6,8 @@ window.wincmuxRemoteComposer = (request, button, provider = "codex") => {
   input.rows = 1;
   input.placeholder = "메시지 입력 (Ctrl+Enter로 전송 또는 대기열 추가)";
   input.setAttribute("aria-label", "에이전트 메시지");
-  const commands = window.wincmuxAgentCommandInput.create(input, provider, true);
+  const commands = window.wincmuxAgentCommandInput.create(input, provider, true, true);
+  commands.setActive(provider === "claude" || provider === "codex");
   const queue = document.createElement("div");
   queue.className = "remote-composer-queue";
   queue.hidden = true;

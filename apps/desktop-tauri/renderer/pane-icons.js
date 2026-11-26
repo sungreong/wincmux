@@ -1,4 +1,5 @@
 const paneIcon = Object.freeze({
+  sidebar: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3" width="15" height="14" rx="2"/><path d="M7.5 3v14"/></svg>`,
   fontDown: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 15l4.5-10 4.5 10"/><path d="M5.5 11h6"/><path d="M14.5 13h3"/></svg>`,
   fontUp: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 15l4.5-10 4.5 10"/><path d="M5.5 11h6"/><path d="M16 10v6"/><path d="M13 13h6"/></svg>`,
   splitRight: `<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="2"/><path d="M10 4v12"/><path d="M13.5 10h2.5"/><path d="M14.75 8.75v2.5"/></svg>`,

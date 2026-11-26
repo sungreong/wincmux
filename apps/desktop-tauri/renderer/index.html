@@ -8,6 +8,10 @@
     <link rel="stylesheet" href="./vendor/highlight/github-dark.min.css" />
     <link rel="stylesheet" href="./design-tokens.css" />
     <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./viewer-extension-filter.css" />
+    <link rel="stylesheet" href="./viewer-folder-picker.css" />
+    <link rel="stylesheet" href="./viewer-search-options.css" />
+    <link rel="stylesheet" href="./viewer-loading.css" />
     <link rel="stylesheet" href="./terminal-search.css" />
     <link rel="stylesheet" href="./i18n.css" />
     <link rel="stylesheet" href="./workspace-reminders.css" />
@@ -117,6 +121,7 @@
             </svg>
             <span class="toolbar-btn-label">Keys</span>
           </button>
+          <button type="button" class="toolbar-btn" id="localAccountManager" title="도구 프로필 관리" aria-label="도구 프로필 관리" aria-haspopup="dialog"><svg class="toolbar-btn-icon" aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="6" r="3"/><path d="M2 17v-2a6 6 0 0 1 12 0v2zM14 4a3 3 0 0 1 0 6m2 2a5 5 0 0 1 2 4"/></svg><span class="toolbar-btn-label">도구 프로필</span></button>
           <button id="launchSettingsBtn" class="toolbar-btn" type="button" title="실행 도구 목록과 기본 명령어 관리" aria-label="실행 도구 목록과 기본 명령어 관리" aria-haspopup="dialog">
             <svg class="toolbar-btn-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m8 5-6 7 6 7m8-14 6 7-6 7M14 3l-4 18"/></svg>
             <span class="toolbar-btn-label">실행 설정</span>
@@ -136,12 +141,12 @@
             <div id="viewerAgentSetup" class="workspace-viewer-agent-setup" hidden><span id="viewerAgentHookStatus" role="status"></span><button id="viewerAgentHookRegister" type="button">훅 등록</button></div>
             <div id="viewerMain" class="workspace-viewer-main">
               <div class="workspace-viewer-sidebar">
-                <div id="viewerFolderBar" class="workspace-viewer-folder-bar"><span id="viewerFolderPath">워크스페이스 전체</span><button id="viewerFocusFolder" type="button" title="선택 폴더만 보기" disabled>폴더만 보기</button><button id="viewerParentFolder" type="button" title="상위 폴더로 이동" disabled>상위</button><button id="viewerWorkspaceRoot" type="button" title="워크스페이스 전체로 돌아가기" disabled>전체</button></div>
+                <header class="workspace-viewer-list-header"><strong id="viewerListTitle">파일 목록</strong></header>
+                <div id="viewerFolderBar" class="workspace-viewer-folder-bar"><span id="viewerFolderPath">워크스페이스 전체</span><button id="viewerSavedFolderMode" class="viewer-folder-trigger" type="button" aria-haspopup="dialog">전체 폴더 ▾</button><button id="viewerSaveFolder" type="button" title="선택한 폴더 등록" disabled>등록</button><button id="viewerFocusFolder" type="button" title="선택 폴더만 보기" disabled>폴더만 보기</button><button id="viewerParentFolder" type="button" title="상위 폴더로 이동" disabled>상위</button><button id="viewerWorkspaceRoot" type="button" title="워크스페이스 전체로 돌아가기" disabled>전체</button><span id="viewerSavedFolderFeedback" class="viewer-saved-feedback" role="status" hidden></span></div>
                 <form id="viewerSearchForm" class="workspace-viewer-search" role="search">
-                  <div class="workspace-viewer-search-line"><input id="viewerSearchInput" aria-label="파일 이름 또는 경로 패턴" placeholder="*.py · **/test_*.py" spellcheck="false" /><button type="submit">검색</button><button id="viewerSearchClear" type="button" title="검색 지우기">×</button></div>
-                  <div class="workspace-viewer-search-line"><input id="viewerContentInput" aria-label="파일 내용 검색" placeholder="파일 내용 검색 · 이름은 비워도 됨" spellcheck="false" /></div>
-                  <label><input id="viewerSearchScope" type="checkbox" disabled /> 선택 폴더에서 검색 <span id="viewerScopeName"></span></label>
-                  <label><input id="viewerSearchIncludeExcluded" type="checkbox" /> 빌드·의존성 폴더 포함</label>
+                  <div class="workspace-viewer-search-line"><input id="viewerSearchInput" aria-label="파일 이름 또는 경로 패턴" placeholder="이름 · *.py" spellcheck="false" /><button type="submit">검색</button><button id="viewerSearchClear" type="button" title="검색 지우기">×</button><button id="viewerSearchOptionsToggle" type="button" aria-expanded="false" aria-controls="viewerSearchOptionsPanel">필터</button></div>
+                  <div class="workspace-viewer-search-line"><input id="viewerContentInput" aria-label="파일 내용 검색" placeholder="내용 검색 · 선택 사항" spellcheck="false" /></div>
+                  <div id="viewerSearchOptionsPanel" class="viewer-search-options" hidden><label><input id="viewerSearchScope" type="checkbox" disabled /> 선택 폴더에서 검색 <span id="viewerScopeName"></span></label><label><input id="viewerSearchIncludeExcluded" type="checkbox" /> 빌드·의존성 폴더 포함</label><button id="viewerSearchExtensions" class="viewer-extension-trigger" type="button" aria-haspopup="dialog">확장자 · 전체</button><details class="workspace-viewer-exclude"><summary>제외 필터</summary><input id="viewerSearchExclude" aria-label="제외할 폴더와 파일 패턴" placeholder="cache/, reports/**, *.min.js" spellcheck="false" /><small>쉼표로 구분 · 폴더는 / 또는 /**로 끝내세요. 경로는 현재 폴더 기준입니다.</small></details></div>
                 </form>
                 <div id="viewerTree" class="workspace-viewer-tree" role="tree"></div>
                 <div id="viewerGitList" class="workspace-viewer-tree" hidden></div>
@@ -149,9 +154,9 @@
                 <div id="viewerAgentList" class="workspace-viewer-tree" hidden></div>
               </div>
               <div id="viewerInnerResize" class="workspace-viewer-inner-resize" title="목록 너비 조절"></div>
-              <div class="workspace-viewer-preview"><div class="workspace-viewer-preview-bar"><div id="viewerPreviewTitle" class="workspace-viewer-preview-title">파일을 선택하세요</div><input id="viewerLanguageSearch" type="search" list="viewerLanguageOptions" aria-label="언어 빠른 검색" placeholder="언어 검색" autocomplete="off" spellcheck="false" hidden /><datalist id="viewerLanguageOptions"></datalist><button id="viewerLanguageSearchBtn" type="button" title="언어 빠른 검색" aria-label="언어 빠른 검색" hidden>⌕</button><select id="viewerLanguageSelect" aria-label="코드 언어 선택" title="구문 강조 언어 선택" hidden><option value="">언어 자동</option></select><button id="viewerMarkdownToggle" type="button" hidden>원문 보기</button><button id="viewerPrevious" type="button" title="이전 파일 (Alt+↑)">↑</button><button id="viewerNext" type="button" title="다음 파일 (Alt+↓)">↓</button></div><div id="viewerFindBar" class="workspace-viewer-find" hidden><input id="viewerFindInput" aria-label="현재 파일에서 찾기" placeholder="현재 파일에서 찾기" spellcheck="false" /><span id="viewerFindCount">0/0</span><button id="viewerFindPrevious" type="button" title="이전 일치">↑</button><button id="viewerFindNext" type="button" title="다음 일치">↓</button></div><div id="viewerPreview" class="workspace-viewer-preview-body"></div></div>
+              <div class="workspace-viewer-preview"><div class="workspace-viewer-preview-bar"><div id="viewerPreviewTitle" class="workspace-viewer-preview-title">파일을 선택하세요</div><select id="viewerPreviewLimit" aria-label="미리보기 최대 크기" title="HTML·이미지·PDF 미리보기 최대 크기"><option value="8">8MB</option><option value="16">16MB</option><option value="32">32MB</option><option value="64">64MB</option></select><input id="viewerLanguageSearch" type="search" list="viewerLanguageOptions" aria-label="언어 빠른 검색" placeholder="언어 검색" autocomplete="off" spellcheck="false" hidden /><datalist id="viewerLanguageOptions"></datalist><button id="viewerLanguageSearchBtn" type="button" title="언어 빠른 검색" aria-label="언어 빠른 검색" hidden>⌕</button><select id="viewerLanguageSelect" aria-label="코드 언어 선택" title="구문 강조 언어 선택" hidden><option value="">언어 자동</option></select><button id="viewerMarkdownToggle" type="button" hidden>원문 보기</button><button id="viewerPrevious" type="button" title="이전 파일 (Alt+↑)">↑</button><button id="viewerNext" type="button" title="다음 파일 (Alt+↓)">↓</button></div><div id="viewerFindBar" class="workspace-viewer-find" hidden><input id="viewerFindInput" aria-label="현재 파일에서 찾기" placeholder="현재 파일에서 찾기" spellcheck="false" /><span id="viewerFindCount">0/0</span><button id="viewerFindPrevious" type="button" title="이전 일치">↑</button><button id="viewerFindNext" type="button" title="다음 일치">↓</button></div><div id="viewerPreview" class="workspace-viewer-preview-body"></div></div>
             </div>
-            <div class="workspace-viewer-actions"><button id="viewerCopyPath" type="button" disabled>경로 복사</button><button id="viewerCopyContent" type="button" disabled>내용 복사</button><button id="viewerCopyFile" type="button" disabled>파일 복사</button><button id="viewerPasteFile" type="button" disabled>여기에 붙여넣기</button></div>
+            <div class="workspace-viewer-actions"><button id="viewerCopyPath" type="button" disabled>절대 경로 복사</button><button id="viewerDownload" type="button" disabled>다운로드</button><button id="viewerCopyContent" type="button" disabled>내용 복사</button><button id="viewerCopyFile" type="button" disabled>파일 복사</button><button id="viewerPasteFile" type="button" disabled>여기에 붙여넣기</button></div>
             <div id="viewerMessage" class="workspace-viewer-message" role="status"></div>
           </section>
         </div>
@@ -363,10 +368,15 @@
     <script src="./workspace-folder-groups.js"></script>
     <script src="./renderer.shared.js"></script>
     <script src="./renderer.hook-registration.js"></script>
+    <link rel="stylesheet" href="./account-profiles.css"><script src="./account-profiles.js"></script>
+    <script src="./account-local.js"></script>
     <script src="./renderer.launchers.js"></script>
     <script src="./renderer.layout.js"></script>
     <script src="./pane-icons.js"></script>
     <script src="./renderer.panes.js"></script>
+    <script src="./viewer-media.js"></script>
+    <script src="./viewer-extension-filter.js"></script>
+    <script src="./viewer-folder-picker.js"></script>
     <script src="./viewer-markdown.js"></script>
     <script src="./vendor/highlight/languages-list.js"></script>
     <script src="./viewer-highlighter.js"></script>

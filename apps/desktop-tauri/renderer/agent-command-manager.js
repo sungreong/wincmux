@@ -34,6 +34,7 @@
   opener.addEventListener("click", () => {
     settings.close();
     commands.reload();
+    void commands.reloadSkills();
     dialog.showModal();
     input.focus();
   });

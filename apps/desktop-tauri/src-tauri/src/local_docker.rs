@@ -95,6 +95,8 @@ impl DockerHost {
         resume_picker: bool,
         hook_token: Option<&str>,
         install_script: Option<&str>,
+        prefix: &str,
+        login: Option<&str>,
     ) -> Result<Spawned, String> {
         let id = require_container(container)?;
         let script = if let Some(install) = install_script {
@@ -112,6 +114,10 @@ impl DockerHost {
         } else {
             script
         };
+        let login_cmd = login
+            .map(|cmd| format!("PATH=\"$HOME/.local/bin:$PATH\"; {cmd}; "))
+            .unwrap_or_default();
+        let script = format!("{prefix}{login_cmd}{script}");
         let args = [
             "--host",
             self.endpoint.as_str(),
@@ -155,27 +161,30 @@ async fn run(command: std::process::Command, max: usize) -> Result<Vec<u8>, Stri
     let mut stderr = child.stderr.take().unwrap();
     let mut out = Vec::new();
     let mut err = Vec::new();
-    let status = timeout(Duration::from_secs(12), async {
-        let stdout = async {
-            if stdout.read_to_end(&mut out).await? > max {
-                return Err(io::Error::other("Docker 응답 크기 제한을 초과했습니다."));
-            }
-            Ok(())
-        };
-        let stderr = async {
-            let mut bytes = [0; 4096];
-            loop {
-                let size = stderr.read(&mut bytes).await?;
-                if size == 0 {
-                    break;
+    let status = timeout(
+        Duration::from_secs(if max > 8 * 1024 * 1024 + 4096 { 60 } else { 12 }),
+        async {
+            let stdout = async {
+                if stdout.read_to_end(&mut out).await? > max {
+                    return Err(io::Error::other("Docker 응답 크기 제한을 초과했습니다."));
                 }
-                err.extend_from_slice(&bytes[..size.min(4096 - err.len())]);
-            }
-            Ok(())
-        };
-        let (status, (), ()) = tokio::try_join!(child.wait(), stdout, stderr)?;
-        Ok::<_, io::Error>(status)
-    })
+                Ok(())
+            };
+            let stderr = async {
+                let mut bytes = [0; 4096];
+                loop {
+                    let size = stderr.read(&mut bytes).await?;
+                    if size == 0 {
+                        break;
+                    }
+                    err.extend_from_slice(&bytes[..size.min(4096 - err.len())]);
+                }
+                Ok(())
+            };
+            let (status, (), ()) = tokio::try_join!(child.wait(), stdout, stderr)?;
+            Ok::<_, io::Error>(status)
+        },
+    )
     .await
     .map_err(|_| "로컬 Docker의 응답 시간이 초과되었습니다.")?
     .map_err(|error| error.to_string())?;

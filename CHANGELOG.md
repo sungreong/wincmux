@@ -2,6 +2,97 @@
 
 [README](README.md) · [GitHub Releases](https://github.com/sungreong/wincmux/releases)
 
+## 0.2.153 Reuse registered local Claude accounts
+
+- On Windows, the Claude launcher and `claude` in a new terminal use the first available registered profile when the workspace has no default. An explicit workspace choice takes precedence.
+- Fix a second sign-in prompt when an OAuth login was saved before Claude completed interactive onboarding. Existing project trust settings are preserved.
+
+## 0.2.152 — Retry profile sign-in
+
+- Restore named accounts incorrectly marked as duplicates of the environment default when opening the profile manager.
+
+- Reopen the login terminal for a pending profile and show launch failures in the profile manager.
+
+## 0.2.151 — Account login checks
+
+- Check existing sign-ins before opening authorization and compare login emails across profiles in the same environment.
+
+## 0.2.150 — Claude and Codex account profiles
+
+- Share account profiles on the same server and choose separate Claude and Codex defaults for each workspace.
+- Start either CLI from a shell or launcher and switch profiles from the terminal header. Narrow windows wrap toolbar controls and keep the profile menu within the viewport.
+
+## 0.2.149 — Visible file loading states
+
+- Show loading indicators inside folders as they expand and in the preview as soon as a file is selected.
+- Mark busy regions for assistive technology and preserve the selected file while its SSH preview loads.
+
+## 0.2.148 — Release timed-out SSH channels
+
+- Close SSH command channels after timeout or failure so large previews cannot leave server sessions occupied.
+- Serialize SSH file operations, skip closed saved folders, and show an inline list error with a retry action.
+
+## 0.2.147 — Recoverable SSH preview channel errors
+
+- Retry transient SSH channel rejections and explain persistent server session limits or a lost connection.
+- Show a preview retry button when a remote file read fails.
+
+## 0.2.146 — Collapsible saved folder groups
+
+- Move collapse controls onto each saved folder heading in local, SSH, and Docker file lists.
+- Keep the folder name and explicit remove button on one row; remove the whole-list collapse control.
+
+## 0.2.145 — Labeled and collapsible file list
+
+- Label the file list in local, SSH, and Docker viewers, and allow collapsing it to expand the preview.
+- Keep a visible button in the preview to restore the list.
+
+## 0.2.144 — Compact file search and selectable saved folders
+
+- Keep name and content search in two rows, with scope and exclusion controls in a filter popover.
+- Select all, one, or several saved folders in a shared picker for local, SSH, and Docker file browsing and search.
+
+## 0.2.143 — Clear saved folder feedback and extension dialog
+
+- Show saved folder confirmation, counts, and tree markers immediately.
+- Move the extension multi selector into a dialog and keep long search results to one truncated row.
+
+## 0.2.142 — Consistent file search and saved folders
+
+- Save multiple folders and browse or search only their contents in local, SSH, and Docker viewers.
+- Search by name pattern and file content independently or together, with line numbers and highlighted matches.
+- Filter file trees and search results by multiple extensions. See `docs/viewer-search-parity.md` for behavior and limits.
+
+## 0.2.141 — Configurable preview size
+
+- Choose an 8, 16, 32, or 64 MB HTML, image, and PDF preview limit in local, SSH, and Docker viewers. The selection persists and reloads the open file.
+
+## 0.2.140 — Scoped file search and clearer tree view
+
+- Search file contents from the selected SSH or Docker folder and its descendants, with optional folder and file exclusion patterns across local and remote viewers.
+- Expand remote folders inline as a tree, show the active search scope, and align folder actions in the narrow sidebar.
+- Allow HTML previews up to 8 MB while retaining bounded preview transfers and unrestricted downloads.
+
+## 0.2.139 — File viewer previews and downloads
+
+- Add absolute path copying and downloads to local, SSH, and Docker file viewers.
+- Preview images, isolated HTML, and PDFs; keep downloads available when preview limits are reached.
+
+## 0.2.138 — Remote workspace sidebar and pane movement
+
+- Move SSH and local Docker folder selection, workspace tabs, and pane groups into a collapsible sidebar. The existing top bar shows the active server or container and folder when the sidebar is collapsed.
+- Move remote panes by choosing a source and clicking an edge of the target pane, as in local workspaces. Move between groups from the sidebar and cancel with Escape.
+
+## 0.2.137 — Commands and skills only for running agents
+
+- Show command and skill controls only when Claude Code or Codex is running in the selected terminal. Shell, Gemini, and empty panes keep ordinary message handling even if CLI mode was saved.
+- Update the selected agent's list when terminals or agents change. Command management remains available from the main settings.
+
+## 0.2.136 — Workspace skill discovery
+
+- Discover Claude Code and Codex skills in the selected local, Docker, or SSH workspace and offer them directly in the composer and manager without manual registration.
+- Keep the composer compact with skill selection, refresh, and a manager shortcut. Command descriptions and personal list editing remain in the settings dialog. Direct entry still works when no skills are found.
+
 ## 0.2.135 — Command and skill descriptions
 
 - Manage Claude Code and Codex command descriptions from **Display settings → Manage commands and skills**, without starting an agent. The composer shares the same list.

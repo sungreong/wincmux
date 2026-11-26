@@ -721,7 +721,7 @@ function overlayShellArgs(shellCmd, commandText) {
 async function startShellCommandForPane(paneId, commandText, options = {}) {
   const ws = selectedWorkspace();
   const provider = workspaceHookProvider(commandText);
-  if (provider && ws?.id && !options.silent) {
+  if (provider && ws?.id && !options.silent && !options.accountAuth) {
     const choice = await window.wincmuxHookRegistration.promptForLaunch(ws, provider);
     if (choice === 'cancel') {
       const view = state.paneViews.get(paneId);
@@ -730,7 +730,9 @@ async function startShellCommandForPane(paneId, commandText, options = {}) {
     }
   }
   const cwdCandidates = uniqueOverlayStrings(options.strictCwd ? [options.cwd] : [options.cwd, ws?.path]);
-  const shells = overlayShellCommands();
+  const selected = options.accountProfiles ?? (ws?.id ? window.wincmuxLocalAccounts?.selection(ws.id) : undefined);
+  const profileShell = options.accountAuth || (provider === "claude" && selected?.claude);
+  const shells = profileShell ? ["powershell.exe","pwsh.exe"] : overlayShellCommands();
   let lastErr = null;
   for (const cwd of cwdCandidates.length > 0 ? cwdCandidates : [undefined]) {
     for (const shell of shells) {
@@ -739,9 +741,10 @@ async function startShellCommandForPane(paneId, commandText, options = {}) {
         return await paneHandlers.startSessionForPane(paneId, {
           force: options.force !== false,
           cmd: shell,
-          args: overlayShellArgs(shell, commandText),
+          args: profileShell ? ["-NoProfile", ...overlayShellArgs(shell, commandText)] : overlayShellArgs(shell, commandText),
           cwd,
           workspaceId: options.workspaceId ?? ws?.id,
+          accountProfiles: selected,
           hookPromptChecked: Boolean(provider),
           focusTerm: options.focusTerm !== false
         });
@@ -2606,7 +2609,13 @@ function bindTerminalPrompt() {
   const composer = $("terminalComposer");
   const form = $("terminalPromptForm");
   const editor = $("terminalPromptText");
-  const commandInput = window.wincmuxAgentCommandInput.create(editor);
+  const commandInput = window.wincmuxAgentCommandInput.create(editor, "codex", false, true);
+  window.wincmuxAgentCommandInput.setWorkspaceLoader(async (provider) => {
+    const workspace = selectedWorkspace();
+    if (!workspace?.path) return { title: "", items: [] };
+    const scan = await window.wincmux.agentAssetsScan(workspace.path);
+    return { title: workspace.name, items: window.wincmuxAgentCommandInput.fromAgentAssets(scan, provider) };
+  });
   editor.insertAdjacentElement("afterend", commandInput.panel);
   const targetLabel = $("terminalPromptTarget");
   const error = $("terminalPromptError");
@@ -2640,8 +2649,23 @@ function bindTerminalPrompt() {
     if (!dialog.open) updateInsertActions();
     window.wincmuxFollowups?.reposition();
   });
+  const syncAgentControls = (view) => {
+    const agent = state.agentStates.get(view?.sessionId);
+    const launch = state.sessionsById.get(view?.sessionId)?.spawn_cmd || "";
+    const program = commandBaseNameForOverlay(launch);
+    const launched = program.includes("claude") ? "claude" : program.includes("codex") ? "codex" : "";
+    const hooked = agent?.hook?.active ? agent.hook.provider : "";
+    const attached = agent?.agent_process_attached ? agent.agent_process_provider : "";
+    const provider = [hooked, attached, launched].find(value => ["claude", "codex"].includes(value));
+    if (view) window.wincmuxLocalAccounts?.sync(view,provider);
+    const beforeMode = commandInput.mode();
+    commandInput.setActive(Boolean(view?.sessionId && !view.detached && provider));
+    if (provider) commandInput.setProvider(provider);
+    if (beforeMode !== commandInput.mode()) updateInsertActions();
+  };
   syncTerminalPrompt = () => {
-    if (dialog.open || writing || (composing && editor.isConnected)) return;
+    if (writing || (composing && editor.isConnected)) return;
+    if (dialog.open) { syncAgentControls(target?.view); return; }
     const view = state.paneViews.get(state.selectedPaneId);
     const card = state.paneCards.get(state.selectedPaneId);
     const changed = target?.view !== view || target?.sessionId !== view?.sessionId;
@@ -2649,12 +2673,10 @@ function bindTerminalPrompt() {
     if (changed) {
       target = view ? { view, sessionId: view.sessionId } : null;
       editor.value = view?.promptDraft ?? "";
-      const launch = state.sessionsById.get(view?.sessionId)?.spawn_cmd || "";
-      const program = commandBaseNameForOverlay(launch);
-      commandInput.setProvider(state.agentStates.get(view?.sessionId)?.hook?.provider
-        || (program.includes("claude") ? "claude" : program.includes("codex") ? "codex" : ""));
       showError("");
     }
+    syncAgentControls(view);
+    if (changed && commandInput.panel.open) void commandInput.reloadSkills();
     if (card && composer.parentElement !== card) {
       card.appendChild(composer);
       composerObserver.disconnect();
@@ -2683,6 +2705,7 @@ function bindTerminalPrompt() {
     }
     target = { view, sessionId: view.sessionId };
     editor.value = view.promptDraft ?? "";
+    syncAgentControls(view);
     updateInsertActions();
     composing = false;
     showError("");
@@ -3072,6 +3095,7 @@ function createPaneLeaf(node, hosts) {
   const idWrap = document.createElement("div");
   idWrap.className = "pane-id-wrap";
   idWrap.append(idEl, groupBadgeEl, unreadBadgeEl);
+  window.wincmuxLocalAccounts?.attach(idWrap,paneId);
   const statusEl = document.createElement("span");
   statusEl.className = "pane-session";
   statusEl.textContent = "No session";

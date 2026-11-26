@@ -1,0 +1,15 @@
+.viewer-extension-trigger { justify-self: start; width: fit-content; max-width: 100%; padding: 4px 9px; font-size: 11px; white-space: nowrap; }
+.viewer-extension-trigger.is-filtered { color: #d9eafe; border-color: #729dcd; background: #29415e; }
+.viewer-extension-dialog { width: min(540px, calc(100vw - 32px)); max-height: calc(100vh - 32px); margin: auto; padding: 18px; color: #e9f0fa; background: #18212e; border: 1px solid #526b91; border-radius: 10px; box-shadow: 0 18px 48px #0009; }
+.viewer-extension-dialog::backdrop { background: #000a; }
+.viewer-extension-dialog h2 { margin: 0 0 7px; font-size: 17px; }
+.viewer-extension-dialog p { margin: 0 0 13px; color: #b9c7dc; font-size: 12px; }
+.viewer-extension-dialog > input[type="search"] { display: block; width: 100%; min-height: 34px; margin: 0 0 12px; padding: 6px 9px; color: #e9f0fa; background: #202c3b; border: 1px solid #526b91; border-radius: 5px; }
+.viewer-extension-dialog .viewer-extension-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(95px, 1fr)); gap: 5px; max-height: min(350px, 50vh); overflow: auto; padding: 3px; }
+.viewer-extension-dialog .viewer-extension-options label { display: flex; align-items: center; gap: 7px; min-width: 0; min-height: 30px; margin: 0; padding: 4px 7px; color: #e9f0fa; background: #202c3b; border: 1px solid #33445a; border-radius: 5px; font-size: 12px; white-space: nowrap; cursor: pointer; }
+.viewer-extension-dialog .viewer-extension-options label:has(input:checked) { border-color: #729dcd; background: #29415e; }
+.viewer-extension-dialog .viewer-extension-options input[type="checkbox"] { display: inline-block; flex: none; width: 15px; height: 15px; min-height: 0; margin: 0; padding: 0; }
+.viewer-extension-dialog .viewer-extension-actions { display: flex; align-items: center; gap: 7px; margin-top: 14px; }
+.viewer-extension-dialog .viewer-extension-count { flex: 1; color: #b9c7dc; font-size: 12px; }
+.viewer-extension-dialog .viewer-extension-actions button { min-width: 55px; padding: 6px 9px; color: #e9f0fa; background: #202c3b; border: 1px solid #526b91; border-radius: 5px; }
+.viewer-extension-dialog .viewer-extension-actions .viewer-extension-apply { background: #294f7a; }

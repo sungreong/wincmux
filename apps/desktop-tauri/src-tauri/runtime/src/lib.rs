@@ -1,3 +1,4 @@
+pub mod account_profiles;
 pub mod client;
 pub mod conversations;
 pub mod core;

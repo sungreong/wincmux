@@ -59,13 +59,13 @@ async function run() {
       const intact = panes.every(pane => root.contains(pane)) && root.querySelectorAll('.pane').length === 3;
       layout.remove(c);
       return { movedLeft, left, movedUp, up, skewed, equal, horizontalEqual, verticalEqual, intact, remaining: root.querySelectorAll('.pane').length,
-        equalizeLabel: document.getElementById('equalizeRemotePanes')?.textContent.trim(),
+        equalizeLabel: document.getElementById('equalizeRemotePanes')?.getAttribute('aria-label'),
         moveDialog: Boolean(document.getElementById('moveRemotePaneDialog')) };
     })()`);
     assert.deepEqual(result, {
       movedLeft: true, left: true, movedUp: true, up: true, skewed: true, equal: true,
       horizontalEqual: true, verticalEqual: true, intact: true, remaining: 2,
-      equalizeLabel: '균등 배분', moveDialog: true
+      equalizeLabel: '모든 pane 크기 균등 배분', moveDialog: true
     });
     console.log('Docker pane move, equalize, and removal passed in WebView2.');
   } finally {

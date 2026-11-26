@@ -174,9 +174,27 @@ impl Spawned {
         session_id: &str,
         hook_token: &str,
         hook_pipe: &str,
+        profiles: &[(&str, std::path::PathBuf)],
     ) -> Result<Self, String> {
         let mut command = CommandBuilder::new(cmd);
         command.args(args);
+        // On Windows portable-pty rebuilds PATH from the registry. Named profile
+        // terminals should resolve the same CLI as the account status process.
+        #[cfg(windows)]
+        if !profiles.is_empty() {
+            if let Some(path) = std::env::var_os("PATH") {
+                command.env("PATH", path);
+            }
+        }
+        for (key, path) in profiles {
+            for token in crate::account_profiles::inherited_tokens(key) {
+                command.env_remove(*token);
+            }
+            if *key == "CLAUDE_CONFIG_DIR" {
+                crate::account_profiles::prepare_claude_session(path).map_err(|err| err.to_string())?;
+            }
+            command.env(*key, path);
+        }
         command.cwd(cwd);
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");

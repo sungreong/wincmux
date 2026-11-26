@@ -159,11 +159,30 @@ async function run() {
     assert.deepEqual(commandManager, {open:true,description:'View, set, edit, or pause the chat goal',added:true,removed:true,english:true});
     if (process.env.WINCMUX_CAPTURE_COMMANDS === '1') {
       const screenshot = await main.request('Page.captureScreenshot', { format:'png', fromSurface:true });
-      const output = path.join(root, 'artifacts', 'agent-command-manager-0.2.135.png');
+      const output = path.join(root, 'artifacts', 'agent-command-manager-0.2.137.png');
       fs.mkdirSync(path.dirname(output), { recursive:true });
       fs.writeFileSync(output, Buffer.from(screenshot.data, 'base64'));
     }
     await main.eval(`document.querySelector('.agent-command-manager').close()`);
+    const compact = await main.eval(`(() => {
+      const panel=document.querySelector('.agent-command-compact');
+      const hiddenWithoutAgent=panel.hidden;
+      panel.hidden=false;
+      panel.open=true;
+      const hidden=['.agent-command-save','.agent-command-remove','.agent-command-description','.agent-command-reference','.agent-command-source','.agent-command-hint']
+        .every(selector=>getComputedStyle(panel.querySelector(selector)).display==='none');
+      const result={hidden,hiddenWithoutAgent,height:Math.round(panel.getBoundingClientRect().height),manage:!!panel.querySelector('.agent-command-manage')};
+      panel.open=false;
+      panel.hidden=true;
+      return result;
+    })()`);
+    assert.equal(compact.hidden && compact.hiddenWithoutAgent && compact.manage && compact.height < 110, true, `composer stays compact: ${JSON.stringify(compact)}`);
+    if (process.env.WINCMUX_CAPTURE_COMMANDS === '1') {
+      await main.eval(`(() => { const panel=document.querySelector('.agent-command-compact'); panel.hidden=false; panel.open=true; })()`);
+      const screenshot = await main.request('Page.captureScreenshot', { format:'png', fromSurface:true });
+      fs.writeFileSync(path.join(root, 'artifacts', 'agent-command-compact-0.2.137.png'), Buffer.from(screenshot.data, 'base64'));
+      await main.eval(`(() => { const panel=document.querySelector('.agent-command-compact'); panel.open=false; panel.hidden=true; })()`);
+    }
     assert.equal(await remote.eval(`(() => { document.getElementById('terminalRendererSettingsBtn').click(); document.getElementById('agentCommandManagerBtn').click(); const dialog=document.querySelector('.agent-command-manager'); const provider=dialog.querySelector('.agent-command-row select'); provider.value='claude'; provider.dispatchEvent(new Event('change',{bubbles:true})); const result=dialog.open&&[...dialog.querySelectorAll('option')].some(option=>option.value==='/help'); dialog.close(); return result; })()`), true);
     const audit = await Promise.all([main, remote].map(tab => tab.eval(`(() => [...new Set([...document.querySelectorAll('body *')].filter(el => !el.children.length && !el.closest('.xterm,pre,code') && /[가-힣]/.test(el.textContent)).map(el => el.textContent.trim()).filter(Boolean))].slice(0,40))()`)));
     console.log('English UI audit:', JSON.stringify(audit));

@@ -129,6 +129,26 @@ impl Desktop {
             _ => {
                 let path = store::path(text(&p, "path")?)?;
                 match action {
+                    "viewer-download" => {
+                        let source = workspace_viewer::file_path(&path, text(&p, "relativePath")?)?;
+                        let name = source
+                            .file_name()
+                            .and_then(|value| value.to_str())
+                            .ok_or("invalid file name")?;
+                        let Some(destination) =
+                            app.dialog().file().set_file_name(name).blocking_save_file()
+                        else {
+                            return Ok(json!({"cancelled":true}));
+                        };
+                        let destination = destination.into_path()?;
+                        if source == destination
+                            || destination.exists() && source == destination.canonicalize()?
+                        {
+                            return Err("source and destination are the same file".into());
+                        }
+                        let size = fs::copy(source, &destination)?;
+                        Ok(json!({"path":destination,"size":size}))
+                    }
                     "viewer-list" | "viewer-search" | "viewer-preview" | "viewer-copy"
                     | "viewer-git-status" | "viewer-git-diff" => {
                         workspace_viewer::action(action, &path, &p)

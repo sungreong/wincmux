@@ -10,6 +10,7 @@ class Element {
     this.children = [];
     this.listeners = {};
     this.value = '';
+    this.classList = { add() {} };
   }
   append(...children) { this.children.push(...children); }
   focus() {}
@@ -21,7 +22,7 @@ class Element {
   dispatchEvent(event) { this.listeners[event.type]?.(event); }
 }
 
-function composer(seed) {
+function composer(seed, provider = 'codex') {
   const window = { addEventListener() {} };
   const document = { createElement: tag => new Element(tag), documentElement: { lang:'ko' } };
   const entries = new Map();
@@ -40,7 +41,7 @@ function composer(seed) {
     buttons.push(element);
     return element;
   };
-  return { view:window.wincmuxRemoteComposer((action, payload) => { calls.push([action,payload]); return Promise.resolve(); }, button), calls, buttons, entries };
+  return { view:window.wincmuxRemoteComposer((action, payload) => { calls.push([action,payload]); return Promise.resolve(); }, button, provider), calls, buttons, entries, commandsApi:window.wincmuxAgentCommandInput };
 }
 
 function controls(view) {
@@ -91,6 +92,26 @@ test('unknown skill remains executable and legacy favorites can receive descript
   assert.equal(calls[0][1].text, '$my-skill');
 });
 
+test('workspace skill metadata becomes agent-specific commands without registration', async () => {
+  const { view, commandsApi } = composer();
+  const scan = { items:[
+    { exists:true, category:'skills', providers:['claude'], relativePath:'.claude/skills/build/SKILL.md', name:'build', details:{description:'Build project'} },
+    { exists:true, category:'skills', providers:['codex'], relativePath:'.agents/skills/lint/SKILL.md', name:'lint', details:{description:'Run lint'} }
+  ] };
+  assert.equal(commandsApi.fromAgentAssets(scan, 'claude')[0].command, '/build');
+  assert.equal(commandsApi.fromAgentAssets(scan, 'codex')[0].command, '$lint');
+  commandsApi.setWorkspaceLoader(async provider => ({ title:'Sample', items:commandsApi.fromAgentAssets(scan, provider) }));
+  const panel = view.panel.children.find(item => item.className === 'agent-command-tools');
+  const { saved } = controls(view);
+  const control = panel.children.find(item => item.className === 'agent-command-row');
+  const provider = control.children[0];
+  provider.value = 'claude';
+  provider.dispatchEvent({ type:'change' });
+  await new Promise(resolve => setImmediate(resolve));
+  const groups = saved.children.filter(item => item.tag === 'optgroup');
+  assert.equal(groups[0].children[0].value, '/build');
+});
+
 test('slash text in message mode is marked as ordinary message', async () => {
   const { view, calls, buttons } = composer();
   const input = view.panel.children.find(item => item.tag === 'textarea');
@@ -99,6 +120,18 @@ test('slash text in message mode is marked as ordinary message', async () => {
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(calls[0][0], 'agent-submit');
   assert.match(calls[0][1].text, /^다음은 CLI 명령이나 스킬 실행이 아닌 일반 메시지입니다: \/goal$/);
+});
+
+test('Gemini hides agent commands and ignores a saved CLI mode', async () => {
+  const { view, calls, buttons } = composer({ codex:{ mode:'command', items:[] } }, 'gemini');
+  const panel = view.panel.children.find(item => item.className === 'agent-command-tools');
+  assert.equal(panel.hidden, true);
+  const input = view.panel.children.find(item => item.tag === 'textarea');
+  input.value = '/goal';
+  buttons.find(item => item.label === '전송 / 대기열').click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls[0][0], 'agent-submit');
+  assert.match(calls[0][1].text, /일반 메시지입니다: \/goal$/);
 });
 
 test('agent handoff removes empty composer and blocks future submissions', () => {

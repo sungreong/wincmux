@@ -14,10 +14,65 @@ const MAX_ENTRIES: usize = 500;
 const GIT_PAGE_SIZE: usize = 100;
 const MAX_TEXT: u64 = 512 * 1024;
 const MAX_IMAGE: u64 = 8 * 1024 * 1024;
+const MAX_CONFIGURED_PREVIEW: u64 = 64 * 1024 * 1024;
 const MAX_SEARCH_VISITS: usize = 100_000;
 const MAX_SEARCH_RESULTS: usize = 500;
 const MAX_CONTENT_FILE: u64 = 256 * 1024;
 const MAX_CONTENT_TOTAL: u64 = 20 * 1024 * 1024;
+
+struct SearchExclude {
+    directory: bool,
+    path: bool,
+    pattern: Pattern,
+}
+
+fn search_excludes(raw: &str) -> Result<Vec<SearchExclude>> {
+    if raw.len() > 1200 {
+        return Err("exclude patterns must be at most 1200 characters".into());
+    }
+    let mut filters = Vec::new();
+    for entry in raw
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        if filters.len() >= 20 || entry.len() > 120 || entry.chars().any(char::is_control) {
+            return Err("enter up to 20 exclude patterns of 120 characters each".into());
+        }
+        let directory = entry.ends_with('/') || entry.ends_with("/**");
+        let pattern = if entry.ends_with("/**") {
+            entry.trim_end_matches("/**")
+        } else {
+            entry.trim_end_matches('/')
+        };
+        if pattern.is_empty()
+            || pattern.starts_with('/')
+            || pattern.split('/').any(|part| matches!(part, "." | ".."))
+        {
+            return Err("exclude patterns must be relative to the search folder".into());
+        }
+        filters.push(SearchExclude {
+            directory,
+            path: entry.ends_with("/**") || pattern.contains('/'),
+            pattern: Pattern::new(pattern)?,
+        });
+    }
+    Ok(filters)
+}
+
+fn excluded(filters: &[SearchExclude], directory: bool, name: &str, path: &str) -> bool {
+    filters.iter().any(|filter| {
+        filter.directory == directory
+            && filter.pattern.matches_with(
+                if filter.path { path } else { name },
+                MatchOptions {
+                    case_sensitive: false,
+                    require_literal_separator: true,
+                    require_literal_leading_dot: false,
+                },
+            )
+    })
+}
 
 fn inside(root: &Path, relative: &str) -> Result<PathBuf> {
     safe_relative(relative)?;
@@ -26,6 +81,14 @@ fn inside(root: &Path, relative: &str) -> Result<PathBuf> {
         return Err("path must stay inside the workspace".into());
     }
     Ok(full)
+}
+
+pub fn file_path(root: &Path, relative: &str) -> Result<PathBuf> {
+    let file = inside(root, relative)?;
+    if !file.is_file() {
+        return Err("not a file".into());
+    }
+    Ok(file)
 }
 
 fn safe_relative(relative: &str) -> Result<()> {
@@ -45,13 +108,54 @@ fn relative<'a>(p: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| format!("missing {key}").into())
 }
 
+fn selected_extensions(p: &Value) -> Result<Vec<String>> {
+    let Some(values) = p["extensions"].as_array() else {
+        return Ok(Vec::new());
+    };
+    if values.len() > 64 {
+        return Err("too many file extensions".into());
+    }
+    values
+        .iter()
+        .map(|value| {
+            let ext = value.as_str().ok_or("invalid file extension")?;
+            if ext.is_empty()
+                || ext.len() > 12
+                || !ext.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            {
+                return Err("invalid file extension".into());
+            }
+            Ok(ext.to_ascii_lowercase())
+        })
+        .collect()
+}
+
+fn extension_allowed(path: &Path, extensions: &[String]) -> bool {
+    extensions.is_empty()
+        || path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                extensions
+                    .iter()
+                    .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+            })
+}
+
 fn list(root: &Path, p: &Value) -> Result<Value> {
     let canonical_root = root.canonicalize()?;
     let dir = inside(root, relative(p, "relativePath")?)?;
     if !dir.is_dir() {
         return Err("not a folder".into());
     }
+    let extensions = selected_extensions(p)?;
     let mut entries = fs::read_dir(dir)?
+        .filter(|entry| {
+            entry.as_ref().map_or(true, |item| {
+                item.file_type().is_ok_and(|kind| kind.is_dir())
+                    || extension_allowed(&item.path(), &extensions)
+            })
+        })
         .take(MAX_ENTRIES + 1)
         .collect::<std::io::Result<Vec<_>>>()?;
     entries.sort_by(|a, b| {
@@ -104,20 +208,42 @@ fn search(root: &Path, p: &Value) -> Result<Value> {
         require_literal_leading_dot: false,
     };
     let include_excluded = p["includeExcluded"] == true;
+    let exclude = search_excludes(p["exclude"].as_str().unwrap_or(""))?;
+    let extensions = selected_extensions(p)?;
     let canonical_root = root.canonicalize()?;
-    let scope_path = p["scopePath"].as_str().unwrap_or("");
-    let scope = inside(root, scope_path)?;
-    if !scope.is_dir() {
-        return Err("search scope is not a folder".into());
+    let scope_paths: Vec<&str> = match p["scopePaths"].as_array() {
+        Some(paths) if !paths.is_empty() && paths.len() <= 20 => paths
+            .iter()
+            .map(|value| value.as_str().ok_or("invalid search folder"))
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+        Some(paths) if paths.len() > 20 => return Err("too many search folders".into()),
+        _ => vec![p["scopePath"].as_str().unwrap_or("")],
+    };
+    let mut scopes = Vec::new();
+    for path in scope_paths {
+        let scope = inside(root, path)?;
+        if !scope.is_dir() {
+            return Err("search scope is not a folder".into());
+        }
+        scopes.push(scope);
     }
-    let mut stack = vec![scope.clone()];
+    scopes.sort_by_key(|scope| scope.components().count());
+    let mut stack: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for scope in scopes {
+        if !stack
+            .iter()
+            .any(|(existing, _): &(PathBuf, PathBuf)| scope.starts_with(existing))
+        {
+            stack.push((scope.clone(), scope));
+        }
+    }
     let mut visited = 0;
     let mut content_bytes = 0;
     let mut skipped_large = 0;
     let mut items = Vec::new();
     let mut truncated = false;
     let started = Instant::now();
-    while let Some(directory) = stack.pop() {
+    while let Some((directory, scope)) = stack.pop() {
         let entries = match fs::read_dir(directory) {
             Ok(entries) => entries,
             Err(_) => continue,
@@ -138,6 +264,14 @@ fn search(root: &Path, p: &Value) -> Result<Value> {
             };
             let name = entry.file_name().to_string_lossy().into_owned();
             if ty.is_dir() {
+                let scoped_path = entry
+                    .path()
+                    .strip_prefix(&scope)?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if excluded(&exclude, true, &name, &scoped_path) {
+                    continue;
+                }
                 if !include_excluded
                     && [
                         ".git",
@@ -152,9 +286,12 @@ fn search(root: &Path, p: &Value) -> Result<Value> {
                 {
                     continue;
                 }
-                stack.push(entry.path());
+                stack.push((entry.path(), scope.clone()));
             } else if ty.is_file() {
                 let path = entry.path();
+                if !extension_allowed(&path, &extensions) {
+                    continue;
+                }
                 let relative_path = path
                     .strip_prefix(&canonical_root)?
                     .to_string_lossy()
@@ -163,6 +300,9 @@ fn search(root: &Path, p: &Value) -> Result<Value> {
                     .strip_prefix(&scope)?
                     .to_string_lossy()
                     .replace('\\', "/");
+                if excluded(&exclude, false, &name, &scoped_path) {
+                    continue;
+                }
                 let candidate = if has_path {
                     scoped_path.as_str()
                 } else {
@@ -232,6 +372,10 @@ fn preview(root: &Path, p: &Value) -> Result<Value> {
         return Err("not a file".into());
     }
     let size = file.metadata()?.len();
+    let media_limit = p["maxPreviewBytes"]
+        .as_u64()
+        .unwrap_or(MAX_IMAGE)
+        .clamp(MAX_IMAGE, MAX_CONFIGURED_PREVIEW);
     let ext = file
         .extension()
         .and_then(|v| v.to_str())
@@ -244,30 +388,33 @@ fn preview(root: &Path, p: &Value) -> Result<Value> {
         "webp" => Some("image/webp"),
         "bmp" => Some("image/bmp"),
         "svg" => Some("image/svg+xml"),
+        "pdf" => Some("application/pdf"),
         _ => None,
     };
     if let Some(mime) = mime {
-        if size > MAX_IMAGE {
+        if size > media_limit {
             return Ok(json!({"kind":"large", "size":size}));
         }
         let bytes = fs::read(file)?;
         let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
         return Ok(
-            json!({"kind":"image", "size":size, "dataUrl":format!("data:{mime};base64,{encoded}")}),
+            json!({"kind":if ext == "pdf" {"pdf"} else {"image"}, "size":size, "dataUrl":format!("data:{mime};base64,{encoded}")}),
         );
     }
-    if size > MAX_TEXT {
+    let html = matches!(ext.as_str(), "html" | "htm");
+    let limit = if html { media_limit } else { MAX_TEXT };
+    if size > limit {
         return Ok(json!({"kind":"large", "size":size}));
     }
     let mut bytes = Vec::new();
     fs::File::open(file)?
-        .take(MAX_TEXT + 1)
+        .take(limit + 1)
         .read_to_end(&mut bytes)?;
     if bytes.contains(&0) {
         return Ok(json!({"kind":"binary", "size":size}));
     }
     match String::from_utf8(bytes) {
-        Ok(text) => Ok(json!({"kind":"text", "size":size, "text":text})),
+        Ok(text) => Ok(json!({"kind":if html {"html"} else {"text"}, "size":size, "text":text})),
         Err(_) => Ok(json!({"kind":"binary", "size":size})),
     }
 }
@@ -477,6 +624,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn preview_classifies_html_pdf_and_large_media() -> Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("wincmux-preview-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root)?;
+        fs::write(root.join("page.html"), "<h1>Preview</h1>")?;
+        fs::write(
+            root.join("large-page.html"),
+            vec![b'a'; MAX_TEXT as usize + 1],
+        )?;
+        fs::write(root.join("document.pdf"), b"%PDF-1.4\n")?;
+        fs::write(root.join("oversized.pdf"), vec![0; MAX_IMAGE as usize + 1])?;
+        fs::write(
+            root.join("oversized.html"),
+            vec![b'a'; MAX_IMAGE as usize + 1],
+        )?;
+        let html = preview(&root, &json!({"relativePath":"page.html"}))?;
+        let large_html = preview(&root, &json!({"relativePath":"large-page.html"}))?;
+        let pdf = preview(&root, &json!({"relativePath":"document.pdf"}))?;
+        let large = preview(&root, &json!({"relativePath":"oversized.pdf"}))?;
+        let large_html_default = preview(&root, &json!({"relativePath":"oversized.html"}))?;
+        let large_html_expanded = preview(
+            &root,
+            &json!({"relativePath":"oversized.html","maxPreviewBytes":16 * 1024 * 1024}),
+        )?;
+        assert_eq!(html["kind"], "html");
+        assert_eq!(large_html["kind"], "html");
+        assert_eq!(pdf["kind"], "pdf");
+        assert_eq!(large["kind"], "large");
+        assert_eq!(large_html_default["kind"], "large");
+        assert_eq!(large_html_expanded["kind"], "html");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn git_status_pages_large_change_lists() -> Result<()> {
         let root = std::env::temp_dir().join(format!("wincmux-git-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root)?;
@@ -530,22 +712,55 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("wincmux-search-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join("src"))?;
+        fs::create_dir_all(root.join("src/cache"))?;
         fs::create_dir_all(root.join("target"))?;
+        fs::create_dir_all(root.join("docs"))?;
+        fs::create_dir_all(root.join("outside"))?;
         fs::write(root.join("src/test_alpha.py"), "alpha")?;
+        fs::write(root.join("docs/test_guide.py"), "alpha")?;
+        fs::write(root.join("outside/test_other.py"), "alpha")?;
         fs::write(root.join("src/other.txt"), "other")?;
         fs::write(root.join("target/test_hidden.py"), "hidden")?;
         let found = search(&root, &json!({"pattern":"**/test_*.py"}))?;
-        assert_eq!(found["items"].as_array().unwrap().len(), 1);
-        assert_eq!(found["items"][0]["relativePath"], "src/test_alpha.py");
+        assert_eq!(found["items"].as_array().unwrap().len(), 3);
         let all = search(
             &root,
             &json!({"pattern":"test_*.py", "includeExcluded":true}),
         )?;
-        assert_eq!(all["items"].as_array().unwrap().len(), 2);
+        assert_eq!(all["items"].as_array().unwrap().len(), 4);
+        let selected = search(
+            &root,
+            &json!({"scopePaths":["src","docs"], "pattern":"test_*.py", "contentQuery":"alpha"}),
+        )?;
+        let selected_paths: Vec<_> = selected["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["relativePath"].as_str().unwrap())
+            .collect();
+        assert_eq!(selected_paths, ["docs/test_guide.py", "src/test_alpha.py"]);
         let scoped = search(&root, &json!({"scopePath":"src", "contentQuery":"alpha"}))?;
         assert_eq!(scoped["items"].as_array().unwrap().len(), 1);
         assert_eq!(scoped["items"][0]["line"], 1);
         assert_eq!(scoped["items"][0]["relativePath"], "src/test_alpha.py");
+        fs::write(root.join("src/cache/skip.py"), "alpha")?;
+        fs::write(root.join("src/test.min.js"), "alpha")?;
+        let filtered = search(
+            &root,
+            &json!({"scopePath":"src", "contentQuery":"alpha", "exclude":"cache/, *.min.js"}),
+        )?;
+        assert_eq!(filtered["items"].as_array().unwrap().len(), 1);
+        assert_eq!(filtered["items"][0]["relativePath"], "src/test_alpha.py");
+        let filtered_path = search(
+            &root,
+            &json!({"contentQuery":"alpha", "exclude":"src/cache/**, *.min.js"}),
+        )?;
+        assert_eq!(filtered_path["items"].as_array().unwrap().len(), 3);
+        assert!(search(
+            &root,
+            &json!({"contentQuery":"alpha", "exclude":"../secret/"})
+        )
+        .is_err());
         assert!(search(&root, &json!({"scopePath":"../", "contentQuery":"alpha"})).is_err());
         fs::remove_dir_all(root)?;
         Ok(())

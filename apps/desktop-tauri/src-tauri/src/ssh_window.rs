@@ -21,7 +21,7 @@ use tauri::{
 };
 use tauri_plugin_dialog::DialogExt;
 use tokio::{
-    sync::{mpsc, Mutex},
+    sync::{mpsc, Mutex, Semaphore},
     time::{timeout, Instant},
 };
 use uuid::Uuid;
@@ -76,6 +76,7 @@ struct DockerWorkspace {
 pub struct SshWindow {
     profiles: PathBuf,
     connections: Arc<Mutex<Connections>>,
+    pub(super) file_gate: Semaphore,
     opening: Mutex<()>,
     pending_alert: Mutex<Option<Value>>,
 }
@@ -107,6 +108,7 @@ impl SshWindow {
         Self {
             profiles: root.join("ssh-profiles.json"),
             connections: Default::default(),
+            file_gate: Semaphore::new(1),
             opening: Mutex::default(),
             pending_alert: Mutex::default(),
         }
@@ -406,6 +408,9 @@ pub async fn ssh_workspace(
     let backend = if local { "docker" } else { "ssh" };
     let prefix = format!("remote:{backend}:");
     match action.as_str() {
+        "download" => {
+            return crate::ssh_viewer::download(state, &params, window.app_handle()).await
+        }
         "take-alert" => {
             return Ok(state
                 .pending_alert
@@ -458,10 +463,25 @@ pub async fn ssh_workspace(
             return remote.rpc(&action, params).await;
         }
         "set-target" => return set_target(state, &remote, params).await,
+        "account-status" => {
+            let (host, project) = state.project(params["source_terminal_id"].as_str()).await?;
+            let cmd = match params["tool"].as_str() {
+                Some("claude") => "claude auth status",
+                Some("codex") => "codex login status",
+                _ => return Err("Unknown profile provider".into()),
+            };
+            let prefix =
+                wincmux_runtime::account_profiles::shell_prefix(&params["account_profiles"])?;
+            let tool = params["tool"].as_str().unwrap();
+            let script = format!("{prefix}export PATH=\"$HOME/.local/bin:$PATH\"; if command -v python3 >/dev/null; then python3 - {tool} <<'WINCMUX_STATUS'\n{}\nWINCMUX_STATUS\nelif {cmd} >/dev/null 2>&1; then echo '{{\"authenticated\":true}}'; else echo '{{\"authenticated\":false}}'; fi", include_str!("account_status.py"));
+            let result = host.exec(&project.path, project.container.as_deref(), &script, 4096).await?;
+            return serde_json::from_slice(&result).map_err(|_| "로그인 상태를 확인하지 못했습니다.".into());
+        }
         "conversation-list" => {
             return crate::remote_conversations::list(
                 state,
                 params["include_children"].as_bool().unwrap_or(true),
+                &wincmux_runtime::account_profiles::shell_prefix(&params["account_profiles"])?,
             )
             .await
         }
@@ -495,10 +515,10 @@ pub async fn ssh_workspace(
                     .ok_or("먼저 로컬 Docker 목록을 여세요.")?;
                 state.last_docker_project(host)
             }
-            "browse" | "hooks-status" | "hooks-ensure" | "terminal-input" | "terminal-resize"
-            | "terminal-close" | "files" | "preview" | "search" | "git-status" | "git-diff"
-            | "agent-submit" | "agent-command" | "agent-insert" | "agent-cancel"
-            | "agent-toggle" | "agent-send-now" => {
+            "browse" | "agent-skills" | "hooks-status" | "hooks-ensure" | "terminal-input"
+            | "terminal-resize" | "terminal-close" | "files" | "preview" | "search"
+            | "git-status" | "git-diff" | "agent-submit" | "agent-command" | "agent-insert"
+            | "agent-cancel" | "agent-toggle" | "agent-send-now" => {
                 super::ssh_terminal::action(state, &action, &params).await
             }
             _ => Err("로컬 Docker에서 지원하지 않는 작업입니다.".into()),
@@ -677,8 +697,14 @@ async fn set_target(state: &SshWindow, remote: &Remote, params: Value) -> Result
             conn.docker_project = Some(project.clone());
         }
     }
+    let authority = match &host {
+        WorkspaceHost::Ssh(_) => conn.active.as_ref().unwrap().credential_key.as_str(),
+        WorkspaceHost::Docker(host) => host.endpoint(),
+    };
+    let account_scope = json!([authority, project.container]).to_string();
     drop(conn);
     let mut result = json!(project);
+    result["account_scope"] = json!(account_scope);
     if let Ok(context) = state.notice_project(&host, &project).await {
         if remote
             .rpc("remote_project.register", context.clone())

@@ -7,14 +7,14 @@ use crate::{
     ssh_window::{SshWindow, WorkspaceWindows},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
-use russh::ChannelMsg;
+use russh::{ChannelMsg, ChannelOpenFailure, Error as SshError};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
 use tauri::{ipc::Channel, State, WebviewWindow};
 use tokio::{
     sync::{mpsc, oneshot},
-    time::timeout,
+    time::{timeout, timeout_at, Instant},
 };
 use uuid::Uuid;
 
@@ -65,7 +65,7 @@ pub fn directory_script(directory: &str, script: &str) -> Result<String, String>
         return Err("작업공간 폴더의 절대 경로를 입력하세요.".into());
     }
     Ok(format!(
-        "cd {} && {}",
+        "cd {} || exit 1; {}",
         quote(if directory.is_empty() { "." } else { directory }),
         script
     ))
@@ -105,12 +105,18 @@ pub fn parse_containers(bytes: Vec<u8>) -> Result<Value, String> {
     Ok(json!(items))
 }
 
-pub(super) fn list_entries(directories_only: bool, first: usize, last: usize) -> String {
+pub(super) fn list_entries(
+    directories_only: bool,
+    first: usize,
+    last: usize,
+    extensions: Option<&str>,
+) -> String {
     let eligible = if directories_only {
         "[ \"$kind\" = d ] || continue; "
     } else {
         ""
     };
+    let extension_check = extensions.map(|pattern| format!("if [ \"$kind\" = f ]; then case \"$name\" in {pattern}) ;; *) continue;; esac; fi; ")).unwrap_or_default();
     format!(
         "LC_ALL=C; export LC_ALL; n=0;
         for name in * .[!.]* ..?*; do
@@ -119,7 +125,7 @@ pub(super) fn list_entries(directories_only: bool, first: usize, last: usize) ->
             elif [ -f \"$name\" ]; then kind=f;
             elif [ -e \"$name\" ]; then kind=s;
             else continue; fi;
-            {eligible}n=$((n+1));
+            {eligible}{extension_check}n=$((n+1));
             [ \"$n\" -lt {first} ] && continue;
             printf '%s%s\\000' \"$kind\" \"$name\";
             [ \"$n\" -ge {last} ] && break;
@@ -128,8 +134,45 @@ pub(super) fn list_entries(directories_only: bool, first: usize, last: usize) ->
 }
 
 pub async fn run(handle: &Handle, command: String, max: usize) -> Result<Vec<u8>, String> {
-    let task = async {
-        let mut ch = handle.channel_open_session().await.map_err(error)?;
+    let limit = Duration::from_secs(if max > 8 * 1024 * 1024 + 4096 { 60 } else { 12 });
+    run_with_timeout(handle, command, max, limit).await
+}
+
+pub(super) async fn run_with_timeout(
+    handle: &Handle,
+    command: String,
+    max: usize,
+    limit: Duration,
+) -> Result<Vec<u8>, String> {
+    let deadline = Instant::now() + limit;
+    let mut ch = timeout_at(deadline, async {
+        let mut attempts = 0;
+        loop {
+            match handle.channel_open_session().await {
+                Ok(channel) => break Ok(channel),
+                Err(err) if handle.is_closed() => {
+                    break Err(format!(
+                        "SSH 연결이 끊어졌습니다. 작업공간에 다시 연결한 뒤 시도하세요. ({err})"
+                    ));
+                }
+                Err(SshError::ChannelOpenFailure(
+                    ChannelOpenFailure::ConnectFailed | ChannelOpenFailure::ResourceShortage,
+                )) if attempts < 2 && !handle.is_closed() => {
+                    attempts += 1;
+                    tokio::time::sleep(Duration::from_millis(200 * attempts)).await;
+                }
+                Err(SshError::ChannelOpenFailure(
+                    ChannelOpenFailure::ConnectFailed | ChannelOpenFailure::ResourceShortage,
+                )) => {
+                    break Err("SSH 서버가 새 작업 채널을 거부했습니다. 동시 세션 수 한도일 수 있습니다. 사용하지 않는 터미널을 닫고 다시 시도하세요. 계속되면 서버의 MaxSessions 설정을 확인하세요.".into());
+                }
+                Err(err) => break Err(format!("SSH 작업 채널을 열 수 없습니다: {err}")),
+            }
+        }
+    })
+    .await
+    .map_err(|_| "SSH 작업 채널을 여는 시간이 초과되었습니다.")??;
+    let result = timeout_at(deadline, async {
         ch.exec(true, command).await.map_err(error)?;
         let mut output = Vec::new();
         let mut stderr = Vec::new();
@@ -138,7 +181,6 @@ pub async fn run(handle: &Handle, command: String, max: usize) -> Result<Vec<u8>
             match message {
                 ChannelMsg::Data { data } => {
                     if output.len() + data.len() > max {
-                        let _ = ch.close().await;
                         return Err("원격 응답 크기 제한을 초과했습니다.".into());
                     }
                     output.extend_from_slice(&data);
@@ -163,10 +205,10 @@ pub async fn run(handle: &Handle, command: String, max: usize) -> Result<Vec<u8>
                 exit.map_or_else(|| "없음".into(), |n| n.to_string())
             ))
         }
-    };
-    timeout(Duration::from_secs(12), task)
-        .await
-        .map_err(|_| "원격 명령 실행 시간이 초과되었습니다.")?
+    })
+    .await;
+    let _ = timeout(Duration::from_secs(2), ch.close()).await;
+    result.map_err(|_| "원격 명령 실행 시간이 초과되었습니다.".to_owned())?
 }
 
 pub async fn action(state: &SshWindow, action: &str, params: &Value) -> Result<Value, String> {
@@ -202,7 +244,7 @@ pub async fn action(state: &SshWindow, action: &str, params: &Value) -> Result<V
             let path = directory(&host, params["path"].as_str().unwrap_or("."), container).await?;
             let first = params["page"].as_u64().unwrap_or_default().min(499) as usize * 150 + 1;
             let last = first + 150;
-            let script = list_entries(true, first, last);
+            let script = list_entries(true, first, last, None);
             let output = host.exec(&path, container, &script, 128 * 1024).await?;
             let folders: Vec<_> = output
                 .split(|&byte| byte == 0)
@@ -307,6 +349,20 @@ pub async fn ssh_pty(
 ) -> Result<String, PtyError> {
     let state = windows.select(&window)?;
     let (host, project) = state.project(params["source_terminal_id"].as_str()).await?;
+    let mut prefix = wincmux_runtime::account_profiles::shell_prefix(&params["account_profiles"])?;
+    let login = match params["profile_login"].as_str() {
+        Some("claude-login") if params["profile_email"].as_str().is_some_and(|email| !email.is_empty()
+            && email.len() <= 254 && email.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.+@-".contains(&b))) => {
+            prefix.push_str(&format!("export WINCMUX_LOGIN_EMAIL='{}'; ",params["profile_email"].as_str().unwrap()));
+            Some(r#"claude auth login --email "$WINCMUX_LOGIN_EMAIL""#)
+        }
+        Some("claude-login") => Some("claude auth login"),
+        Some("codex-login") => Some("codex login --device-auth"),
+        Some("claude-status") => Some("claude auth status"),
+        Some("codex-status") => Some("codex login status"),
+        Some(_) => return Err("Unknown login tool".into()),
+        None => None,
+    };
     let resume_id = params["resume_id"].as_str();
     let resume_picker = params["resume_picker"] == true;
     let launch = Launch::parse(&params["launch"])?;
@@ -329,6 +385,7 @@ pub async fn ssh_pty(
         Some(
             crate::remote_conversations::resolve(
                 state,
+                &prefix,
                 params["launch"].as_str().unwrap_or_default(),
                 id,
             )
@@ -356,6 +413,10 @@ pub async fn ssh_pty(
             }
             return Err("이 작업환경에서 CLI 설치 여부를 확인하지 못했습니다.".into());
         }
+    }
+    if params["watch_profiles"] == true {
+        prefix.push_str(&include_str!("account_foreground.sh").replace("\r\n", "\n"));
+        prefix.push('\n');
     }
     let mut agent = AgentSession::new(launch, cols as u16, rows as u16);
     let hook_token = if matches!(launch, Launch::Claude | Launch::Codex) {
@@ -395,6 +456,8 @@ pub async fn ssh_pty(
                     resume_picker,
                     run_token.as_deref(),
                     run_install.as_deref(),
+                    &prefix,
+                    login,
                 )
             })
             .await
@@ -432,7 +495,15 @@ pub async fn ssh_pty(
     } else {
         agent_command
     };
-    let command = shell(path, container, &agent_command, true)?;
+    let login_cmd = login
+        .map(|cmd| format!("PATH=\"$HOME/.local/bin:$PATH\"; {cmd}; "))
+        .unwrap_or_default();
+    let command = shell(
+        path,
+        container,
+        &format!("{prefix}{login_cmd}{agent_command}"),
+        true,
+    )?;
     let mut channel = timeout(Duration::from_secs(8), handle.channel_open_session())
         .await
         .map_err(|_| "서버가 SSH 터미널 요청에 응답하지 않습니다.")?

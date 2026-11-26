@@ -129,6 +129,10 @@ async function run() {
     await until(() => remote.eval('document.querySelectorAll(".pane-group-root:not([hidden]) .pane").length === 2'), 'split shell');
     assert.equal(await remote.eval('document.querySelectorAll(".pane-group-root:not([hidden]) .pane-split").length'), 1);
     await remote.eval(`document.querySelector('.pane-group-root:not([hidden]) [data-action=movePane]').click()`);
+    assert.equal(await remote.eval('document.querySelectorAll(".pane-move-source").length'), 1);
+    await remote.eval(`document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))`);
+    assert.equal(await remote.eval('document.querySelectorAll(".pane-move-source").length'), 0);
+    await remote.eval(`document.querySelector('.pane-group-root:not([hidden]) [data-action=movePane]').dispatchEvent(new MouseEvent('click',{bubbles:true,shiftKey:true}))`);
     assert.equal(await remote.eval('document.getElementById("moveRemotePaneDialog").open'), true);
     await remote.eval(`document.querySelector('#moveRemotePaneTargets .move-target-row:last-child button').click()`);
     assert.equal(await remote.eval('document.querySelectorAll(".pane-group-root:not([hidden]) .pane").length'), 2);

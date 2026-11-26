@@ -25,7 +25,7 @@ async function run() {
     await ready();
     const ws = await cdp.eval(`rpc('workspace.create',${JSON.stringify({ name: 'Launcher preview', path: temp, backend: 'custom' })})`);
     await cdp.eval(`loadWorkspaces().then(()=>switchWorkspace(${JSON.stringify(ws.workspace.id)}))`);
-    await until(() => cdp.eval('state.paneViews.size>0 && document.querySelectorAll(".launch-profile-card").length===4'), 'default launch cards');
+    await until(() => cdp.eval('state.paneViews.size>0 && document.querySelectorAll(".launch-profile-card[data-profile-id]").length===4'), 'default launch cards');
     const get = () => cdp.eval('window.wincmuxLaunchProfiles.getAll()');
     assert.deepEqual((await get()).items.map(p => p.command), ['claude', 'codex', 'gemini', 'powershell.exe']);
     const artifacts = path.join(root, 'artifacts', 'launch-profiles');
@@ -54,7 +54,7 @@ async function run() {
     let config = await get();
     const custom = config.items.find(p => p.name === '프로젝트 셸');
     assert.ok(custom); assert.equal(config.defaultId, custom.id);
-    assert.equal(await cdp.eval('document.querySelectorAll(".launch-profile-card").length'), 5);
+    assert.equal(await cdp.eval('document.querySelectorAll(".launch-profile-card[data-profile-id]").length'), 5);
     await cdp.eval('window.wincmuxLaunchProfiles.openSettings()');
     await cdp.eval(`([...document.querySelectorAll('.launch-settings-row')].find(b=>b.textContent.includes('프로젝트 셸'))).click()`);
     await fill('나의 프로젝트 셸', command, 'powershell');
@@ -74,7 +74,7 @@ async function run() {
     await cdp.eval('window.__launcherReloadMarker=true');
     await cdp.request('Page.reload');
     await until(()=>cdp.eval('window.__launcherReloadMarker!==true && typeof state!=="undefined" && state.bootstrapReady===true && Boolean(window.wincmuxLaunchProfiles)').catch(()=>false),'new launcher document after reload');
-    await until(() => cdp.eval('document.querySelectorAll(".launch-profile-card").length===4'), 'cards after reload');
+    await until(() => cdp.eval('document.querySelectorAll(".launch-profile-card[data-profile-id]").length===4'), 'cards after reload');
     assert.deepEqual(await get(), saved);
     await cdp.eval(`startSessionForPane(state.selectedPaneId)`);
     assert.equal(await cdp.eval('document.activeElement.dataset.profileId'), custom.id, 'start selects the configured default');

@@ -1,0 +1,39 @@
+.ws-actions .ws-profile-btn { width:auto; padding-inline:6px; }
+.account-dialog { position:fixed; inset:0; margin:auto; min-width:0; max-width:calc(100vw - 16px); box-sizing:border-box; width:min(580px,calc(100vw - 24px)); max-height:calc(100dvh - 32px); overflow:auto; padding:18px; color:#e3eaf3; background:#19212c; border:1px solid #4f6075; border-radius:8px; }
+.account-dialog.account-menu { inset:auto; margin:0; width:min(300px,calc(100vw - 16px)); max-height:min(420px,calc(100dvh - 16px)); }
+.account-menu section button { text-align:left; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding-inline:10px; }
+.account-dialog.account-menu::backdrop { background:transparent; }
+.account-dialog::backdrop { background:#070b12aa; }
+.account-dialog header,.account-dialog nav,.account-row { display:flex; align-items:center; gap:6px; }
+.account-dialog header { justify-content:space-between; }
+.account-dialog section,.account-dialog label { display:grid; grid-template-columns:minmax(0,1fr); min-width:0; gap:8px; }
+.account-dialog form { display:flex; flex-wrap:wrap; gap:8px; }
+.account-dialog form label,.account-dialog form p { flex-basis:100%; }
+.account-dialog p { margin:8px 0; overflow-wrap:anywhere; }
+.account-dialog section > strong {overflow-wrap:anywhere;}
+.account-dialog p:empty { display:none; }
+.account-dialog button,.account-dialog input,.account-dialog select,.account-trigger { min-height:32px; min-width:0; max-width:100%; }
+.account-dialog button,.account-trigger { color:inherit; background:#243041; border:1px solid #425166; border-radius:5px; cursor:pointer; }
+.account-dialog select,.account-dialog input { color:#e3eaf3; background:#121922; padding:4px 8px; border:1px solid #425166; }
+.account-dialog button[aria-pressed=true] { border-color:#90bcfa; color:#b5d3ff; }
+.account-context { color:#b3c1d1; }
+.account-row { flex-wrap:wrap; border-top:1px solid #354254; padding-top:6px; }
+.account-row strong { flex:1 1 92px; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.account-trigger { padding:2px 6px; max-width:140px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.account-launch-pair { display:flex; align-items:stretch; min-width:0; }
+.account-launch-pair > :first-child { flex:1; min-width:0; }
+.account-launch-pair > .account-trigger { flex:0 0 32px; }
+@media(max-width:900px){ .panel-center > .toolbar {flex-wrap:wrap;overflow:visible;} }
+@media(max-width:600px){
+  .top:has(#workspaceContext:not([hidden])) {flex-wrap:wrap; gap:4px; padding:5px 8px;}
+  .top:has(#workspaceContext:not([hidden])) > span:not([id]) {display:none;}
+  .top #workspaceContext:not([hidden]) {order:1; flex:1 1 100%; max-width:none;}
+  .top #workspaceTitle {white-space:nowrap; flex-shrink:0; max-width:110px;}
+  .pane-title:has(.account-trigger:not([hidden])) {flex-basis:170px;}
+  .environment-panes .pane {min-height:195px;}
+  .account-row strong {flex-basis:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;} .account-row {padding:10px 0;gap:6px;} .account-dialog {padding:14px;} }
+@media(max-width:760px){ .terminal-launch { flex-wrap:wrap; } .account-trigger {max-width:100px;} }
+
+
+.account-environment { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:6px; padding-bottom:8px; border-bottom:1px solid #354254; }
+.account-environment p { flex-basis:100%; margin:0; color:#b3c1d1; }

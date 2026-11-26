@@ -405,7 +405,7 @@ mod tests {
     use tokio::net::TcpListener;
     use uuid::Uuid;
 
-    struct Fixture(Arc<AtomicUsize>);
+    struct Fixture(Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<AtomicUsize>);
 
     impl server::Handler for Fixture {
         type Error = russh::Error;
@@ -432,6 +432,10 @@ mod tests {
             reply: server::ChannelOpenHandle,
             _: &mut server::Session,
         ) -> Result<(), Self::Error> {
+            if self.1.fetch_add(1, Ordering::SeqCst) == 0 {
+                reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+                return Ok(());
+            }
             reply.accept().await;
             Ok(())
         }
@@ -443,10 +447,22 @@ mod tests {
             session: &mut server::Session,
         ) -> Result<(), Self::Error> {
             session.channel_success(channel)?;
+            if data == b"hold open" {
+                return Ok(());
+            }
             session.data(channel, data.to_vec())?;
             session.exit_status_request(channel, 0)?;
             session.eof(channel)?;
             session.close(channel)
+        }
+
+        async fn channel_close(
+            &mut self,
+            _: ChannelId,
+            _: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            self.2.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -478,6 +494,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let count = Arc::new(AtomicUsize::new(0));
+        let channel_attempts = Arc::new(AtomicUsize::new(0));
+        let closed_channels = Arc::new(AtomicUsize::new(0));
         let methods = MethodSet::from([MethodKind::Password].as_slice());
         let config = Arc::new(server::Config {
             keys: vec![key],
@@ -486,13 +504,23 @@ mod tests {
             ..Default::default()
         });
         let server_count = count.clone();
+        let server_channel_attempts = channel_attempts.clone();
+        let server_closed_channels = closed_channels.clone();
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
-            server::run_stream(config, socket, Fixture(server_count))
-                .await
-                .unwrap()
-                .await
-                .unwrap();
+            server::run_stream(
+                config,
+                socket,
+                Fixture(
+                    server_count,
+                    server_channel_attempts,
+                    server_closed_channels,
+                ),
+            )
+            .await
+            .unwrap()
+            .await
+            .unwrap();
         });
         let profile = Profile {
             name: "fixture".into(),
@@ -553,6 +581,34 @@ mod tests {
                 b"second channel"
             );
             assert_eq!(count.load(Ordering::SeqCst), 2);
+            assert_eq!(channel_attempts.load(Ordering::SeqCst), 3);
+            let released_before = closed_channels.load(Ordering::SeqCst);
+            let released_timeout = tokio::time::timeout(Duration::from_millis(100), async {
+                let mut channel = auth.handle.channel_open_session().await.unwrap();
+                channel.exec(true, "hold open").await.unwrap();
+                while channel.wait().await.is_some() {}
+            })
+            .await;
+            assert!(released_timeout.is_err());
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            assert_eq!(closed_channels.load(Ordering::SeqCst), released_before);
+            let before_timeout = closed_channels.load(Ordering::SeqCst);
+            let error = crate::ssh_terminal::run_with_timeout(
+                &auth.handle,
+                "hold open".into(),
+                128,
+                Duration::from_millis(150),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("시간이 초과"));
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while closed_channels.load(Ordering::SeqCst) == before_timeout {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("timed-out channel must be closed on the server");
             assert!(root.join("known_hosts").is_file());
         })
         .await

@@ -479,8 +479,7 @@ pub fn scan(roots: &Roots, project: &str, children: bool) -> Value {
 
 type Cache = HashMap<String, (Instant, Value)>;
 static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
-pub fn list(project: &str, children: bool, refresh: bool) -> Value {
-    let roots = Roots::local();
+pub fn list(roots: &Roots, project: &str, children: bool, refresh: bool) -> Value {
     let key = format!("{project}|{children}|{:?}|{:?}", roots.claude, roots.codex);
     let cache = CACHE.get_or_init(Mutex::default);
     if !refresh {
@@ -496,9 +495,15 @@ pub fn list(project: &str, children: bool, refresh: bool) -> Value {
     cache.insert(key, (Instant::now(), value.clone()));
     value
 }
-pub fn resolve(project: &str, children: bool, provider: &str, id: &str) -> Result<Value> {
+pub fn resolve(
+    roots: &Roots,
+    project: &str,
+    children: bool,
+    provider: &str,
+    id: &str,
+) -> Result<Value> {
     let id = uuid(id).ok_or("Invalid conversation identifier")?;
-    let result = list(project, children, true);
+    let result = list(roots, project, children, true);
     let found = result["items"]
         .as_array()
         .and_then(|rows| {

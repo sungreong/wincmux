@@ -1147,17 +1147,33 @@ function applyPanelWidths() {
   appGrid.style.setProperty("--right-panel-width", `${right}px`);
 }
 
+const compactPanelLayout = window.matchMedia("(max-width: 900px)");
+let compactPanel = null;
+compactPanelLayout.addEventListener("change", () => {
+  compactPanel = null;
+  applyPanelVisibility();
+});
+function toggleCompactPanel(side) {
+  if (!compactPanelLayout.matches) return false;
+  compactPanel = compactPanel === side ? null : side;
+  applyPanelVisibility();
+  return true;
+}
+function panelCollapsed(side) {
+  if (compactPanelLayout.matches) return compactPanel !== side;
+  return side === "left" ? state.leftCollapsed : state.rightCollapsed;
+}
 function setToolbarBtnLabel(btn, text) {
   if (!btn) return;
   if (btn.id === "toggleWorkspacePanelBtn") {
     text = "Workspaces";
-    btn.setAttribute("aria-pressed", String(!state.leftCollapsed));
+    btn.setAttribute("aria-pressed", String(!panelCollapsed("left")));
     btn.title = "Toggle workspace panel (Ctrl+B)";
     btn.setAttribute("aria-label", btn.title);
   } else if (btn.id === "toggleNotificationPanelBtn") {
     const count = state.notifications.length;
     text = count ? `Notifications ${count}` : "Notifications";
-    btn.setAttribute("aria-pressed", String(!state.rightCollapsed));
+    btn.setAttribute("aria-pressed", String(!panelCollapsed("right")));
     btn.title = "Toggle notifications panel (Ctrl+Shift+N)";
     btn.setAttribute("aria-label", btn.title);
     const badge = btn.querySelector(".toolbar-count");
@@ -1168,8 +1184,8 @@ function setToolbarBtnLabel(btn, text) {
 }
 
 function applyPanelVisibility() {
-  appGrid.classList.toggle("left-collapsed", state.leftCollapsed);
-  appGrid.classList.toggle("right-collapsed", state.rightCollapsed);
+  appGrid.classList.toggle("left-collapsed", panelCollapsed("left"));
+  appGrid.classList.toggle("right-collapsed", panelCollapsed("right"));
 
   setToolbarBtnLabel(toggleWorkspacePanelBtn, state.leftCollapsed ? "Show Workspaces" : "Hide Workspaces");
   if (toggleNotificationPanelBtn) {
@@ -1652,7 +1668,13 @@ function renderWorkspaceRow(ws, index, unreadByWorkspace, mode) {
     actions.className = "ws-actions";
     actions.id = `ws-actions-${ws.id}`;
     actions.hidden = true;
-    actions.append(editBtn, infoBtn, hookBtn, deleteBtn);
+    const profileBtn = document.createElement("button");
+    profileBtn.type = "button";
+    profileBtn.className = "ws-profile-btn";
+    profileBtn.title = profileBtn.textContent = "기본 프로필";
+    profileBtn.setAttribute("aria-label", ws.name + " 기본 프로필");
+    profileBtn.onclick = event => { event.stopPropagation(); window.wincmuxLocalAccounts.workspace(ws.id); };
+    actions.append(editBtn, infoBtn, hookBtn, profileBtn, deleteBtn);
 
     const actionToggle = document.createElement("button");
     actionToggle.type = "button";
