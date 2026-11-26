@@ -643,7 +643,9 @@ impl Core {
             }
             "account.status" => {
                 let tool = text(&p, "tool")?;
-                if !matches!(tool, "claude" | "codex") { return Err("Unknown profile provider".into()); }
+                if !matches!(tool, "claude" | "codex") {
+                    return Err("Unknown profile provider".into());
+                }
                 let mut probe = crate::terminal::hidden_command("powershell.exe");
                 probe.args([
                     "-NoLogo",
@@ -658,9 +660,12 @@ impl Core {
                         probe.env_remove(*token);
                     }
                     probe.env(key, &path);
-                    if tool == "claude" && key == "CLAUDE_CONFIG_DIR" { claude_profile = Some(path); }
+                    if tool == "claude" && key == "CLAUDE_CONFIG_DIR" {
+                        claude_profile = Some(path);
+                    }
                 }
-                probe.env("WINCMUX_PROBE_TOOL", tool)
+                probe
+                    .env("WINCMUX_PROBE_TOOL", tool)
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::null())
                     .stdin(std::process::Stdio::null());
@@ -668,11 +673,15 @@ impl Core {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
                 loop {
                     if let Some(status) = child.try_wait()? {
-                        if !status.success() { return Err("로그인 상태를 확인하지 못했습니다.".into()); }
+                        if !status.success() {
+                            return Err("로그인 상태를 확인하지 못했습니다.".into());
+                        }
                         let output = child.wait_with_output()?;
                         let result: Value = serde_json::from_slice(&output.stdout)?;
                         if result["authenticated"] == true {
-                            if let Some(dir) = &claude_profile { crate::account_profiles::prepare_claude_session(dir)?; }
+                            if let Some(dir) = &claude_profile {
+                                crate::account_profiles::prepare_claude_session(dir)?;
+                            }
                         }
                         break Ok(result);
                     }

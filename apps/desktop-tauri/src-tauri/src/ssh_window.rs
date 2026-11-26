@@ -474,8 +474,11 @@ pub async fn ssh_workspace(
                 wincmux_runtime::account_profiles::shell_prefix(&params["account_profiles"])?;
             let tool = params["tool"].as_str().unwrap();
             let script = format!("{prefix}export PATH=\"$HOME/.local/bin:$PATH\"; if command -v python3 >/dev/null; then python3 - {tool} <<'WINCMUX_STATUS'\n{}\nWINCMUX_STATUS\nelif {cmd} >/dev/null 2>&1; then echo '{{\"authenticated\":true}}'; else echo '{{\"authenticated\":false}}'; fi", include_str!("account_status.py"));
-            let result = host.exec(&project.path, project.container.as_deref(), &script, 4096).await?;
-            return serde_json::from_slice(&result).map_err(|_| "로그인 상태를 확인하지 못했습니다.".into());
+            let result = host
+                .exec(&project.path, project.container.as_deref(), &script, 4096)
+                .await?;
+            return serde_json::from_slice(&result)
+                .map_err(|_| "로그인 상태를 확인하지 못했습니다.".into());
         }
         "conversation-list" => {
             return crate::remote_conversations::list(

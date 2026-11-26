@@ -351,9 +351,19 @@ pub async fn ssh_pty(
     let (host, project) = state.project(params["source_terminal_id"].as_str()).await?;
     let mut prefix = wincmux_runtime::account_profiles::shell_prefix(&params["account_profiles"])?;
     let login = match params["profile_login"].as_str() {
-        Some("claude-login") if params["profile_email"].as_str().is_some_and(|email| !email.is_empty()
-            && email.len() <= 254 && email.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.+@-".contains(&b))) => {
-            prefix.push_str(&format!("export WINCMUX_LOGIN_EMAIL='{}'; ",params["profile_email"].as_str().unwrap()));
+        Some("claude-login")
+            if params["profile_email"].as_str().is_some_and(|email| {
+                !email.is_empty()
+                    && email.len() <= 254
+                    && email
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_.+@-".contains(&b))
+            }) =>
+        {
+            prefix.push_str(&format!(
+                "export WINCMUX_LOGIN_EMAIL='{}'; ",
+                params["profile_email"].as_str().unwrap()
+            ));
             Some(r#"claude auth login --email "$WINCMUX_LOGIN_EMAIL""#)
         }
         Some("claude-login") => Some("claude auth login"),

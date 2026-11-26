@@ -2,6 +2,10 @@
 
 [README](README.kr.md) · [GitHub Releases](https://github.com/sungreong/wincmux/releases)
 
+## 0.2.154 Windows 릴리스 빌드 수정
+
+- Rust 파일 5개의 서식을 정리해 0.2.153 릴리스에서 Windows 설치 파일 빌드를 막던 포맷 검사 오류를 해결했습니다.
+
 ## 0.2.153 로컬 Claude 등록 계정으로 시작
 
 - 로컬 Windows에서 워크스페이스 기본 계정을 아직 선택하지 않았다면 Claude 버튼과 새 터미널의 `claude` 명령이 등록된 첫 번째 사용 가능 프로필을 사용합니다. 직접 선택한 기본값은 유지합니다.

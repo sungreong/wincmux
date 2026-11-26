@@ -7,7 +7,7 @@ const readline = require('node:readline');
 const { execFile } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 
-let version = '0.2.153';
+let version = '0.2.154';
 try { version = require('../../package.json').version; } catch { /* Bundled resource has no package.json. */ }
 const pipe = process.env.WINCMUX_TAURI_PIPE || '\\\\.\\pipe\\wincmux-tauri-rpc';
 const OBJECT = { type: 'object', additionalProperties: false };

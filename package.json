@@ -1,6 +1,6 @@
 {
   "name": "wincmux",
-  "version": "0.2.153",
+  "version": "0.2.154",
   "private": true,
   "description": "WinCMux Windows terminal workspace powered by Tauri and Rust",
   "scripts": {

@@ -191,7 +191,8 @@ impl Spawned {
                 command.env_remove(*token);
             }
             if *key == "CLAUDE_CONFIG_DIR" {
-                crate::account_profiles::prepare_claude_session(path).map_err(|err| err.to_string())?;
+                crate::account_profiles::prepare_claude_session(path)
+                    .map_err(|err| err.to_string())?;
             }
             command.env(*key, path);
         }

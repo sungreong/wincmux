@@ -2,6 +2,10 @@
 
 [README](README.md) · [GitHub Releases](https://github.com/sungreong/wincmux/releases)
 
+## 0.2.154 — Windows release build fix
+
+- Format five Rust files to resolve the CI lint failure that blocked the 0.2.153 Windows installer build.
+
 ## 0.2.153 Reuse registered local Claude accounts
 
 - On Windows, the Claude launcher and `claude` in a new terminal use the first available registered profile when the workspace has no default. An explicit workspace choice takes precedence.

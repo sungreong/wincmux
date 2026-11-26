@@ -72,7 +72,9 @@ pub fn local(value: &Value) -> Result<Vec<(&'static str, PathBuf)>, String> {
 pub fn prepare_claude_session(dir: &std::path::Path) -> std::io::Result<()> {
     use std::io::ErrorKind;
     static UPDATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    if !dir.join(".credentials.json").is_file() { return Ok(()); }
+    if !dir.join(".credentials.json").is_file() {
+        return Ok(());
+    }
     let _guard = UPDATE.lock().unwrap_or_else(|err| err.into_inner());
     let config = dir.join(".claude.json");
     let original = match fs::read(&config) {
@@ -86,17 +88,25 @@ pub fn prepare_claude_session(dir: &std::path::Path) -> std::io::Result<()> {
     }
     state["hasCompletedOnboarding"] = Value::Bool(true);
     let temp = dir.join(format!(".onboarding-{}.tmp", uuid::Uuid::new_v4()));
-    let mut output = fs::OpenOptions::new().create_new(true).write(true).open(&temp)?;
+    let mut output = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp)?;
     let result = (|| {
         serde_json::to_writer_pretty(&mut output, &state)?;
         output.sync_all()?;
         drop(output);
         if fs::read(&config)? != original {
-            return Err(std::io::Error::new(ErrorKind::WouldBlock, "Claude 설정을 갱신 중입니다. 다시 실행하세요."));
+            return Err(std::io::Error::new(
+                ErrorKind::WouldBlock,
+                "Claude 설정을 갱신 중입니다. 다시 실행하세요.",
+            ));
         }
         fs::rename(&temp, &config)
     })();
-    if result.is_err() { let _ = fs::remove_file(temp); }
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
     result
 }
 
