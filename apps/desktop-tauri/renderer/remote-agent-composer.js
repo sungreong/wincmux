@@ -65,8 +65,9 @@ window.wincmuxRemoteComposer = (request, button, provider = "codex") => {
     if (commandMode) due.hidden = true;
   };
   commands.panel.addEventListener("change", syncMode);
+  commands.panel.addEventListener("agentmodechange", () => { report(""); syncMode(); });
   syncMode();
-  actions.append(insert, toggle, due, submit);
+  actions.append(commands.modeBar, insert, toggle, due, submit);
   panel.append(queue, input, commands.panel, message, actions);
   panel.addEventListener("submit", event => event.preventDefault());
   input.addEventListener("keydown", event => {

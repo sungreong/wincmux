@@ -50,6 +50,28 @@ function controls(view) {
   return { row, mode:row.children[1], saved:row.children[2], add:row.children[3], remove:row.children[4], description:panel.children.find(item => item.className === 'agent-command-description') };
 }
 
+test('switches an invalid CLI draft to a message without opening the command list', async () => {
+  const { view, calls, buttons } = composer({ codex:{ mode:'command', items:[] } });
+  const input = view.panel.children.find(item => item.tag === 'textarea');
+  const actions = view.panel.children.find(item => item.className === 'remote-composer-actions');
+  const modes = actions.children.find(item => item.className === 'agent-input-modes');
+  const submit = buttons.find(item => item.label === '전송 / 대기열');
+  const status = view.panel.children.find(item => item.className === 'remote-composer-message');
+  input.value = '안녕';
+  await submit.click();
+  assert.equal(calls.length, 0);
+  assert.equal(status.hidden, false);
+  modes.children[0].dispatchEvent({ type:'click' });
+  assert.equal(status.hidden, true);
+  assert.equal(modes.children[0]['aria-pressed'], 'true');
+  assert.equal(submit.textContent, '전송 / 대기열');
+  assert.equal(input.value, '안녕');
+  assert.equal(calls.length, 0);
+  await submit.click();
+  assert.equal(calls[0][0], 'agent-submit');
+  assert.equal(calls[0][1].text, '안녕');
+});
+
 test('saved slash command goes directly to ready agent in command mode', async () => {
   const { view, calls, buttons, entries } = composer();
   const input = view.panel.children.find(item => item.tag === 'textarea');

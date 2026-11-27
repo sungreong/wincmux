@@ -1,0 +1,22 @@
+.agent-command-compact .agent-command-provider { order: -2; align-self: center; }
+.agent-command-compact .agent-picker-trigger { order: -1; }
+.agent-command-picker {
+  width: min(38rem, calc(100vw - 32px)); max-height: calc(100vh - 32px);
+  box-sizing: border-box; margin: auto; padding: 16px; border: 1px solid #52647b;
+  border-radius: 8px; color: #e6edf5; background: #19212c;
+}
+.agent-command-picker[open] { display: flex; flex-direction: column; gap: 10px; }
+.agent-command-picker::backdrop { background: #0009; }
+.agent-command-picker h2, .pane-composer .agent-command-picker h2 { display: block; font-size: 16px; margin: 0; }
+.agent-command-picker input[type="search"] { width: 100%; box-sizing: border-box; padding: 8px; }
+.agent-picker-results { overflow-y: auto; min-height: 0; max-height: min(55vh, 480px); }
+.agent-picker-results h3 { font-size: 12px; color: #acbfd6; margin: 12px 0 4px; }
+.agent-picker-results button {
+  display: grid; width: 100%; grid-template-columns: 3ch minmax(0,1fr); gap: 3px 8px;
+  padding: 7px; text-align: left; white-space: normal; overflow-wrap: anywhere;
+  background: #202a38; border: 1px solid #394657; color: #ebf1fa;
+}
+.agent-picker-results button:hover, .agent-picker-results button:focus-visible { background: #304156; }
+.agent-picker-results button small { color: #acbfd6; text-align: right; }
+.agent-picker-results button span { grid-column: 2; font-size: 12px; color: #c1cddd; }
+.agent-command-picker > button { align-self: flex-end; }

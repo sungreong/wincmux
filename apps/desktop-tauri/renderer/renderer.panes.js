@@ -2609,7 +2609,7 @@ function bindTerminalPrompt() {
   const composer = $("terminalComposer");
   const form = $("terminalPromptForm");
   const editor = $("terminalPromptText");
-  const commandInput = window.wincmuxAgentCommandInput.create(editor, "codex", false, true);
+  const commandInput = window.wincmuxAgentCommandInput.create(editor, "codex", true, true, document.body);
   window.wincmuxAgentCommandInput.setWorkspaceLoader(async (provider) => {
     const workspace = selectedWorkspace();
     if (!workspace?.path) return { title: "", items: [] };
@@ -2624,6 +2624,7 @@ function bindTerminalPrompt() {
   const insert = $("terminalPromptInsert");
   const followup = $("terminalPromptFollowup");
   const send = $("terminalPromptSend");
+  send.parentElement.prepend(commandInput.modeBar);
   const insertSingleLine = $("terminalPromptSingleLine");
   const multilineHint = $("terminalPromptMultilineHint");
   let target = null;
@@ -2656,7 +2657,7 @@ function bindTerminalPrompt() {
     const launched = program.includes("claude") ? "claude" : program.includes("codex") ? "codex" : "";
     const hooked = agent?.hook?.active ? agent.hook.provider : "";
     const attached = agent?.agent_process_attached ? agent.agent_process_provider : "";
-    const provider = [hooked, attached, launched].find(value => ["claude", "codex"].includes(value));
+    const provider = [attached, hooked, launched].find(value => ["claude", "codex"].includes(value));
     if (view) window.wincmuxLocalAccounts?.sync(view,provider);
     const beforeMode = commandInput.mode();
     commandInput.setActive(Boolean(view?.sessionId && !view.detached && provider));
@@ -2671,6 +2672,7 @@ function bindTerminalPrompt() {
     const changed = target?.view !== view || target?.sessionId !== view?.sessionId;
     const moved = composer.parentElement !== card || form.parentElement !== composer;
     if (changed) {
+      commandInput.resetTarget();
       target = view ? { view, sessionId: view.sessionId } : null;
       editor.value = view?.promptDraft ?? "";
       showError("");
@@ -2741,6 +2743,7 @@ function bindTerminalPrompt() {
     updateInsertActions();
   });
   commandInput.panel.addEventListener("change", updateInsertActions);
+  commandInput.panel.addEventListener("agentmodechange", () => { showError(""); updateInsertActions(); });
   editor.addEventListener("keydown", (ev) => {
     if (ev.ctrlKey && !ev.altKey && !ev.shiftKey && ev.key === "Enter"
       && !ev.isComposing && ev.keyCode !== 229 && !composing) {
@@ -3106,6 +3109,8 @@ function createPaneLeaf(node, hosts) {
   actions.className = "pane-actions";
   const actionsPrimary = document.createElement("div");
   actionsPrimary.className = "pane-actions-primary";
+  actions.append(window.wincmuxTerminalCopy.button(() => state.paneViews.get(paneId)?.term,
+    text => window.wincmux.clipboardWrite(text), terminalSelectionText));
   const actionsOverflowWrap = document.createElement("div");
   actionsOverflowWrap.className = "pane-overflow";
   const actionsOverflowBtn = document.createElement("button");
@@ -3429,6 +3434,7 @@ function createPaneView(paneId, host) {
     }
   }
   term.open(host);
+  window.wincmuxTerminalCopy.bindDragCopy(term, text => window.wincmux.clipboardWrite(text), terminalSelectionText);
   const search = window.wincmuxTerminalSearch(term, host);
   window.wincmuxTerminalRenderer.register(term, (message) => setStatus(String(message), true));
 
@@ -3573,13 +3579,13 @@ function createPaneView(paneId, host) {
       }
     }
 
-    if (ev.ctrlKey && key === "c" && (ev.shiftKey || term.hasSelection())) {
+    if (ev.ctrlKey && !ev.altKey && (ev.code === "KeyC" || key === "c") && (ev.shiftKey || term.hasSelection())) {
       ev.preventDefault();
       writeTerminalClipboard(terminalSelectionText(term));
       return false;
     }
 
-    if (ev.ctrlKey && key === "v") {
+    if (ev.ctrlKey && !ev.altKey && (ev.code === "KeyV" || key === "v")) {
       ev.preventDefault();
       if (typeof globalThis.handlePaneClipboardPaste === "function") {
         void globalThis.handlePaneClipboardPaste(paneId).catch((err) => setStatus(String(err?.message ?? err), true));

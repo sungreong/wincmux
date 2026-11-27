@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="./ssh-workspace.css">
   <link rel="stylesheet" href="./viewer-extension-filter.css">
   <link rel="stylesheet" href="./viewer-folder-picker.css">
+  <link rel="stylesheet" href="./agent-command-picker.css">
   <link rel="stylesheet" href="./viewer-search-options.css">
   <link rel="stylesheet" href="./viewer-loading.css">
   <link rel="stylesheet" href="./terminal-search.css">
@@ -138,7 +139,7 @@
           <input id="searchContent" aria-label="파일 내용 검색" placeholder="내용 검색 · 선택 사항">
           <div id="searchOptionsPanel" class="viewer-search-options" hidden>
             <label class="search-scope"><input id="searchScope" type="checkbox" disabled> 선택 폴더에서 검색</label>
-            <label class="search-scope"><input id="searchIncludeExcluded" type="checkbox"> 빌드·의존성 폴더 포함</label>
+            <button type="button" id="viewerRules" aria-haspopup="dialog">폴더 제외·숨김 설정</button>
             <button id="searchExtensions" class="viewer-extension-trigger" type="button" aria-haspopup="dialog">확장자 · 전체</button>
             <details id="searchFilters"><summary id="searchFilterSummary">제외 필터</summary><label for="searchExclude">검색에서 제외할 폴더·파일 패턴</label><input id="searchExclude" aria-label="제외할 폴더와 파일 패턴" placeholder="cache/, reports/**, *.min.js" spellcheck="false"><small>쉼표로 구분 · 폴더는 / 또는 /**로 끝내세요. 경로는 현재 폴더 기준입니다.</small></details>
           </div>
@@ -146,7 +147,7 @@
         <div class="viewer-columns">
           <aside class="viewer-sidebar" aria-label="파일 목록">
             <header class="viewer-list-header"><strong id="remoteListTitle">파일 목록</strong></header>
-            <div class="viewer-saved-controls"><button id="savedFolderMode" class="viewer-folder-trigger" type="button" aria-haspopup="dialog">전체 폴더 ▾</button><button id="saveCurrentFolder" type="button" title="선택한 폴더 등록" disabled>등록</button></div><div id="savedFolderFeedback" class="viewer-saved-feedback" role="status" hidden></div>
+            <div class="viewer-saved-controls"><button id="savedFolderMode" class="viewer-folder-trigger" type="button" aria-haspopup="dialog">전체 폴더 ▾</button><button id="saveCurrentFolder" type="button" title="선택한 폴더 등록" disabled>등록</button><button id="manageHiddenFolders" type="button" aria-haspopup="dialog" title="숨긴 항목 관리">숨긴 항목</button></div><div id="savedFolderFeedback" class="viewer-saved-feedback" role="status" hidden></div>
             <div id="location"></div>
             <div id="entries" role="tree" aria-label="파일 트리"></div>
             <header id="paging" hidden>
@@ -307,10 +308,13 @@
 <script src="./agent-command-manager.js"></script>
 <script src="./terminal-renderer.js"></script>
 <script src="./terminal-search.js"></script>
+<script src="./terminal-copy.js"></script>
 <script src="./remote-terminal-clipboard.js"></script>
 <script src="./pane-icons.js"></script>
 <script src="./viewer-media.js"></script>
 <script src="./viewer-extension-filter.js"></script>
+<script src="./viewer-folder-rules.js"></script>
+<script src="./viewer-hidden-folders.js"></script>
 <script src="./viewer-folder-picker.js"></script>
 <script src="./viewer-markdown.js"></script>
 <script src="./vendor/highlight/languages-list.js"></script>

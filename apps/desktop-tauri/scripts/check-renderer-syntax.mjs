@@ -23,6 +23,7 @@ const orderedFiles = [
   "viewer-media.js",
   "viewer-extension-filter.js",
   "viewer-folder-picker.js",
+  "viewer-hidden-folders.js",
   "viewer-markdown.js",
   "viewer-highlighter.js",
   "renderer.workspace-viewer.js",

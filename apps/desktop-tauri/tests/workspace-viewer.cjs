@@ -153,6 +153,106 @@ async function run() {
       } finally { main.style.removeProperty('--viewer-nav-width'); }
     })()`), 'folder commands, search, and tree stay in separate rows at narrow widths');
     console.log('viewer test: file tree');
+    const filterLayout = await cdp.eval(`(() => {
+      const main=document.getElementById('viewerMain');
+      const original=main.style.getPropertyValue('--viewer-nav-width');
+      document.getElementById('viewerSearchOptionsToggle').click();
+      const panel=document.getElementById('viewerSearchOptionsPanel');
+      const trigger=document.getElementById('viewerRules');
+      const widths=[190,255].map(width=>{
+        main.style.setProperty('--viewer-nav-width',width+'px');
+        const bounds=trigger.getBoundingClientRect();
+        const title=trigger.querySelector('.rule-trigger-title').getBoundingClientRect();
+        return [...trigger.querySelectorAll('.rule-trigger-counts > span')].every(node=>{
+          const rect=node.getBoundingClientRect();
+          return rect.top>=title.bottom && rect.right<=bounds.right && rect.left>=bounds.left;
+        }) && panel.scrollWidth<=panel.clientWidth+1;
+      });
+      const {x,y,width,height}=panel.getBoundingClientRect();
+      return {widths,original,clip:{x,y,width,height,scale:2}};
+    })()`);
+    assert.deepEqual(filterLayout.widths,[true,true]);
+    if (process.env.WINCMUX_VIEWER_SCREENSHOT_DIR) {
+      const shot=await cdp.request('Page.captureScreenshot',{format:'png',clip:filterLayout.clip});
+      fs.writeFileSync(path.join(process.env.WINCMUX_VIEWER_SCREENSHOT_DIR,'filter-panel.png'),Buffer.from(shot.data,'base64'));
+    }
+    await cdp.eval(`document.getElementById('viewerSearchOptionsToggle').click();document.getElementById('viewerMain').style.setProperty('--viewer-nav-width',${JSON.stringify(filterLayout.original)})`);
+    const openFolderRules = () => cdp.eval("document.getElementById('viewerRules').click()");
+    await openFolderRules();
+    await cdp.eval("document.querySelector('.viewer-rule-dialog [data-bulk]').click();document.querySelector('.viewer-rule-dialog [data-cancel]').click()");
+    assert(await cdp.eval(`!!document.querySelector('#viewerTree button[title="target"]')`));
+    await openFolderRules();
+    await cdp.eval("document.querySelector('.viewer-rule-dialog [data-bulk]').click()");
+    await capture('folder-exclusion-settings.png');
+    await cdp.eval("document.querySelector('.viewer-rule-dialog [data-apply]').click()");
+    await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="src"]') && !document.querySelector('#viewerTree button[title="target"]')`), 'bulk hides generated folders');
+    await openFolderRules();
+    await cdp.eval("document.querySelector('.viewer-rule-dialog [data-reset]').click();document.querySelector('.viewer-rule-dialog [data-apply]').click()");
+    await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="target"]')`), 'restore list defaults');
+    const menuAction = (path, label) => cdp.eval(`(() => {
+      const row=[...document.querySelectorAll('#viewerTree button')].find(row => row.title===${JSON.stringify(path)});
+      row.dispatchEvent(new MouseEvent('contextmenu', {bubbles:true,clientX:80,clientY:180}));
+      const action=[...document.querySelectorAll('.viewer-hide-menu button')].find(button=>button.textContent===${JSON.stringify(label)});
+      if (!action || action.disabled) throw Error('Menu action unavailable');
+      action.click();
+    })()`);
+    await cdp.eval("window.__originalWrite=window.wincmux.clipboardWrite;window.wincmux.clipboardWrite=async text=>{window.__copiedText=text}");
+    try {
+      await menuAction('note.txt','내용 복사');
+      await until(() => cdp.eval('window.__copiedText') .then(text => text === fs.readFileSync(path.join(project,'note.txt'),'utf8')), 'copy whole file without selecting it');
+      await menuAction('note.txt','절대 경로 복사');
+      assert.equal(await cdp.eval('window.__copiedText'), path.join(project,'note.txt'));
+      await menuAction('note.txt','상대 경로 복사');
+      assert.equal(await cdp.eval('window.__copiedText'), 'note.txt');
+    } finally {
+      await cdp.eval('window.wincmux.clipboardWrite=window.__originalWrite');
+    }
+    await menuAction('note.txt','파일 복사');
+    await menuAction('src','여기에 붙여넣기');
+    await until(() => fs.existsSync(path.join(project,'src','note.txt')), 'context menu paste into clicked folder');
+    assert.deepEqual(fs.readFileSync(path.join(project,'src','note.txt')), fs.readFileSync(path.join(project,'note.txt')));
+    fs.unlinkSync(path.join(project,'src','note.txt'));
+    await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="src"]')`), 'tree after context paste');
+    await cdp.eval(`document.querySelector('#viewerTree button[title="src"]').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 64, clientY: 150 }))`);
+    assert(await cdp.eval("document.querySelector('.viewer-hide-menu').matches(':popover-open')"));
+    if (process.env.WINCMUX_VIEWER_SCREENSHOT_DIR) {
+      const shot = await cdp.request('Page.captureScreenshot', {format:'png', fromSurface:true});
+      fs.writeFileSync(path.join(process.env.WINCMUX_VIEWER_SCREENSHOT_DIR, 'viewer-context-menu.png'), Buffer.from(shot.data,'base64'));
+    }
+    await cdp.eval("[...document.querySelectorAll('.viewer-hide-menu button')].find(button=>button.textContent==='폴더 숨기기').click()");
+    await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="note.txt"]') && !document.querySelector('#viewerTree button[title="src"]')`), 'folder hidden');
+    await cdp.eval("document.getElementById('manageHiddenFolders').click()");
+    assert.equal(await cdp.eval("document.querySelector('.viewer-hidden-dialog[open] .viewer-hidden-list span').textContent"), 'src');
+    await cdp.eval(`(() => {
+      const dialog=document.querySelector('.viewer-hidden-dialog:not(.viewer-rule-dialog)');
+      dialog.close();
+      const key=Object.keys(localStorage).find(key=>key.startsWith('wincmux.viewer.hiddenFolders.') && !key.endsWith('.rules'));
+      const extra=Array.from({length:10},(_,i)=>'nested/example'+(i+1));
+      localStorage.setItem(key,JSON.stringify(['src',...extra]));
+      document.getElementById('manageHiddenFolders').click();
+    })()`);
+    await capture('hidden-folders.png');
+    assert.deepEqual(await cdp.eval(`(() => {
+      const dialog=document.querySelector('.viewer-hidden-dialog:not(.viewer-rule-dialog)');
+      const [prev,next,close]=dialog.querySelectorAll('.viewer-folder-actions button');
+      const names=()=>[...dialog.querySelectorAll('.viewer-hidden-list span')].map(node=>node.textContent);
+      const first=names();
+      next.click();
+      const last=names();
+      dialog.querySelector('.viewer-hidden-list button').click();
+      const clamped=names().length===10 && next.disabled;
+      const sort=dialog.querySelector('select');
+      sort.value='desc';sort.dispatchEvent(new Event('change'));
+      const descending=names()[0];
+      const search=dialog.querySelector('input');
+      const query=value=>{search.value=value;search.dispatchEvent(new Event('input'));return names()};
+      const numeric=query('2.');
+      const path=query('NESTED/EXAMPLE10');
+      const empty=query('unused').length===0;
+      close.click();
+      return {first:first[0],count:first.length,last,clamped,descending,numeric,path,empty};
+    })()`), {first:'example1',count:10,last:['src'],clamped:true,descending:'example10',numeric:['example2'],path:['example10'],empty:true});
+    await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="src"]')`), 'folder restored');
     const previewLoading = await cdp.eval(`(()=>{window.__viewerOriginalAction=window.wincmux.viewerAction;window.wincmux.viewerAction=async(...args)=>{if(args[0]==='viewer-preview')await new Promise(resolve=>setTimeout(resolve,900));return window.__viewerOriginalAction(...args)};document.querySelector('#viewerTree button[title="note.txt"]').click();return !!document.querySelector('#viewerPreview .viewer-preview-loading')&&document.getElementById('viewerPreview').getAttribute('aria-busy')==='true'})()`);
     assert.equal(previewLoading, true, 'file click immediately shows preview loading');
     if (process.env.WINCMUX_VIEWER_SCREENSHOT_DIR) {
@@ -190,8 +290,9 @@ async function run() {
       const screenshot = await cdp.request('Page.captureScreenshot', { format: 'png', fromSurface: true });
       fs.writeFileSync(path.join(process.env.WINCMUX_VIEWER_SCREENSHOT_DIR, 'search-viewer.png'), Buffer.from(screenshot.data, 'base64'));
     }
-    await cdp.eval(`(()=>{const check=document.getElementById('viewerSearchIncludeExcluded');check.checked=true;check.dispatchEvent(new Event('change'))})()`);
+    await cdp.eval(`(()=>{document.getElementById('viewerRules').click();const dialog=document.querySelector('.viewer-rule-dialog');const row=[...dialog.querySelectorAll('tbody tr')].find(row=>row.cells[0].textContent.includes('target'));row.querySelector('input').click();row.querySelectorAll('input')[1].click();dialog.querySelector('[data-apply]').click()})()`);
     await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="target/test_hidden.py"]')`), 'include excluded folders');
+    await cdp.eval(`document.getElementById('viewerRules').click();document.querySelector('.viewer-rule-dialog input[aria-label^="target · 목록 숨김"]').click();document.querySelector('.viewer-rule-dialog [data-apply]').click()`);
     await cdp.eval('document.getElementById("viewerSearchClear").click()');
     await until(() => cdp.eval(`!!document.querySelector('#viewerTree button[title="note.txt"]')`), 'tree after clear');
     const folderLoading = await cdp.eval(`(()=>{window.__viewerOriginalAction=window.wincmux.viewerAction;window.wincmux.viewerAction=async(...args)=>{if(args[0]==='viewer-list')await new Promise(resolve=>setTimeout(resolve,900));return window.__viewerOriginalAction(...args)};document.querySelector('#viewerTree button[title="src"]').click();return !!document.querySelector('#viewerTree .viewer-tree-loading')&&!!document.querySelector('#viewerTree [aria-busy=true]')})()`);

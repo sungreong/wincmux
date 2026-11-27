@@ -2,6 +2,12 @@
 
 [README](README.md) · [GitHub Releases](https://github.com/sungreong/wincmux/releases)
 
+## 0.2.155 — Terminal copy and file viewer improvements
+
+- Drag to select text in local, SSH, or Docker terminals and click Copy. The selection remains available when new output arrives.
+- Search and restore hidden workspace items. Configure common folders separately for tree visibility and search exclusion.
+- Search commands and skills for the active agent and switch directly to a regular message in the composer.
+
 ## 0.2.154 — Windows release build fix
 
 - Format five Rust files to resolve the CI lint failure that blocked the 0.2.153 Windows installer build.

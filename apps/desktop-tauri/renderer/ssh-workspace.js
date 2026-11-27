@@ -50,6 +50,37 @@
       return Array.isArray(value) ? value.filter(path => typeof path === "string" && path && !path.startsWith("/") && !path.split("/").some(part => part === ".." || part === ".")).slice(0, 20) : [];
     } catch { return []; }
   };
+  let copiedFile;
+  const hiddenFolders = window.wincmuxHiddenFolders({
+    trigger: el("manageHiddenFolders"), getKey: () => JSON.stringify([localDocker ? "docker" : "ssh", savedFolderKey()]),
+    absolutePath: path => path ? remoteAbsolutePath(path) : target.path,
+    writeText: text => invoke("desktop_action", { action: "clipboard-write", params: { text } }),
+    readFile: relative => viewerCall("preview", { relative, maxPreviewBytes: maxPreviewBytes() }),
+    download: async relative => {
+      const result = await viewerCall("download", { relative });
+      if (!result.cancelled) status(`다운로드 완료: ${result.path}`);
+    },
+    canPaste: () => copiedFile?.key === savedFolderKey(),
+    copyFile: path => {
+      copiedFile = { key: savedFolderKey(), path };
+      status("대상 폴더를 선택한 뒤 '여기에 붙여넣기'를 누르세요.");
+    },
+    pasteFile: async destination => {
+      const key = savedFolderKey();
+      if (copiedFile?.key !== key) return;
+      const result = await viewerCall("copy-file", { relative: copiedFile.path, destination });
+      if (key === savedFolderKey()) {
+        status(`복사 완료: ${result.name}`);
+        await list();
+      }
+    },
+    notify: text => status(text), onError: error => alert(String(error?.message ?? error)),
+    onChange: () => {
+      if (!hiddenFolders.visible()(folder)) folder = "";
+      page = 0;
+      void viewerTask(list);
+    }
+  });
   let folderPicker;
   const savedMode = () => folderPicker.mode() === "saved";
   const saveFolders = paths => localStorage.setItem(savedFolderKey(), JSON.stringify(paths));
@@ -1190,7 +1221,9 @@
     const close = paneAction("closePane", "pane 닫기", () => record.dispose().catch(alert), "Ctrl+Alt+Q");
     close.classList.add("pane-close");
     splitRight.disabled = splitDown.disabled = true;
-    actions.append(sizeDown, sizeUp, splitRight, splitDown, movePane, find, hide, showPaneFiles, close);
+    const writeClipboard = text => invoke("desktop_action", {action:"clipboard-write", params:{text}});
+    const copy = window.wincmuxTerminalCopy.button(() => term, writeClipboard);
+    actions.append(copy, sizeDown, sizeUp, splitRight, splitDown, movePane, find, hide, showPaneFiles, close);
     label.append(title, actions);
     pane.append(label, surface);
     if (composer) pane.append(composer.panel);
@@ -1224,6 +1257,7 @@
     term.loadAddon(fit);
     links.attach(term);
     term.open(surface);
+    window.wincmuxTerminalCopy.bindDragCopy(term, writeClipboard);
     search = window.wincmuxTerminalSearch(term, surface);
     window.wincmuxTerminalRenderer.register(term, alert);
     fitTerminal();
@@ -1549,7 +1583,7 @@
     el("remoteListTitle").textContent = view === "git" ? "Git 목록" : "파일 목록";
   }
   function updateSearchOptionsLabel() {
-    const count = Number(el("searchScope").checked) + Number(el("searchIncludeExcluded").checked)
+    const count = Number(el("searchScope").checked)
       + Number(extensionFilter.values().length > 0) + Number(Boolean(el("searchExclude").value.trim()));
     el("searchOptionsToggle").textContent = count ? `필터 ${count}` : "필터";
     el("searchOptionsToggle").classList.toggle("is-filtered", count > 0);
@@ -1562,6 +1596,7 @@
     else {
       const root = button(target.path, () => { folder = ""; updateViewerScope(); });
       root.title = target.path;
+      hiddenFolders.bind(root, "");
       location.append(root);
       let relative = "";
       for (const segment of folder.split("/").filter(Boolean)) {
@@ -1575,11 +1610,13 @@
     if (savedMode() || !scope) el("searchScope").checked = false;
     el("search").title = scope ? `${target.path.replace(/\/$/, "")}/${folder}` : target.path;
     const registered = savedFolders().includes(folder);
+    el("manageHiddenFolders").hidden = view !== "files";
     const saveButton = el("saveCurrentFolder");
     saveButton.disabled = view !== "files" || !folder || registered || savedFolders().length >= 20;
     saveButton.textContent = registered ? "✓ 등록됨" : "등록";
     saveButton.title = registered ? `${folder} 등록됨` : "선택한 폴더 등록";
     folderPicker.refresh();
+    hiddenFolders.refresh();
     for (const node of el("entries").querySelectorAll(".viewer-tree-name[data-scope]")) {
       node.classList.toggle("scope-active", node.dataset.scope === folder);
       node.classList.toggle("is-saved", savedFolders().includes(node.dataset.scope));
@@ -1604,13 +1641,15 @@
     finally { loading.remove(); container.removeAttribute("aria-busy"); }
     if (token !== request) return;
     if (childPage === 0) container.replaceChildren();
-    if (!result.items.length && childPage === 0) {
+    const visible = hiddenFolders.visible();
+    const items = result.items.filter(item => visible(item.relative, item.kind === "directory"));
+    if (!items.length && childPage === 0 && !result.hasMore) {
       const empty = document.createElement("div");
       empty.className = "viewer-tree-empty";
       empty.textContent = "폴더가 비어 있습니다.";
       container.append(empty);
     }
-    for (const item of result.items) {
+    for (const item of items) {
       const row = document.createElement("div");
       row.className = "viewer-tree-row";
       row.style.setProperty("--tree-depth", Math.min(depth, 12));
@@ -1627,6 +1666,7 @@
       name.setAttribute("role", "treeitem");
       name.setAttribute("aria-level", String(depth + 1));
       if (item.kind === "directory") {
+        hiddenFolders.bind(row, item.relative);
         name.dataset.scope = item.relative;
         name.classList.toggle("is-saved", savedFolders().includes(item.relative));
         name.classList.toggle("scope-active", folder === item.relative);
@@ -1672,6 +1712,7 @@
         }
       } else {
         const spacer = document.createElement("span");
+        if (item.kind === "file") hiddenFolders.bind(row, item.relative, false);
         spacer.className = "viewer-tree-spacer";
         name.dataset.relative = item.relative;
         name.disabled = item.kind !== "file";
@@ -1714,8 +1755,13 @@
         catch (error) { if (token === request) showListError(el("entries"), error); }
         return;
       }
-      const paths = folderPicker.activePaths();
-      if (!paths.length) { el("entries").textContent = "등록한 폴더가 없습니다. 전체 폴더에서 폴더를 선택해 등록하세요."; return; }
+      const selected = folderPicker.activePaths();
+      const visible = hiddenFolders.visible();
+      const paths = selected.filter(path => visible(path));
+      if (!paths.length) {
+        el("entries").textContent = selected.length ? "선택한 폴더가 모두 숨겨져 있습니다." : "등록한 폴더가 없습니다. 전체 폴더에서 폴더를 선택해 등록하세요.";
+        return;
+      }
       for (const path of paths) {
         if (token !== request) return;
         const group = document.createElement("div");
@@ -1752,6 +1798,7 @@
         });
         toggle.className = "viewer-saved-toggle";
         toggle.textContent = `${children.hidden ? "▸" : "▾"} 📁 ${path}`;
+        hiddenFolders.bind(toggle, path);
         toggle.title = path;
         toggle.setAttribute("aria-expanded", String(!children.hidden));
         const remove = button("해제", () => {
@@ -1810,7 +1857,7 @@
     status(`${folder} 폴더를 등록했습니다.`);
   });
   el("searchScope").addEventListener("change", () => { updateViewerScope(); updateSearchOptionsLabel(); });
-  el("searchIncludeExcluded").addEventListener("change", updateSearchOptionsLabel);
+
   el("searchOptionsToggle").addEventListener("click", () => {
     const panel = el("searchOptionsPanel");
     panel.hidden = !panel.hidden;
@@ -1842,9 +1889,10 @@
       const items = [];
       let truncated = false;
       for (const scope of roots) {
-        const result = await viewerCall(nameMode ? "search-names" : "search", { query: nameMode ? pattern : contentQuery, pattern, relative: scope, exclude: el("searchExclude").value, includeExcluded: el("searchIncludeExcluded").checked, extensions: extensionFilter.values() });
+        const result = await viewerCall(nameMode ? "search-names" : "search", { query: nameMode ? pattern : contentQuery, pattern, relative: scope, exclude: el("searchExclude").value, includeExcluded: true, folderRules: hiddenFolders.searchRules(), extensions: extensionFilter.values() });
         if (token !== previewRequest) return;
-        items.push(...result.items);
+        const visible = hiddenFolders.visible(true);
+        items.push(...result.items.filter(item => view !== "files" || visible(item.relative, false)));
         truncated ||= result.truncated;
         if (items.length >= 150) { truncated = true; break; }
       }
@@ -1860,6 +1908,7 @@
       if (!items.length) el("preview").textContent = "일치하는 파일이 없습니다.";
       for (const hit of items.slice(0, 150)) {
         const row = button("", () => loadPreview(hit.relative, undefined, hit.line));
+        if (view === "files") hiddenFolders.bind(row, hit.relative, false);
         row.className = "viewer-search-hit";
         row.title = nameMode ? hit.relative : `${hit.relative}:${hit.line} · ${hit.text}`;
         const path = document.createElement("strong");

@@ -14,6 +14,20 @@
       return Array.isArray(value) ? value.filter(path => typeof path === "string" && path && !path.startsWith("/") && !path.split("/").some(part => part === "." || part === "..")).slice(0, 20) : [];
     } catch { return []; }
   };
+  const hiddenFolders = window.wincmuxHiddenFolders({
+    trigger: $v("manageHiddenFolders"), getKey: () => JSON.stringify(["local", viewer.workspaceId]),
+    absolutePath: path => fullPath(path), writeText: text => window.wincmux.clipboardWrite(text),
+    readFile: path => call("viewer-preview", { relativePath: path, maxPreviewBytes: maxPreviewBytes() }),
+    download: downloadFile, copyFile, pasteFile, canPaste: () => Boolean(viewer.copied),
+    notify: text => message(text), onError: error => showError(error),
+    onChange: () => {
+      const visible = hiddenFolders.visible();
+      if (!visible(viewer.focusFolder) || !visible(viewer.searchFolder) || !visible(viewer.selected?.relativePath, viewer.selected?.directory)) {
+        ++viewer.generation;
+        focusFolder(visible(viewer.focusFolder) ? viewer.focusFolder : "");
+      } else void loadFiles();
+    }
+  });
   let folderPicker;
   const savedMode = () => folderPicker.mode() === "saved";
   const saveFolders = paths => localStorage.setItem(savedFolderKey(), JSON.stringify(paths));
@@ -67,7 +81,7 @@
     updateSearchOptionsLabel();
   };
   function updateSearchOptionsLabel() {
-    const count = Number($v("viewerSearchScope").checked) + Number($v("viewerSearchIncludeExcluded").checked)
+    const count = Number($v("viewerSearchScope").checked)
       + Number(extensionFilter.values().length > 0) + Number(Boolean($v("viewerSearchExclude").value.trim()));
     $v("viewerSearchOptionsToggle").textContent = count ? `필터 ${count}` : "필터";
     $v("viewerSearchOptionsToggle").classList.toggle("is-filtered", count > 0);
@@ -85,6 +99,7 @@
     $v("viewerSaveFolder").textContent = registered ? "✓ 등록됨" : "등록";
     $v("viewerSaveFolder").title = registered ? `${path} 등록됨` : "선택한 폴더 등록";
     folderPicker.refresh();
+    hiddenFolders.refresh();
   };
   const focusFolder = (path) => {
     viewer.focusFolder = path;
@@ -109,6 +124,21 @@
   };
   const fullPath = (rel) => rel ? `${workspace().path.replace(/[\\/]$/, "")}\\${rel.replaceAll("/", "\\")}` : workspace().path;
   const showError = (error) => message(String(error?.message ?? error));
+
+  function copyFile(path) {
+    viewer.copied = path;
+    message("대상 폴더를 선택한 뒤 '여기에 붙여넣기'를 누르세요.");
+    updateActions();
+  }
+  async function pasteFile(path) {
+    const result = await call("viewer-copy", { sourcePath: viewer.copied, destinationPath: path });
+    message(`복사 완료: ${result.relativePath}`);
+    if (viewer.tab === "files") await loadFiles();
+  }
+  async function downloadFile(path) {
+    const result = await call("viewer-download", { relativePath: path });
+    if (!result.cancelled) message(`다운로드 완료: ${result.path}`);
+  }
 
   function renderDiff(body, value) {
     if (!value) { body.textContent = "표시할 diff가 없습니다."; return; }
@@ -404,6 +434,7 @@
     button.title = item.relativePath;
     item.element = button;
     button.viewerItem = item;
+    hiddenFolders.bind(button, item.relativePath, Boolean(item.directory));
     if (!item.directory) {
       button.addEventListener("click", () => select(item));
       return button;
@@ -429,7 +460,9 @@
         const result = await call("viewer-list", { relativePath: item.relativePath, extensions: extensionFilter.values() });
         if (viewer.workspaceId !== wsId) return;
         children.replaceChildren();
+        const visible = hiddenFolders.visible();
         for (const child of result.items) {
+          if (!visible(child.relativePath, child.directory)) continue;
           children.append(makeRow(child, depth + 1));
           if (child.directory && expanded().has(child.relativePath)) await child.expand();
         }
@@ -469,7 +502,7 @@
         scopePath: $v("viewerSearchScope").checked ? (viewer.focusFolder || viewer.searchFolder) : "",
         scopePaths: savedMode() ? folderPicker.activePaths() : undefined,
         exclude: $v("viewerSearchExclude").value,
-        includeExcluded: $v("viewerSearchIncludeExcluded").checked,
+        includeExcluded: true, folderRules: hiddenFolders.searchRules(),
         extensions: extensionFilter.values()
       });
       if (viewer.workspaceId !== wsId || viewer.tab !== "files" || !viewer.open || viewer.listGeneration !== listGeneration) return;
@@ -477,9 +510,11 @@
       tree.setAttribute("role", "list");
       const summary = document.createElement("div");
       summary.className = "workspace-viewer-note";
-      summary.textContent = `${result.items.length}개 파일 · ${result.scanned.toLocaleString()}개 항목 확인${result.skippedLarge ? ` · 큰 파일 ${result.skippedLarge}개 제외` : ""}${result.truncated ? " · 결과 일부만 표시" : ""}`;
+      const visible = hiddenFolders.visible(true);
+      const hits = result.items.filter(item => visible(item.relativePath, false));
+      summary.textContent = `${hits.length}개 파일 · ${result.scanned.toLocaleString()}개 항목 확인${result.skippedLarge ? ` · 큰 파일 ${result.skippedLarge}개 제외` : ""}${result.truncated ? " · 결과 일부만 표시" : ""}`;
       tree.append(summary);
-      for (const item of result.items) {
+      for (const item of hits) {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "workspace-viewer-row workspace-viewer-search-result";
@@ -511,6 +546,7 @@
           button.append(snippet);
         }
         button.viewerItem = { ...item, element: button };
+        hiddenFolders.bind(button, item.relativePath, false);
         button.addEventListener("click", () => select(button.viewerItem));
         tree.append(button);
       }
@@ -543,8 +579,11 @@
       if (viewer.workspaceId !== wsId || !viewer.open || viewer.tab !== "files" || viewer.listGeneration !== listGeneration) return;
       tree.removeAttribute("aria-busy");
       tree.replaceChildren();
+      const visible = hiddenFolders.visible();
       if (savedMode()) {
-        for (const path of folderPicker.activePaths()) {
+        const paths = folderPicker.activePaths().filter(path => visible(path));
+        if (!paths.length) tree.textContent = "선택한 폴더가 모두 숨겨져 있습니다.";
+        for (const path of paths) {
           if (viewer.listGeneration !== listGeneration) return;
           const group = document.createElement("div");
           group.className = "workspace-viewer-saved-group";
@@ -557,6 +596,7 @@
           const toggle = document.createElement("button");
           toggle.type = "button";
           toggle.className = "viewer-saved-toggle";
+          hiddenFolders.bind(toggle, path);
           toggle.title = path;
           toggle.setAttribute("aria-expanded", String(!children.hidden));
           const updateToggle = () => { toggle.textContent = `${children.hidden ? "▸" : "▾"} 📁 ${path}`; };
@@ -591,6 +631,7 @@
             if (viewer.listGeneration !== listGeneration) return;
             children.replaceChildren();
             for (const item of result.items) {
+              if (!visible(item.relativePath, item.directory)) continue;
               children.append(makeRow(item, 1));
               if (item.directory && expanded().has(item.relativePath)) await item.expand();
             }
@@ -604,11 +645,13 @@
       const rootRow = document.createElement("button");
       rootRow.className = "workspace-viewer-row workspace-viewer-root";
       rootRow.textContent = `▾ 📁 ${root.name}`;
+      hiddenFolders.bind(rootRow, folder);
       root.element = rootRow;
       rootRow.viewerItem = root;
       rootRow.addEventListener("click", () => select({ ...root, element: rootRow }));
       tree.append(rootRow);
       for (const item of result.items) {
+        if (!visible(item.relativePath, item.directory)) continue;
         tree.append(makeRow(item, 1));
         if (item.directory && expanded().has(item.relativePath)) await item.expand();
       }
@@ -980,10 +1023,7 @@
       if (viewer.open && viewer.tab === "files") void loadFiles();
       $v("viewerSearchInput").focus();
     });
-    $v("viewerSearchIncludeExcluded").addEventListener("change", () => {
-      updateSearchOptionsLabel();
-      if (viewer.open && viewer.tab === "files" && ($v("viewerSearchInput").value.trim() || $v("viewerContentInput").value.trim())) void loadFiles();
-    });
+
     for (const type of ["keydown", "keyup", "paste", "cut", "copy"]) {
       for (const id of ["viewerSearchInput", "viewerContentInput", "viewerSearchExclude", "viewerFindInput", "viewerLanguageSearch"]) $v(id).addEventListener(type, (event) => event.stopPropagation());
     }
@@ -993,20 +1033,13 @@
       if (!item || item.directory) return;
       $v("viewerDownload").disabled = true;
       try {
-        const result = await call("viewer-download", { relativePath: item.relativePath });
-        if (!result.cancelled) message(`다운로드 완료: ${result.path}`);
+        await downloadFile(item.relativePath);
       } catch (error) { showError(error); }
       finally { updateActions(); }
     });
     $v("viewerCopyContent").addEventListener("click", () => window.wincmux.clipboardWrite(viewer.previewText).then(() => message("내용을 복사했습니다.")).catch(showError));
-    $v("viewerCopyFile").addEventListener("click", () => { viewer.copied = viewer.selected.relativePath; message("대상 폴더를 선택한 뒤 '여기에 붙여넣기'를 누르세요."); updateActions(); });
-    $v("viewerPasteFile").addEventListener("click", async () => {
-      try {
-        const result = await call("viewer-copy", { sourcePath: viewer.copied, destinationPath: viewer.selected.relativePath });
-        message(`복사 완료: ${result.relativePath}`);
-        if (viewer.tab === "files") await loadFiles();
-      } catch (error) { showError(error); }
-    });
+    $v("viewerCopyFile").addEventListener("click", () => copyFile(viewer.selected.relativePath));
+    $v("viewerPasteFile").addEventListener("click", () => pasteFile(viewer.selected.relativePath).catch(showError));
     window.wincmuxViewerPanel.bindViewerWidth($v("workspaceContent"), $v("workspaceViewer"), $v("workspaceViewerResize"), () => globalThis.fitAllPanes?.());
     const innerSplitter = $v("viewerInnerResize");
     innerSplitter.addEventListener("pointerdown", (event) => {

@@ -17,7 +17,68 @@ const MAX_IMAGE: u64 = 8 * 1024 * 1024;
 const MAX_CONFIGURED_PREVIEW: u64 = 64 * 1024 * 1024;
 const MAX_SEARCH_VISITS: usize = 100_000;
 const MAX_SEARCH_RESULTS: usize = 500;
+pub(crate) const DEFAULT_SEARCH_EXCLUDED_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".parcel-cache",
+    ".cache",
+    ".gradle",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "coverage",
+];
 const MAX_CONTENT_FILE: u64 = 256 * 1024;
+
+#[derive(serde::Deserialize)]
+pub(crate) struct FolderRule {
+    pub kind: String,
+    pub value: String,
+}
+
+pub(crate) fn folder_rules(params: &Value) -> std::result::Result<Vec<FolderRule>, String> {
+    let Some(raw) = params.get("folderRules") else {
+        return Ok(Vec::new());
+    };
+    let rules: Vec<FolderRule> =
+        serde_json::from_value(raw.clone()).map_err(|_| "Invalid folder rules")?;
+    for rule in &rules {
+        if !matches!(rule.kind.as_str(), "name" | "path")
+            || rule.value.chars().any(char::is_control)
+            || rule
+                .value
+                .split('/')
+                .any(|part| matches!(part, "" | "." | ".."))
+            || (rule.kind == "name" && rule.value.contains('/'))
+        {
+            return Err("Invalid folder rule".into());
+        }
+    }
+    Ok(rules)
+}
+
+pub(crate) fn excluded_scope(path: &str, rules: &[FolderRule]) -> bool {
+    rules.iter().any(|rule| {
+        if rule.kind == "name" {
+            path.split('/')
+                .any(|part| part.eq_ignore_ascii_case(&rule.value))
+        } else {
+            path == rule.value
+                || path
+                    .strip_prefix(&rule.value)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        }
+    })
+}
 const MAX_CONTENT_TOTAL: u64 = 20 * 1024 * 1024;
 
 struct SearchExclude {
@@ -208,6 +269,7 @@ fn search(root: &Path, p: &Value) -> Result<Value> {
         require_literal_leading_dot: false,
     };
     let include_excluded = p["includeExcluded"] == true;
+    let rules = folder_rules(p)?;
     let exclude = search_excludes(p["exclude"].as_str().unwrap_or(""))?;
     let extensions = selected_extensions(p)?;
     let canonical_root = root.canonicalize()?;
@@ -221,6 +283,9 @@ fn search(root: &Path, p: &Value) -> Result<Value> {
     };
     let mut scopes = Vec::new();
     for path in scope_paths {
+        if excluded_scope(path, &rules) {
+            continue;
+        }
         let scope = inside(root, path)?;
         if !scope.is_dir() {
             return Err("search scope is not a folder".into());
@@ -263,6 +328,19 @@ fn search(root: &Path, p: &Value) -> Result<Value> {
                 Err(_) => continue,
             };
             let name = entry.file_name().to_string_lossy().into_owned();
+            if !rules.is_empty() {
+                let path = entry.path();
+                let relative = path
+                    .strip_prefix(&canonical_root)?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if rules.iter().any(|rule| match rule.kind.as_str() {
+                    "name" => ty.is_dir() && name.eq_ignore_ascii_case(&rule.value),
+                    _ => relative == rule.value,
+                }) {
+                    continue;
+                }
+            }
             if ty.is_dir() {
                 let scoped_path = entry
                     .path()
@@ -273,16 +351,7 @@ fn search(root: &Path, p: &Value) -> Result<Value> {
                     continue;
                 }
                 if !include_excluded
-                    && [
-                        ".git",
-                        "node_modules",
-                        "target",
-                        ".venv",
-                        "venv",
-                        "dist",
-                        "build",
-                    ]
-                    .contains(&name.to_ascii_lowercase().as_str())
+                    && DEFAULT_SEARCH_EXCLUDED_DIRS.contains(&name.to_ascii_lowercase().as_str())
                 {
                     continue;
                 }
@@ -721,13 +790,20 @@ mod tests {
         fs::write(root.join("outside/test_other.py"), "alpha")?;
         fs::write(root.join("src/other.txt"), "other")?;
         fs::write(root.join("target/test_hidden.py"), "hidden")?;
+        fs::create_dir_all(root.join("src/node_modules/.next"))?;
+        fs::create_dir_all(root.join("src/__pycache__"))?;
+        fs::write(
+            root.join("src/node_modules/.next/test_dependency.py"),
+            "alpha",
+        )?;
+        fs::write(root.join("src/__pycache__/test_cached.py"), "alpha")?;
         let found = search(&root, &json!({"pattern":"**/test_*.py"}))?;
         assert_eq!(found["items"].as_array().unwrap().len(), 3);
         let all = search(
             &root,
             &json!({"pattern":"test_*.py", "includeExcluded":true}),
         )?;
-        assert_eq!(all["items"].as_array().unwrap().len(), 4);
+        assert_eq!(all["items"].as_array().unwrap().len(), 6);
         let selected = search(
             &root,
             &json!({"scopePaths":["src","docs"], "pattern":"test_*.py", "contentQuery":"alpha"}),

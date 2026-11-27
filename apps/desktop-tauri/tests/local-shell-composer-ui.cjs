@@ -49,15 +49,69 @@ async function run() {
       const shown=provider=>{
         state.agentStates.set(${JSON.stringify(sid)}, { session_id:${JSON.stringify(sid)}, source:'hook', hook:{active:true,provider} });
         syncLocalShellComposers();
-        return {visible:!command.hidden,provider:command.querySelector('.agent-command-row select').value};
+        return command.querySelector('.agent-command-provider').textContent;
       };
       const claude=shown('claude');
+      const modes=document.querySelector('#terminalComposer .agent-input-modes');
+      modes.querySelector('[value=command]').click();
+      command.querySelector('.agent-picker-trigger').click();
+      const modal=document.querySelector('.agent-command-picker:modal');
+      const search=modal.querySelector('input');
+      const scoped=modal.textContent.includes('/compact') && !modal.textContent.includes('/goal');
+      search.value='compact';
+      search.dispatchEvent(new Event('input'));
+      const hits=modal.querySelectorAll('.agent-picker-results button');
+      search.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+      const picked={scoped,hits:hits.length,closed:!modal.open,text:document.getElementById('terminalPromptText').value};
       const codex=shown('codex');
+      const input=document.getElementById('terminalPromptText');
+      const send=document.getElementById('terminalPromptSend');
+      input.value='안녕';
+      input.dispatchEvent(new Event('input',{bubbles:true}));
+      modes.querySelector('[value=command]').click();
+      send.click();
+      const error=document.getElementById('terminalPromptError');
+      const failed=!error.hidden;
+      modes.querySelector('[value=message]').click();
+      const recovered=failed && error.hidden && command.hidden && !input.readOnly && !input.disabled && input.value==='안녕'
+        && document.activeElement===input && modes.getBoundingClientRect().width>0
+        && modes.querySelector('[value=message]').getAttribute('aria-pressed')==='true';
+      return {claude,codex,picked,recovered};
+    })()`);
+    assert.deepEqual(agentControls, {claude:'Claude Code',codex:'Codex',picked:{scoped:true,hits:1,closed:true,text:'/compact'},recovered:true});
+    const retained = await cdp.eval(`(() => {
+      const sid=${JSON.stringify(sid)};
+      const snapshot={session_id:sid, revision:100, source:'pattern', state:'idle', hook:{active:false}};
+      state.agentStates.delete(sid);
+      applyAgentState({...snapshot,agent_process_attached:true,agent_process_provider:'codex'});
+      renderAgentPaneStates();
+      document.querySelector('#terminalComposer .agent-input-modes button[value=command]').click();
+      document.querySelector('#terminalComposer .agent-picker-trigger').click();
+      const modal=document.querySelector('.agent-command-picker:modal');
+      const search=modal.querySelector('input');
+      search.value='goal';
+      search.dispatchEvent(new Event('input'));
+      applyAgentState({...snapshot,revision:101});
+      renderAgentPaneStates();
+      const afterStatus=modal.matches(':modal');
+      paneApi.renderPaneSurface(true);
+      const afterLayout=modal.matches(':modal') && search.value==='goal';
+      applyAgentState({...snapshot,revision:102,agent_process_attached:false,agent_process_provider:''});
+      renderAgentPaneStates();
+      return {afterStatus,afterLayout,closedOnExit:!modal.open};
+    })()`);
+    assert.deepEqual(retained,{afterStatus:true,afterLayout:true,closedOnExit:true});
+    if (process.env.WINCMUX_COMPOSER_SCREENSHOT) {
+      await cdp.eval(`state.agentStates.set(${JSON.stringify(sid)}, {source:'hook',hook:{active:true,provider:'codex'}});syncLocalShellComposers();document.querySelector('#terminalComposer .agent-input-modes button[value=command]').click();document.querySelector('#terminalComposer .agent-picker-trigger').click()`);
+      const shot = await cdp.request('Page.captureScreenshot', { format:'png', fromSurface:true });
+      fs.writeFileSync(process.env.WINCMUX_COMPOSER_SCREENSHOT, Buffer.from(shot.data, 'base64'));
+    }
+    assert.equal(await cdp.eval(`(() => {
       state.agentStates.set(${JSON.stringify(sid)}, { session_id:${JSON.stringify(sid)}, source:'none', hook:{active:false,provider:'codex'} });
       syncLocalShellComposers();
-      return {shellHidden:command.hidden,claude,codex};
-    })()`);
-    assert.deepEqual(agentControls, {shellHidden:true,claude:{visible:true,provider:'claude'},codex:{visible:true,provider:'codex'}});
+      return document.querySelector('#terminalComposer .agent-command-tools').hidden
+        && document.querySelector('#terminalComposer .agent-input-modes').hidden;
+    })()`), true);
     console.log('Local shell composer: IME guarded; Korean command reached PowerShell; input cleared.');
   } finally {
     if (cdp) { await cdp.eval("rpc('runtime.shutdown_all',{confirmed:true})").catch(() => {}); cdp.close(); }

@@ -5,3 +5,6 @@
 .terminal-search button { min-width: 25px; padding: 3px 5px; border: 1px solid #4c607c; border-radius: 4px; background: #243449; color: #e6ecf5; cursor: pointer; }
 .terminal-search label { display: flex; align-items: center; gap: 2px; white-space: nowrap; }
 .terminal-search label input { margin: 0; }
+.terminal-copy-button { flex: none; min-width: 32px; padding: 3px 6px; border: 1px solid var(--border-default,#40516a); border-radius: 4px; color: var(--text-primary,#edf2f8); background: var(--surface-input,#18212e); white-space: nowrap; cursor: pointer; }
+.terminal-selection-copy { position: fixed; inset: auto; margin: 0; padding: 5px 12px; border: 1px solid #7896ba; border-radius: 5px; background: #25354a; color: #edf4ff; box-shadow: 0 3px 12px #0006; font: 12px system-ui,sans-serif; cursor: pointer; }
+.terminal-copy-notice { position: absolute; z-index: 8; right: 8px; bottom: 8px; max-width: calc(100% - 16px); box-sizing: border-box; padding: 6px 9px; border: 1px solid #526b91; border-radius: 5px; background: #18212e; color: #e9f0fa; font: 12px/1.45 system-ui,sans-serif; pointer-events: none; }

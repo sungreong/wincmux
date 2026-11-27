@@ -77,7 +77,64 @@ pub async fn action(state: &SshWindow, action: &str, params: &Value) -> Result<V
         )
     };
     let safe_path = format!("base=$(pwd -P) && item=$(readlink -f -- {}) && case \"$item\" in \"$base\"|\"${{base%/}}\"/*) ;; *) exit 19;; esac && ", quote(if item.is_empty() { "." } else { item }));
+    let mut rule_prune = String::new();
+    if matches!(action, "search" | "search-names") {
+        let rules = crate::workspace_viewer::folder_rules(params)?;
+        if crate::workspace_viewer::excluded_scope(item, &rules) {
+            return Ok(json!({"items":[], "truncated":false}));
+        }
+        let literal = |s: &str| {
+            quote(
+                &s.replace('\\', "\\\\")
+                    .replace('*', "\\*")
+                    .replace('?', "\\?")
+                    .replace('[', "\\["),
+            )
+        };
+        let mut tests = Vec::new();
+        for rule in rules {
+            if rule.kind == "name" {
+                tests.push(format!("\\( -type d -iname {} \\)", literal(&rule.value)));
+            } else if let Some(path) = if item.is_empty() {
+                Some(rule.value.as_str())
+            } else {
+                rule.value
+                    .strip_prefix(item)
+                    .and_then(|rest| rest.strip_prefix('/'))
+            } {
+                tests.push(format!("-path {}", literal(&format!("./{path}"))));
+            }
+        }
+        if !tests.is_empty() {
+            rule_prune = format!("\\( {} \\) -prune -o ", tests.join(" -o "));
+        }
+    }
     let script = match action {
+        "copy-file" => {
+            let destination = params["destination"].as_str().ok_or("대상 폴더를 선택하세요.")?;
+            if item.is_empty() || item.chars().any(char::is_control) || destination.len() > 4096
+                || destination.starts_with('/') || destination.chars().any(char::is_control)
+                || destination.split('/').any(|part| matches!(part, "." | ".."))
+            {
+                return Err("원격 폴더 안의 경로를 선택하세요.".into());
+            }
+            let dest = quote(if destination.is_empty() { "." } else { destination });
+            format!(r#"{safe_path} test -f "$item" && dest=$(readlink -f -- {dest}) && test -d "$dest" && case "$dest" in "$base"|"${{base%/}}"/*) ;; *) exit 19;; esac || exit 19
+name=${{item##*/}}
+tmp=$(mktemp "$dest/.wincmux-copy.XXXXXXXX") || exit 1
+trap 'rm -f -- "$tmp"' EXIT
+cp -p -- "$item" "$tmp" || exit 1
+stem=${{name%.*}}; ext=${{name#"$stem"}}
+if [ -z "$stem" ]; then stem=$name; ext=''; fi
+out=$name; i=1
+while ! ln -T -- "$tmp" "$dest/$out" 2>/dev/null; do
+  [ -e "$dest/$out" ] || [ -L "$dest/$out" ] || exit 1
+  [ "$i" -le 9999 ] || exit 1
+  if [ "$i" -eq 1 ]; then out="$stem (copy)$ext"; else out="$stem (copy $i)$ext"; fi
+  i=$((i+1))
+done
+printf '%s' "$out""#)
+        }
         "agent-skills" => {
             let provider = params["provider"].as_str().ok_or("에이전트를 선택하세요.")?;
             let roots = match provider {
@@ -98,7 +155,7 @@ pub async fn action(state: &SshWindow, action: &str, params: &Value) -> Result<V
             let dir_checks = dirs.join(" -o ");
             let file_checks = if files.is_empty() { String::new() } else { format!(" \\( {} \\)", files.join(" -a ")) };
             let name_check = name_filter(params["pattern"].as_str().unwrap_or(""))?;
-            format!("{safe_path} cd \"$item\" && find . -type d \\( {dir_checks} \\) -prune -o -type f{file_checks}{extension_find}{name_check} -size -257k -exec grep -FIHinZ -m 6 -- {} {{}} + | cut -c1-1600 | head -n 151", quote(query))
+            format!("{safe_path} cd \"$item\" && find . {rule_prune}-type d \\( {dir_checks} \\) -prune -o -type f{file_checks}{extension_find}{name_check} -size -257k -exec grep -FIHinZ -m 6 -- {} {{}} + | cut -c1-1600 | head -n 151", quote(query))
         }
         "search-names" => {
             let query = params["query"].as_str().unwrap_or("").trim();
@@ -108,7 +165,7 @@ pub async fn action(state: &SshWindow, action: &str, params: &Value) -> Result<V
             let (dirs, files) = search_excludes(params["exclude"].as_str().unwrap_or(""), params["includeExcluded"] == true)?;
             let file_checks = if files.is_empty() { String::new() } else { format!(" \\( {} \\)", files.join(" -a ")) };
             let name_check = name_filter(query)?;
-            format!("{safe_path} cd \"$item\" && find . -type d \\( {} \\) -prune -o -type f{file_checks}{extension_find}{name_check} -print0 | head -c {}", dirs.join(" -o "), PREVIEW)
+            format!("{safe_path} cd \"$item\" && find . {rule_prune}-type d \\( {} \\) -prune -o -type f{file_checks}{extension_find}{name_check} -print0 | head -c {}", dirs.join(" -o "), PREVIEW)
         }
         "git-status" => format!(
             "git rev-parse --show-prefix && git -c core.quotepath=false status --porcelain=v1 -z --no-renames --untracked-files=all -- . | sed -z -n '{first},{last}p;{last}q'"
@@ -139,6 +196,7 @@ pub async fn action(state: &SshWindow, action: &str, params: &Value) -> Result<V
     )
     .await?;
     match action {
+        "copy-file" => Ok(json!({"name":String::from_utf8_lossy(&bytes)})),
         "agent-skills" => {
             let provider = params["provider"].as_str().unwrap_or("");
             let items: Vec<_> = bytes.split(|&byte| byte == 0).collect::<Vec<_>>().chunks_exact(2)
@@ -336,22 +394,15 @@ fn search_excludes(
     if raw.len() > 1200 {
         return Err("제외 패턴은 1200자 이하로 입력하세요.".into());
     }
-    let mut dirs = if include_excluded {
-        Vec::new()
+    let defaults: &[&str] = if include_excluded {
+        &[]
     } else {
-        vec![
-            ".git",
-            "node_modules",
-            "target",
-            ".venv",
-            "venv",
-            "dist",
-            "build",
-        ]
-    }
-    .iter()
-    .map(|name| format!("-name {}", quote(name)))
-    .collect::<Vec<_>>();
+        crate::workspace_viewer::DEFAULT_SEARCH_EXCLUDED_DIRS
+    };
+    let mut dirs: Vec<_> = defaults
+        .iter()
+        .map(|name| format!("-iname {}", quote(name)))
+        .collect();
     if dirs.is_empty() {
         dirs.push("-name '__wincmux_never__'".into());
     }
@@ -455,6 +506,10 @@ mod tests {
         let (folders, files) =
             search_excludes("cache/, reports/**, *.min.js, assets/*.map", false).unwrap();
         assert!(folders.iter().any(|value| value == "-name 'cache'"));
+        assert!(folders.iter().any(|value| value == "-iname 'node_modules'"));
+        let (included, _) = search_excludes("cache/", true).unwrap();
+        assert!(!included.iter().any(|value| value.contains("node_modules")));
+        assert!(included.iter().any(|value| value == "-name 'cache'"));
         assert!(folders.iter().any(|value| value == "-path './reports'"));
         assert!(files.iter().any(|value| value == "! -name '*.min.js'"));
         assert!(files

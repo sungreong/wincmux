@@ -1495,7 +1495,12 @@ const AGENT_LABELS = {
 function applyAgentState(row) {
   if (!row?.session_id) return;
   const old = state.agentStates.get(row.session_id);
-  if (!old || row.revision >= old.revision) state.agentStates.set(row.session_id, row);
+  if (old && row.revision < old.revision) return;
+  // Detector events omit process presence. Only a process probe can clear it.
+  if (old && "agent_process_attached" in old && !("agent_process_attached" in row)) {
+    row = { ...row, agent_process_attached: old.agent_process_attached, agent_process_provider: old.agent_process_provider };
+  }
+  state.agentStates.set(row.session_id, row);
 }
 
 function renderAgentPaneStates() {

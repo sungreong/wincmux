@@ -1,7 +1,7 @@
 .viewer-folder-trigger { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
-.viewer-folder-dialog { width: min(470px, calc(100vw - 32px)); max-height: calc(100vh - 32px); margin: auto; padding: 18px; color: #e9f0fa; background: #18212e; border: 1px solid #526b91; border-radius: 10px; box-shadow: 0 18px 48px #0009; }
-.viewer-folder-dialog::backdrop { background: #000a; }
-.viewer-folder-dialog h2 { margin: 0 0 7px; font-size: 17px; }
+.viewer-folder-dialog, .viewer-hidden-dialog { width: min(470px, calc(100vw - 32px)); max-height: calc(100vh - 32px); margin: auto; padding: 18px; color: #e9f0fa; background: #18212e; border: 1px solid #526b91; border-radius: 10px; box-shadow: 0 18px 48px #0009; }
+.viewer-folder-dialog::backdrop, .viewer-hidden-dialog::backdrop { background: #000a; }
+.viewer-folder-dialog h2, .viewer-hidden-dialog h2 { margin: 0 0 7px; font-size: 17px; }
 .viewer-folder-dialog p { margin: 0 0 14px; color: #b9c7dc; font-size: 12px; }
 .viewer-folder-dialog > label { display: flex; align-items: center; gap: 7px; min-height: 31px; color: #e9f0fa; cursor: pointer; }
 .viewer-folder-dialog input[type="radio"], .viewer-folder-dialog input[type="checkbox"] { display: inline-block; flex: none; width: 16px; height: 16px; min-height: 0; margin: 0; padding: 0; }
@@ -14,3 +14,28 @@
 .viewer-folder-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 9px; }
 .viewer-folder-actions button { min-width: 58px; padding: 6px 9px; color: #e9f0fa; background: #202c3b; border: 1px solid #526b91; border-radius: 5px; }
 .viewer-folder-actions button:last-child { background: #294f7a; }
+.viewer-hide-menu { position: fixed; inset: auto; margin: 0; padding: 4px; background: #18212e; border: 1px solid #526b91; border-radius: 5px; }
+.viewer-hide-menu button, .viewer-hidden-list button { padding: 5px 9px; color: #e9f0fa; background: #202c3b; border: 1px solid #526b91; border-radius: 4px; white-space: nowrap; }
+.viewer-hidden-list { max-height: 50vh; overflow: auto; }
+.viewer-hidden-filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.viewer-hidden-filters input, .viewer-hidden-filters select { min-width: 0; padding: 6px; color: #e9f0fa; background: #202c3b; border: 1px solid #526b91; border-radius: 4px; }
+.viewer-hidden-filters input { flex: 1 1 150px; }
+.viewer-hidden-list > div { display: grid; grid-template-columns: minmax(3ch, auto) minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 4px 0; }
+.viewer-hidden-list small { display: block; color: #afbed1; overflow-wrap: anywhere; }
+.viewer-hidden-list > div > small { text-align: right; font-variant-numeric: tabular-nums; }
+.viewer-hidden-dialog .viewer-folder-actions { justify-content: flex-start; flex-wrap: wrap; align-items: center; }
+.viewer-hidden-dialog .viewer-folder-actions button:last-child { margin-left: auto; }
+.viewer-hidden-list span { overflow-wrap: anywhere; min-width: 0; }
+.viewer-hide-menu:popover-open { display: grid; gap: 2px; min-width: 150px; max-height: 90vh; overflow-y: auto; }
+.viewer-hide-menu button { text-align: start; }
+.viewer-rule-dialog { width: min(540px, calc(100vw - 32px)); }
+.viewer-rule-dialog [data-workspace] { overflow-wrap: anywhere; }
+.viewer-rule-dialog .rule-scroll { max-height: 45vh; overflow: auto; }
+.viewer-rule-dialog table { width: 100%; border-collapse: collapse; }
+.viewer-rule-dialog th { position: sticky; top: 0; background: #202c3b; padding: 6px; }
+.viewer-rule-dialog td { text-align: center; border-bottom: 1px solid #394657; padding: 4px; }
+.viewer-rule-dialog td:first-child { text-align: left; overflow-wrap: anywhere; }
+.viewer-rule-dialog td small { display: block; color: #afbed1; }
+.viewer-rule-dialog .rule-bulk, .viewer-rule-dialog form { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0; }
+.viewer-rule-dialog input[type=search] { width: 100%; }
+.viewer-rule-dialog input[type=checkbox] { width: 16px; height: 16px; vertical-align: middle; }

@@ -338,6 +338,10 @@ async function benchmark(executable, screenshots) {
         term.textarea.dispatchEvent(native);
         const shortcut=copied===link;
         copied=undefined;
+        const koreanCopy=new KeyboardEvent("keydown",{key:"ㅊ",code:"KeyC",ctrlKey:true,bubbles:true,cancelable:true});
+        term.textarea.dispatchEvent(koreanCopy);
+        const layoutCopy=koreanCopy.defaultPrevented && copied===link;
+        copied=undefined;
         handleContextAction({action:"copy"});
         const context=copied===link;
         term.clearSelection();
@@ -351,16 +355,100 @@ async function benchmark(executable, screenshots) {
         term.select(0,buffer.baseY+buffer.cursorY-2,term.cols+4);
         const separate=term.getSelection();
         handleContextAction({action:"copy"});
-        return { shortcut, context, native:native.clipboardData.getData("text/plain")===link,
+        let pastedPane;
+        const paste=window.handlePaneClipboardPaste;
+        const koreanPaste=new KeyboardEvent("keydown",{key:"ㅍ",code:"KeyV",ctrlKey:true,bubbles:true,cancelable:true});
+        try {
+          window.handlePaneClipboardPaste=async pane=>{ pastedPane=pane; };
+          term.textarea.dispatchEvent(koreanPaste);
+        } finally { window.handlePaneClipboardPaste=paste; }
+        const layoutPaste=koreanPaste.defaultPrevented && pastedPane===state.selectedPaneId;
+        const separatePreserved=separate.includes("\\n") && copied===separate;
+        const copyBtn=state.paneCards.get(state.selectedPaneId).querySelector('.terminal-copy-button');
+        copied=undefined; copyBtn.click(); await Promise.resolve();
+        const selectionButton=copied===separate;
+        term.clearSelection(); copied=undefined; copyBtn.click(); await Promise.resolve();
+        const screenButton=copied?.includes("https://example.test/a") && !!term.element.querySelector('.terminal-copy-notice');
+        await new Promise(resolve=>term.write("\\x1b[?1000h",resolve));
+        term.element.dispatchEvent(new PointerEvent("pointerdown",{button:0,clientX:10,clientY:10}));
+        term.element.dispatchEvent(new PointerEvent("pointerup",{button:0,clientX:70,clientY:10}));
+        const dragHint=term.element.querySelector('.terminal-copy-notice')?.textContent.includes('Shift');
+        await new Promise(resolve=>term.write("\\x1b[?1000l",resolve));
+        return { shortcut, layoutCopy, layoutPaste, context, native:native.clipboardData.getData("text/plain")===link,
           rawHasNewlines:raw.includes("\\n"), cancelled:key.defaultPrevented,
-          plain:plainPreserved, separate:separate.includes("\\n") && copied===separate };
+          plain:plainPreserved, separate:separatePreserved, selectionButton, screenButton, dragHint };
       } finally {
         window.wincmux.clipboardWrite=write;
         term.clearSelection();
       }
     })()`);
-    assert.deepEqual(copied, { shortcut: true, context: true, native: true, rawHasNewlines: true, cancelled: true, plain: true, separate: true });
-    if (process.env.WINCMUX_TEST_COPY_ONLY === "1") return { target: "tauri", copy: copied };
+    assert.deepEqual(copied, { shortcut: true, layoutCopy: true, layoutPaste: true, context: true, native: true, rawHasNewlines: true, cancelled: true, plain: true, separate: true, selectionButton: true, screenButton: true, dragHint: true });
+    for (const tracking of [false,true]) {
+      const point = await cdp.eval(`(async()=>{
+        const term=state.paneViews.get(state.selectedPaneId).term;
+        window.__dragWrite=window.wincmux.clipboardWrite;
+        window.__dragCopied=null;
+        window.wincmux.clipboardWrite=async text=>{window.__dragCopied=text};
+        await new Promise(resolve=>term.write((${tracking}?'\\x1b[?1000h':'')+'\\r\\nDRAG_COPY test',resolve));
+        term.scrollToBottom();
+        const rect=term.element.querySelector('.xterm-screen').getBoundingClientRect();
+        return {x:rect.left+1,end:rect.left+9*rect.width/term.cols,y:rect.top+(term.buffer.active.cursorY+0.5)*rect.height/term.rows};
+      })()`);
+      try {
+        await cdp.request('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',clickCount:1});
+        await cdp.request('Input.dispatchMouseEvent',{type:'mouseMoved',x:point.end,y:point.y,buttons:1});
+        await cdp.request('Input.dispatchMouseEvent',{type:'mouseReleased',x:point.end,y:point.y,button:'left',clickCount:1});
+        const at=await until(()=>cdp.eval(`(()=>{const btn=document.querySelector('.terminal-selection-copy:popover-open');if(!btn)return null;const r=btn.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};})()`),'drag offers copy; tracking='+tracking,2500);
+        assert.equal(await cdp.eval('window.__dragCopied'),null);
+        await cdp.eval(`(async()=>{const t=state.paneViews.get(state.selectedPaneId).term;t.clearSelection();await new Promise(r=>t.writeln('fresh output',r));})()`);
+        await cdp.request('Input.dispatchMouseEvent',{type:'mousePressed',...at,button:'left',clickCount:1});
+        await cdp.request('Input.dispatchMouseEvent',{type:'mouseReleased',...at,button:'left',clickCount:1});
+        assert.equal(await cdp.eval('window.__dragCopied'),'DRAG_COPY');
+      } finally {
+        await cdp.eval(`window.wincmux.clipboardWrite=window.__dragWrite;state.paneViews.get(state.selectedPaneId).term.write('\\x1b[?1000l')`);
+      }
+    }
+    if (process.env.WINCMUX_COPY_SCREENSHOT) {
+      const shot = await cdp.request("Page.captureScreenshot", { format:"png", fromSurface:true });
+      fs.writeFileSync(process.env.WINCMUX_COPY_SCREENSHOT, Buffer.from(shot.data,"base64"));
+    }
+    if (process.env.WINCMUX_TEST_COPY_ONLY === "1") {
+      for (const mode of ['ssh','docker']) {
+        const url=await cdp.eval(`new URL('./ssh-workspace.html?mode=${mode}',location.href).href`);
+        await cdp.request('Page.navigate',{url});
+        await until(()=>cdp.eval('!!window.wincmuxTerminalCopy && !!window.Terminal').catch(()=>false),mode+' renderer');
+        const p=await cdp.eval(`(async()=>{
+          const surface=document.createElement('div');
+          surface.style.cssText='position:fixed;inset:10px;z-index:2147483647;background:black';
+          document.body.append(surface);
+          const term=new Terminal({cols:40,rows:8,allowProposedApi:true});
+          term.open(surface);
+          window.wincmuxTerminalCopy.bindDragCopy(term,text=>{window.copiedText=text});
+          await new Promise(r=>term.write('REMOTE test',r));
+          window.refreshCopyFixture=async()=>{
+            surface.remove();
+            document.body.append(surface);
+            term.clearSelection();
+            await new Promise(r=>term.writeln('new remote output',r));
+          };
+          const box=surface.querySelector('.xterm-screen').getBoundingClientRect();
+          return {x:box.left+1,end:box.left+6*box.width/40,y:box.top+box.height/16};
+        })()`);
+        const mouse=(type,x,y,extra)=>cdp.request('Input.dispatchMouseEvent',{type,x,y,...extra});
+        await mouse('mousePressed',p.x,p.y,{button:'left',clickCount:1});
+        await mouse('mouseMoved',p.end,p.y,{buttons:1});
+        await mouse('mouseReleased',p.end,p.y,{button:'left',clickCount:1});
+        await until(()=>cdp.eval("!!document.querySelector('.terminal-selection-copy:popover-open')"),mode+' copy popup');
+        await cdp.eval('window.refreshCopyFixture()');
+        await sleep(1000);
+        const at=await cdp.eval(`(()=>{const r=document.querySelector('.terminal-selection-copy:popover-open')?.getBoundingClientRect();return r && {x:r.left+r.width/2,y:r.top+r.height/2};})()`);
+        assert.ok(at,mode+' popup survives refresh');
+        await mouse('mousePressed',at.x,at.y,{button:'left',clickCount:1});
+        await mouse('mouseReleased',at.x,at.y,{button:'left',clickCount:1});
+        assert.equal(await cdp.eval('window.copiedText'),'REMOTE');
+      }
+      return { target:'tauri', copy:copied, remoteCopy:['ssh','docker'] };
+    }
 
     const verifyAssets = await cdp.eval(`(async () => {
       const path=${JSON.stringify(temp)};

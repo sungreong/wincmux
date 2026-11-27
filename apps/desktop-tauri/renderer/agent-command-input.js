@@ -67,28 +67,43 @@
     parent.append(node);
     return node;
   }
-  function create(input, initialProvider = "codex", fixedProvider = false, compact = false) {
-    const panel = document.createElement("details");
+  function create(input, initialProvider = "codex", fixedProvider = false, compact = false, pickerHost = null) {
+    const panel = document.createElement(compact ? "div" : "details");
     panel.className = "agent-command-tools";
     if (compact) panel.classList.add("agent-command-compact");
-    control("summary", "명령·스킬", panel);
+    if (!compact) control("summary", "명령·스킬", panel);
     const row = control("div", "", panel);
     row.className = "agent-command-row";
-    const provider = control("select", "", row);
+    const provider = control(fixedProvider ? "span" : "select", "", row);
+    provider.className = "agent-command-provider";
     provider.setAttribute("aria-label", "명령 대상 에이전트");
     for (const [value, label] of [["claude", "Claude Code"], ["codex", "Codex"]]) {
-      const option = control("option", label, provider);
-      option.value = value;
+      if (!fixedProvider) control("option", label, provider).value = value;
     }
-    provider.hidden = fixedProvider;
     provider.value = providers.includes(initialProvider) ? initialProvider : "codex";
     const mode = control("select", "", row);
     mode.setAttribute("aria-label", "입력 처리 방식");
+    mode.hidden = compact;
+    const modeBar = document.createElement("div");
+    modeBar.className = "agent-input-modes";
+    modeBar.setAttribute("role", "group");
+    modeBar.setAttribute("aria-label", "입력 처리 방식");
     for (const [value, label] of [["message", "일반 메시지"], ["command", "CLI 명령·스킬"]]) {
       const option = control("option", label, mode);
       option.value = value;
+      if (compact) {
+        const choice = control("button", label, modeBar);
+        choice.type = "button";
+        choice.value = value;
+        choice.addEventListener("click", () => {
+          mode.value = value;
+          mode.dispatchEvent(new Event("change", { bubbles: true }));
+          input.focus();
+        });
+      }
     }
     const saved = control("select", "", row);
+    saved.hidden = compact;
     saved.setAttribute("aria-label", "명령·스킬 선택");
     const add = control("button", "명령·설명 저장", row);
     add.type = "button";
@@ -122,6 +137,80 @@
     source.className = "agent-command-source";
     const hint = control("p", "", panel);
     hint.className = "agent-command-hint";
+    let picker;
+    let renderPicker = () => {};
+    if (compact) {
+      const trigger = control("button", "명령·스킬 검색", row);
+      trigger.type = "button";
+      trigger.className = "agent-picker-trigger";
+      trigger.setAttribute("aria-haspopup", "dialog");
+      trigger.addEventListener("click", () => {
+        if (!active || mode.value !== "command") return;
+        if (!picker) {
+          picker = control("dialog", "", pickerHost || panel);
+          picker.className = "agent-command-picker";
+          picker.setAttribute("aria-label", "명령·스킬 검색");
+          const title = control("h2", "", picker);
+          const search = control("input", "", picker);
+          search.type = "search";
+          search.placeholder = translate("이름 또는 설명 검색");
+          search.setAttribute("aria-label", "이름 또는 설명 검색");
+          const results = control("div", "", picker);
+          results.className = "agent-picker-results";
+          const close = control("button", "닫기", picker);
+          close.type = "button";
+          close.addEventListener("click", () => picker.close());
+          picker.addEventListener("close", () => { if (!picker.open && active && input.isConnected) input.focus(); });
+          renderPicker = () => {
+            results.replaceChildren();
+            const query = search.value.trim().toLowerCase();
+            let number = 0;
+            for (const group of saved.querySelectorAll("optgroup")) {
+              let section;
+              for (const option of group.children) {
+                const index = String(++number);
+                const command = option.value;
+                const detail = option.textContent.slice(command.length).replace(/^ · /, "");
+                if (/^\d+$/.test(query) ? index !== query : !option.textContent.toLowerCase().includes(query)) continue;
+                if (!section) {
+                  section = control("section", "", results);
+                  control("h3", group.label, section);
+                }
+                const target = control("button", "", section);
+                target.type = "button";
+                control("small", index, target);
+                control("strong", command, target);
+                if (detail) control("span", detail, target);
+                target.addEventListener("click", () => {
+                  picker.close();
+                  saved.value = command;
+                  saved.dispatchEvent(new Event("change", { bubbles: true }));
+                });
+              }
+            }
+            if (!results.childElementCount) results.textContent = translate("검색 결과가 없습니다.");
+          };
+          search.addEventListener("input", renderPicker);
+          search.addEventListener("keydown", event => {
+            if (event.key === "Enter" && !event.isComposing && event.keyCode !== 229) {
+              event.preventDefault();
+              results.querySelector("button")?.click();
+            }
+          });
+          picker.addEventListener("keydown", event => event.stopPropagation());
+          picker.addEventListener("cancel", event => { event.preventDefault(); picker.close(); });
+        }
+        picker.querySelector("h2").textContent = provider.textContent + " · " + translate("명령·스킬 검색");
+        const search = picker.querySelector("input");
+        search.value = "";
+        workspaceSkills = [];
+        refresh();
+        picker.showModal();
+        renderPicker();
+        search.focus();
+        void reloadSkills();
+      });
+    }
     const feedback = control("p", "", panel);
     feedback.className = "agent-command-feedback";
     feedback.setAttribute("role", "status");
@@ -156,9 +245,20 @@
         || data.items.find(item => item.command === command)
         || examples[provider.value].find(item => item.command === command);
     }
+    let displayedMode;
     function refresh(selected = "") {
       const data = read()[provider.value];
       mode.value = data.mode;
+      if (fixedProvider) provider.textContent = provider.value === "claude" ? "Claude Code" : "Codex";
+      if (compact) {
+        panel.hidden = !active || mode.value !== "command";
+        if (panel.hidden && picker?.open) picker.close();
+      }
+      for (const choice of modeBar.children) choice.setAttribute("aria-pressed", String(choice.value === mode.value));
+      if (displayedMode !== mode.value) {
+        displayedMode = mode.value;
+        panel.dispatchEvent(new Event("agentmodechange"));
+      }
       saved.replaceChildren();
       const placeholder = control("option", "명령 선택 또는 직접 입력…", saved);
       placeholder.value = "";
@@ -193,6 +293,7 @@
       hint.textContent = mode.value === "command"
         ? "명령은 대기열 없이 준비된 CLI에 직접 보냅니다. /명령 또는 $스킬을 입력하세요."
         : "일반 메시지는 /명령이나 $스킬로 시작해도 CLI 명령으로 실행하지 않습니다.";
+      if (picker?.open) renderPicker();
     }
     const report = text => { feedback.textContent = text; feedback.hidden = !text; };
     provider.addEventListener("change", () => { report(""); description.value = ""; workspaceSkills = []; refresh(); void reloadSkills(); });
@@ -251,17 +352,31 @@
     input.addEventListener("input", () => { if (!feedback.hidden) report(""); });
     refresh();
     return {
-      panel,
+      panel, modeBar,
       mode: () => active ? mode.value : "message",
       provider: () => provider.value,
       reload: () => refresh(saved.value),
       reloadSkills,
       setActive(value) {
         active = Boolean(value);
-        panel.hidden = !active;
+        panel.hidden = !active || (compact && mode.value !== "command");
+        if (!active && picker?.open) picker.close();
+        modeBar.hidden = !active;
         if (!active) panel.open = false;
       },
-      setProvider(value) { if (providers.includes(value) && provider.value !== value) { provider.value = value; workspaceSkills = []; refresh(); if (panel.open) void reloadSkills(); } },
+      resetTarget() {
+        ++skillRequest;
+        if (picker?.open) picker.close();
+        workspaceSkills = [];
+        scope.textContent = "";
+        refresh();
+      },
+      setProvider(value) {
+        if (!providers.includes(value) || provider.value === value) return;
+        provider.value = value;
+        this.resetTarget();
+        if (panel.open) void reloadSkills();
+      },
       prepare(text) {
         if (active && mode.value === "command") {
           const command = text.trim();
